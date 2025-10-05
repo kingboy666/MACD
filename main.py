@@ -870,6 +870,16 @@ def execute_trade(symbol, signal, signal_strength):
                 'tp_order_id': tp_order_id
             }
             
+            # 设置移动止盈跟踪
+            trailing_stops[symbol] = {
+                'active': False,
+                'activation_price': tp if signal == "做多" else sl,
+                'current_trigger': None,
+                'side': 'long' if signal == "做多" else 'short',
+                'size': actual_size,
+                'last_check': time.time()
+            }
+            
             # 更新交易统计
             trade_stats['total_trades'] += 1
             trade_stats['daily_trades'] += 1
@@ -890,78 +900,122 @@ def execute_trade(symbol, signal, signal_strength):
 # ============================================
 # 移动止盈止损功能
 # ============================================
-def update_trailing_stop(symbol, position, current_price):
-    """更新移动止损"""
+def check_trailing_stop(symbol, current_price):
+    """检查并更新移动止盈"""
+    if symbol not in trailing_stops or symbol not in position_tracker['positions']:
+        return
+    
+    ts = trailing_stops[symbol]
+    position = position_tracker['positions'][symbol]
+    
+    # 检查是否需要更新
+    if time.time() - ts.get('last_check', 0) < TRAILING_STOP_CHECK_INTERVAL:
+        return
+    
+    ts['last_check'] = time.time()
+    
     try:
-        entry_price = position['entry_price']
-        side = position['side']
+        # 确保键名一致性
+        if 'activated' in ts and 'active' not in ts:
+            ts['active'] = ts['activated']
+        elif 'active' not in ts:
+            ts['active'] = False
+            
+        # 多头持仓
+        if ts['side'] == 'long':
+            # 检查是否达到激活条件
+            if not ts['active'] and current_price >= position['entry_price'] * (1 + TRAILING_STOP_ACTIVATION_PERCENTAGE):
+                ts['active'] = True
+                ts['current_trigger'] = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                log_message("INFO", f"{symbol} 多头移动止盈已激活，触发价: {ts['current_trigger']:.4f}")
+                
+                # 更新交易所止盈订单
+                update_take_profit_order(symbol, position, ts['current_trigger'])
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 如果价格创新高，更新触发价
+                if current_price > (ts['current_trigger'] / (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)):
+                    new_trigger = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    if new_trigger > ts['current_trigger']:
+                        old_trigger = ts['current_trigger']
+                        ts['current_trigger'] = new_trigger
+                        log_message("INFO", f"{symbol} 多头移动止盈更新，新触发价: {ts['current_trigger']:.4f}")
+                        
+                        # 更新交易所止盈订单
+                        update_take_profit_order(symbol, position, new_trigger)
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price <= ts['current_trigger']:
+                    log_message("TRADE", f"{symbol} 触发多头移动止盈，当前价: {current_price:.4f}, 触发价: {ts['current_trigger']:.4f}")
+                    close_position(symbol, "移动止盈触发")
         
-        # 初始化移动止损跟踪
-        if symbol not in trailing_stops:
-            trailing_stops[symbol] = {
-                'highest_price': current_price if side == 'long' else current_price,
-                'lowest_price': current_price if side == 'short' else current_price,
-                'is_activated': False,
-                'trailing_stop_price': None
+        # 空头持仓
+        else:
+            # 检查是否达到激活条件
+            if not ts['active'] and current_price <= position['entry_price'] * (1 - TRAILING_STOP_ACTIVATION_PERCENTAGE):
+                ts['active'] = True
+                ts['current_trigger'] = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                log_message("INFO", f"{symbol} 空头移动止盈已激活，触发价: {ts['current_trigger']:.4f}")
+                
+                # 更新交易所止盈订单
+                update_take_profit_order(symbol, position, ts['current_trigger'])
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 如果价格创新低，更新触发价
+                if current_price < (ts['current_trigger'] / (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)):
+                    new_trigger = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    if new_trigger < ts['current_trigger']:
+                        old_trigger = ts['current_trigger']
+                        ts['current_trigger'] = new_trigger
+                        log_message("INFO", f"{symbol} 空头移动止盈更新，新触发价: {ts['current_trigger']:.4f}")
+                        
+                        # 更新交易所止盈订单
+                        update_take_profit_order(symbol, position, new_trigger)
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price >= ts['current_trigger']:
+                    log_message("TRADE", f"{symbol} 触发空头移动止盈，当前价: {current_price:.4f}, 触发价: {ts['current_trigger']:.4f}")
+                    close_position(symbol, "移动止盈触发")
+    
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 检查移动止盈失败: {str(e)}")
+
+def update_take_profit_order(symbol, position, new_tp_price):
+    """更新交易所止盈订单"""
+    try:
+        # 取消旧的止盈订单
+        if position.get('tp_order_id'):
+            try:
+                exchange.cancel_order(position['tp_order_id'], symbol)
+                log_message("INFO", f"{symbol} 旧止盈订单已取消")
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 取消旧止盈订单失败: {e}")
+        
+        # 创建新的移动止盈订单
+        side = 'sell' if position['side'] == 'long' else 'buy'
+        pos_side = position['side']
+        
+        tp_order = exchange.create_order(
+            symbol=symbol,
+            type='take_profit',
+            side=side,
+            amount=position['size'],
+            price=new_tp_price,
+            params={
+                'takeProfitPrice': new_tp_price,
+                'posSide': pos_side,
+                'reduceOnly': True
             }
+        )
         
-        trailing_data = trailing_stops[symbol]
-        
-        if side == 'long':
-            # 做多持仓的移动止损
-            # 更新最高价
-            if current_price > trailing_data['highest_price']:
-                trailing_data['highest_price'] = current_price
-            
-            # 检查是否激活移动止损（盈利超过1%）
-            profit_percentage = (current_price - entry_price) / entry_price
-            if profit_percentage >= TRAILING_STOP_ACTIVATION_PERCENTAGE:
-                trailing_data['is_activated'] = True
-                
-                # 计算移动止损价格（从最高点回调0.5%）
-                new_stop_price = trailing_data['highest_price'] * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
-                
-                # 更新移动止损价格（只能向上移动）
-                if trailing_data['trailing_stop_price'] is None or new_stop_price > trailing_data['trailing_stop_price']:
-                    trailing_data['trailing_stop_price'] = new_stop_price
-                    log_message("INFO", f"{symbol} 更新移动止损价格: {new_stop_price:.6f}")
-                
-                # 检查是否触发移动止损
-                if current_price <= trailing_data['trailing_stop_price']:
-                    log_message("SIGNAL", f"{symbol} 触发移动止损: 当前价格 {current_price:.6f} <= 止损价格 {trailing_data['trailing_stop_price']:.6f}")
-                    close_position(symbol, reason="移动止损")
-                    return True
-        
-        else:  # 做空持仓
-            # 做空持仓的移动止损
-            # 更新最低价
-            if current_price < trailing_data['lowest_price']:
-                trailing_data['lowest_price'] = current_price
-            
-            # 检查是否激活移动止损（盈利超过1%）
-            profit_percentage = (entry_price - current_price) / entry_price
-            if profit_percentage >= TRAILING_STOP_ACTIVATION_PERCENTAGE:
-                trailing_data['is_activated'] = True
-                
-                # 计算移动止损价格（从最低点回调0.5%）
-                new_stop_price = trailing_data['lowest_price'] * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
-                
-                # 更新移动止损价格（只能向下移动）
-                if trailing_data['trailing_stop_price'] is None or new_stop_price < trailing_data['trailing_stop_price']:
-                    trailing_data['trailing_stop_price'] = new_stop_price
-                    log_message("INFO", f"{symbol} 更新移动止损价格: {new_stop_price:.6f}")
-                
-                # 检查是否触发移动止损
-                if current_price >= trailing_data['trailing_stop_price']:
-                    log_message("SIGNAL", f"{symbol} 触发移动止损: 当前价格 {current_price:.6f} >= 止损价格 {trailing_data['trailing_stop_price']:.6f}")
-                    close_position(symbol, reason="移动止损")
-                    return True
-        
-        return False
+        # 更新止盈订单ID
+        position_tracker['positions'][symbol]['tp_order_id'] = tp_order['id']
+        log_message("SUCCESS", f"{symbol} 移动止盈订单已更新，新价格: {new_tp_price:.4f}，订单ID: {tp_order['id']}")
         
     except Exception as e:
-        log_message("ERROR", f"{symbol} 移动止损更新失败: {str(e)}")
-        return False
+        log_message("ERROR", f"{symbol} 更新移动止盈订单失败: {str(e)}")
 
 # ============================================
 # 为已存在的持仓设置止损止盈条件单
@@ -1094,9 +1148,8 @@ def update_positions():
                         close_position(symbol, reason="固定止盈")
                         continue
                 
-                # 2. 检查移动止损
-                if update_trailing_stop(symbol, position, current_price):
-                    continue  # 如果触发移动止损，跳过后续检查
+                # 2. 检查移动止盈
+                check_trailing_stop(symbol, current_price)
                 
                 # 检查MACD金叉/死叉平仓条件
                 ohlcv = get_klines(symbol, '30m', limit=100)
@@ -1205,9 +1258,15 @@ def close_position(symbol, reason="手动平仓"):
         
         if final_pnl > 0:
             trade_stats['winning_trades'] += 1
+            if 'total_profit' not in trade_stats:
+                trade_stats['total_profit'] = 0
+            trade_stats['total_profit'] += final_pnl
             log_message("SUCCESS", f"{symbol} 盈利平仓: +{final_pnl:.2f} USDT ({reason})")
         else:
             trade_stats['losing_trades'] += 1
+            if 'total_loss' not in trade_stats:
+                trade_stats['total_loss'] = 0
+            trade_stats['total_loss'] += abs(final_pnl)
             log_message("WARNING", f"{symbol} 亏损平仓: {final_pnl:.2f} USDT ({reason})")
         
         # 清理移动止损数据
