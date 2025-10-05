@@ -1,6 +1,47 @@
 import ccxt
 import pandas as pd
-import pandas_ta as ta
+# import pandas_ta as ta  # 暂时注释掉，使用自定义指标计算
+
+# 自定义技术指标计算函数
+def calculate_macd(close, fast=6, slow=32, signal=9):
+    """计算MACD指标"""
+    exp1 = close.ewm(span=fast).mean()
+    exp2 = close.ewm(span=slow).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal).mean()
+    histogram = macd_line - signal_line
+    return macd_line, signal_line, histogram
+
+def calculate_atr(high, low, close, period=14):
+    """计算ATR指标"""
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    atr = tr.rolling(window=period).mean()
+    return atr
+
+def calculate_adx(high, low, close, period=14):
+    """计算ADX指标"""
+    plus_dm = high.diff()
+    minus_dm = low.diff()
+    plus_dm[plus_dm < 0] = 0
+    minus_dm[minus_dm > 0] = 0
+    minus_dm = minus_dm.abs()
+    
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    atr = tr.rolling(window=period).mean()
+    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
+    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
+    
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.rolling(window=period).mean()
+    
+    return adx
 import traceback
 import numpy as np
 from datetime import datetime, timedelta
@@ -439,33 +480,24 @@ def process_klines(ohlcv):
 
         # 计算MACD指标
         try:
-            macd = ta.macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-            if macd is not None:
-                df['MACD'] = macd['MACD_' + str(MACD_FAST) + '_' + str(MACD_SLOW) + '_' + str(MACD_SIGNAL)]
-                df['MACD_SIGNAL'] = macd['MACDs_' + str(MACD_FAST) + '_' + str(MACD_SLOW) + '_' + str(MACD_SIGNAL)]
-                df['MACD_HIST'] = macd['MACDh_' + str(MACD_FAST) + '_' + str(MACD_SLOW) + '_' + str(MACD_SIGNAL)]
-            else:
-                log_message("ERROR", "MACD计算返回None")
-                return None
+            macd_line, signal_line, histogram = calculate_macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+            df['MACD'] = macd_line
+            df['MACD_SIGNAL'] = signal_line
+            df['MACD_HIST'] = histogram
         except Exception as macd_e:
             log_message("ERROR", f"MACD计算失败: {str(macd_e)}")
             return None
         
         # 计算ATR（仅用于止盈止损）
         try:
-            df['ATR_14'] = ta.atr(high=df['high'], low=df['low'], close=df['close'], length=ATR_PERIOD)
+            df['ATR_14'] = calculate_atr(df['high'], df['low'], df['close'], period=ATR_PERIOD)
         except Exception as atr_e:
             log_message("WARNING", f"ATR计算失败: {str(atr_e)}")
             df['ATR_14'] = None
         
         # 计算ADX（用于趋势/震荡判断）
         try:
-            adx = ta.adx(high=df['high'], low=df['low'], close=df['close'], length=ADX_PERIOD)
-            if adx is not None:
-                df['ADX'] = adx[f'ADX_{ADX_PERIOD}']
-            else:
-                log_message("WARNING", "ADX计算返回None，使用默认值")
-                df['ADX'] = 25  # 使用默认值
+            df['ADX'] = calculate_adx(df['high'], df['low'], df['close'], period=ADX_PERIOD)
         except Exception as adx_e:
             log_message("WARNING", f"ADX计算失败: {str(adx_e)}，使用默认值")
             df['ADX'] = 25  # 使用默认值
@@ -819,9 +851,9 @@ def update_positions():
                 if ohlcv:
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
                     # 计算MACD指标
-                    macd_result = ta.macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-                    df['MACD'] = macd_result['MACD_' + str(MACD_FAST) + '_' + str(MACD_SLOW) + '_' + str(MACD_SIGNAL)]
-                    df['MACD_SIGNAL'] = macd_result['MACDs_' + str(MACD_FAST) + '_' + str(MACD_SLOW) + '_' + str(MACD_SIGNAL)]
+                    macd_line, signal_line, histogram = calculate_macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+                    df['MACD'] = macd_line
+                    df['MACD_SIGNAL'] = signal_line
                     
                     # 获取当前和前一个MACD值
                     current_macd = df['MACD'].iloc[-1]
