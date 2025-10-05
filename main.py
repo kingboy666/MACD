@@ -2,6 +2,29 @@ import ccxt
 import pandas as pd
 # import pandas_ta as ta  # 暂时注释掉，使用自定义指标计算
 
+# === 环境变量诊断（开头添加） ===
+print("=== 启动时环境变量诊断 ===")
+import os
+okx_vars = ['OKX_API_KEY', 'OKX_SECRET_KEY', 'OKX_PASSPHRASE']
+for var in okx_vars:
+    value = os.getenv(var)
+    if value:
+        print(f"✅ {var}: 已设置 (长度: {len(value)})")
+    else:
+        print(f"❌ {var}: 未设置或为空")
+
+# 检查所有环境变量中是否有 OKX 相关的
+all_vars = list(os.environ.keys())
+okx_related = [var for var in all_vars if 'OKX' in var.upper()]
+if okx_related:
+    print(f"找到 OKX 相关变量: {okx_related}")
+else:
+    print("未找到任何 OKX 相关环境变量")
+
+print(f"总环境变量数量: {len(all_vars)}")
+print("=== 诊断完成，继续启动程序 ===
+")
+
 # 自定义技术指标计算函数
 def calculate_macd(close, fast=6, slow=32, signal=9):
     """计算MACD指标"""
