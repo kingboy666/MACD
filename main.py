@@ -99,8 +99,7 @@ def initialize_exchange():
             print("  - OKX_API_KEY")
             print("  - OKX_SECRET_KEY")
             print("  - OKX_PASSPHRASE")
-            print("
-在 Railway 中设置环境变量的步骤:")
+            print("在 Railway 中设置环境变量的步骤:")
             print("1. 进入你的 Railway 项目")
             print("2. 点击 'Variables' 标签")
             print("3. 添加以下三个变量:")
