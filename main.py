@@ -58,11 +58,19 @@ load_dotenv()
 # ============================================
 def get_okx_config():
     """从环境变量获取OKX API配置"""
-    return {
+    config = {
         'api_key': os.getenv('OKX_API_KEY'),
         'secret_key': os.getenv('OKX_SECRET_KEY'),
         'passphrase': os.getenv('OKX_PASSPHRASE')
     }
+    
+    # 调试信息：打印环境变量状态（不显示实际值）
+    print(f"环境变量检查:")
+    print(f"  OKX_API_KEY: {'已设置' if config['api_key'] else '未设置'}")
+    print(f"  OKX_SECRET_KEY: {'已设置' if config['secret_key'] else '未设置'}")
+    print(f"  OKX_PASSPHRASE: {'已设置' if config['passphrase'] else '未设置'}")
+    
+    return config
 
 # ============================================
 # 交易所初始化 (OKX)
@@ -70,6 +78,19 @@ def get_okx_config():
 def initialize_exchange():
     """初始化OKX交易所连接"""
     try:
+        # 先检查 .env 文件是否存在
+        env_file_path = '.env'
+        if os.path.exists(env_file_path):
+            print(f"✅ 找到 .env 文件: {env_file_path}")
+        else:
+            print(f"⚠️  未找到 .env 文件: {env_file_path}")
+        
+        # 打印所有环境变量（仅用于调试）
+        print("所有环境变量列表:")
+        for key in os.environ:
+            if 'OKX' in key.upper():
+                print(f"  {key}: {'已设置' if os.environ[key] else '空值'}")
+        
         config = get_okx_config()
         
         if not all([config['api_key'], config['secret_key'], config['passphrase']]):
@@ -78,6 +99,15 @@ def initialize_exchange():
             print("  - OKX_API_KEY")
             print("  - OKX_SECRET_KEY")
             print("  - OKX_PASSPHRASE")
+            print("
+在 Railway 中设置环境变量的步骤:")
+            print("1. 进入你的 Railway 项目")
+            print("2. 点击 'Variables' 标签")
+            print("3. 添加以下三个变量:")
+            print("   - Name: OKX_API_KEY, Value: 你的API密钥")
+            print("   - Name: OKX_SECRET_KEY, Value: 你的密钥")
+            print("   - Name: OKX_PASSPHRASE, Value: 你的密码短语")
+            print("4. 点击 'Deploy' 重新部署")
             raise ValueError("请先设置OKX API配置")
         
         exchange = ccxt.okx({
