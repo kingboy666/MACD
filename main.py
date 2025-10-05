@@ -619,41 +619,43 @@ def generate_signal(symbol):
                 log_message("DEBUG", f"{symbol} ATR波动率过高 ({atr_percentage:.4f})，市场过于激烈")
                 return None, 0
         
-        # === 核心信号：MACD金叉/死叉 + K线确认 ===
+        # === 核心信号：MACD金叉/死叉 + K线收盘确认 ===
         signal = None
         strength = 0
         
-        # 30分钟K线方向判断
+        # 当前K线（金叉/死叉发生的这根K线）的开盘和收盘价
         current_open = df['open'].iloc[-1]
         current_close = df['close'].iloc[-1]
-        is_bullish_candle = current_close > current_open  # 阳线
-        is_bearish_candle = current_close < current_open  # 阴线
+        is_current_bullish = current_close > current_open  # 当前K线是阳线
+        is_current_bearish = current_close < current_open  # 当前K线是阴线
         
-        # MACD金叉 - 做多信号（仅需K线确认）
+        log_message("DEBUG", f"{symbol} 当前K线: 开盘{current_open:.6f}, 收盘{current_close:.6f}, {'阳线' if is_current_bullish else '阴线' if is_current_bearish else '十字星'}")
+        
+        # MACD金叉 - 做多信号（需要金叉这根K线收阳线确认）
         if prev_macd <= prev_signal and current_macd > current_signal:
-            # K线确认：必须是阳线
-            if is_bullish_candle:
+            # K线确认：金叉这根K线必须收阳线
+            if is_current_bullish:
                 signal = "做多"
                 # 计算信号强度
                 macd_diff = current_macd - current_signal
                 adx_bonus = 10 if is_trending else 0
                 strength = min(100, int(60 + abs(macd_diff) * 1000 + adx_bonus))
-                log_message("SIGNAL", f"{symbol} MACD金叉+阳线确认，ADX={adx_value:.2f}，生成做多信号，强度: {strength}")
+                log_message("SIGNAL", f"{symbol} MACD金叉+当前K线收阳确认，ADX={adx_value:.2f}，生成做多信号，强度: {strength}")
             else:
-                log_message("DEBUG", f"{symbol} MACD金叉但当前K线收阴线，等待阳线确认")
+                log_message("DEBUG", f"{symbol} MACD金叉但当前K线收阴线，等待阳线收盘确认")
         
-        # MACD死叉 - 做空信号（仅需K线确认）
+        # MACD死叉 - 做空信号（需要死叉这根K线收阴线确认）
         elif prev_macd >= prev_signal and current_macd < current_signal:
-            # K线确认：必须是阴线
-            if is_bearish_candle:
+            # K线确认：死叉这根K线必须收阴线
+            if is_current_bearish:
                 signal = "做空"
                 # 计算信号强度
                 macd_diff = current_signal - current_macd
                 adx_bonus = 10 if is_trending else 0
                 strength = min(100, int(60 + abs(macd_diff) * 1000 + adx_bonus))
-                log_message("SIGNAL", f"{symbol} MACD死叉+阴线确认，ADX={adx_value:.2f}，生成做空信号，强度: {strength}")
+                log_message("SIGNAL", f"{symbol} MACD死叉+当前K线收阴确认，ADX={adx_value:.2f}，生成做空信号，强度: {strength}")
             else:
-                log_message("DEBUG", f"{symbol} MACD死叉但当前K线收阳线，等待阴线确认")
+                log_message("DEBUG", f"{symbol} MACD死叉但当前K线收阳线，等待阴线收盘确认")
         
         return signal, strength
         
@@ -1166,31 +1168,33 @@ def update_positions():
                     prev_macd = df['MACD'].iloc[-2]
                     prev_signal = df['MACD_SIGNAL'].iloc[-2]
                     
-                    # K线方向判断
+                    # K线方向判断（MACD反转的这根K线收盘确认）
                     current_open = df['open'].iloc[-1]
                     current_close = df['close'].iloc[-1]
-                    is_bullish_candle = current_close > current_open  # 阳线
-                    is_bearish_candle = current_close < current_open  # 阴线
+                    is_current_bullish = current_close > current_open  # 当前K线收阳线
+                    is_current_bearish = current_close < current_open  # 当前K线收阴线
                     
-                    # 做多持仓，检查死叉+阴线平仓条件
+                    log_message("DEBUG", f"{symbol} 平仓检查 - 当前K线: 开盘{current_open:.6f}, 收盘{current_close:.6f}, {'阳线' if is_current_bullish else '阴线' if is_current_bearish else '十字星'}")
+                    
+                    # 做多持仓，检查死叉+当前K线收阴线平仓条件
                     if (position['side'] == 'long' and 
                         prev_macd >= prev_signal and current_macd < current_signal):
                         
-                        if is_bearish_candle:
-                            log_message("SIGNAL", f"{symbol} MACD死叉+阴线确认，平仓做多持仓 (盈亏:{pnl:.2f})")
+                        if is_current_bearish:
+                            log_message("SIGNAL", f"{symbol} MACD死叉+当前K线收阴确认，平仓做多持仓 (盈亏:{pnl:.2f})")
                             close_position(symbol, reason="MACD死叉+阴线平仓")
                         else:
-                            log_message("DEBUG", f"{symbol} MACD死叉但当前K线收阳线，等待阴线确认")
+                            log_message("DEBUG", f"{symbol} MACD死叉但当前K线收阳线，等待阴线收盘确认")
                     
-                    # 做空持仓，检查金叉+阳线平仓条件
+                    # 做空持仓，检查金叉+当前K线收阳线平仓条件
                     elif (position['side'] == 'short' and 
                           prev_macd <= prev_signal and current_macd > current_signal):
                         
-                        if is_bullish_candle:
-                            log_message("SIGNAL", f"{symbol} MACD金叉+阳线确认，平仓做空持仓 (盈亏:{pnl:.2f})")
+                        if is_current_bullish:
+                            log_message("SIGNAL", f"{symbol} MACD金叉+当前K线收阳确认，平仓做空持仓 (盈亏:{pnl:.2f})")
                             close_position(symbol, reason="MACD金叉+阳线平仓")
                         else:
-                            log_message("DEBUG", f"{symbol} MACD金叉但当前K线收阴线，等待阳线确认")
+                            log_message("DEBUG", f"{symbol} MACD金叉但当前K线收阴线，等待阳线收盘确认")
                 
             except Exception as e:
                 log_message("ERROR", f"{symbol} 更新持仓状态失败: {str(e)}")
