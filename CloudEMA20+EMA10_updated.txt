@@ -1,0 +1,1096 @@
+!pip install pandas_ta ccxt numpy pandas tenacity -i https://pypi.tuna.tsinghua.edu.cn/simple --quiet
+
+import ccxt
+import pandas as pd
+import pandas_ta as ta
+import traceback
+from IPython.display import clear_output, HTML, display, Javascript
+import numpy as np
+from datetime import datetime, timedelta
+import time
+import json
+
+# ============================================
+# 全局配置常量
+# ============================================
+MAX_LEVERAGE_BTC_ETH = 50
+MAX_LEVERAGE_OTHERS = 30
+DEFAULT_LEVERAGE = 20
+RISK_PER_TRADE = 0.1
+MIN_TRADE_AMOUNT_USD = 1
+MAX_OPEN_POSITIONS = 5
+COOLDOWN_PERIOD = 5 * 60
+ATR_PERIOD = 14
+MA_10_PERIOD = 10
+MA_20_PERIOD = 20
+MIN_ATR_PERCENTAGE = 0.005
+MAX_ATR_PERCENTAGE = 0.10
+MAX_DAILY_TRADES = 20
+MAX_DAILY_LOSS = 0.05
+
+# 止损止盈配置
+FIXED_SL_PERCENTAGE = 0.02
+FIXED_TP_PERCENTAGE = 0.04
+MAX_SL_PERCENTAGE = 0.03
+
+# 移动止盈止损配置
+TRAILING_STOP_ACTIVATION_PERCENTAGE = 0.01  # 价格移动1%后激活移动止损
+TRAILING_STOP_CALLBACK_PERCENTAGE = 0.005   # 回调0.5%触发止损
+TRAILING_STOP_CHECK_INTERVAL = 60           # 每60秒检查一次移动止损条件
+
+# 服务器状态检测配置
+SERVER_CHECK_INTERVAL = 300                 # 每5分钟检查一次服务器状态
+MAX_SERVER_CHECK_FAILURES = 3               # 连续失败3次判定为掉线
+
+# ADX指标配置
+ADX_PERIOD = 14                            # ADX计算周期
+ADX_THRESHOLD_LOW = 20                     # ADX低于此值视为震荡市场
+ADX_THRESHOLD_HIGH = 25                    # ADX高于此值视为趋势市场
+
+# ============================================
+# 全局变量
+# ============================================
+# 交易统计
+trade_stats = {
+    'initial_balance': 0,
+    'current_balance': 0,
+    'total_trades': 0,
+    'winning_trades': 0,
+    'losing_trades': 0,
+    'total_profit_loss': 0,
+    'daily_trades': 0,
+    'daily_pnl': 0,
+    'last_reset_date': datetime.now().strftime('%Y-%m-%d'),
+    'daily_reset_time': datetime.now().replace(hour=0, minute=0, second=0, microsecond=0)
+}
+
+# 持仓跟踪器
+position_tracker = {
+    'positions': {},
+    'last_update': datetime.now()
+}
+
+# 最新信号
+latest_signals = {}
+
+# 冷却期
+cooldown_tracker = {}
+
+# 服务器状态跟踪
+server_status = {
+    'is_online': True,
+    'check_failures': 0,
+    'last_check_time': time.time()
+}
+
+# 移动止损跟踪
+trailing_stops = {}
+
+# ============================================
+# 日常重置函数
+# ============================================
+def check_daily_reset():
+    """检查是否需要重置每日统计"""
+    now = datetime.now()
+    if now.date() > trade_stats['daily_reset_time'].date():
+        log_message("INFO", f"每日统计重置 - 昨日交易: {trade_stats['daily_trades']}, 昨日盈亏: {trade_stats['daily_pnl']:.2f} USDT")
+        
+# ============================================
+# 日志功能
+# ============================================
+def log_message(level, message):
+    """增强的日志功能"""
+    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    color_map = {
+        'SUCCESS': '\033[92m',
+        'ERROR': '\033[91m',
+        'WARNING': '\033[93m',
+        'SIGNAL': '\033[96m',
+        'TRADE': '\033[95m',
+        'INFO': '\033[94m',
+        'DEBUG': '\033[90m'
+    }
+    reset = '\033[0m'
+    color = color_map.get(level.upper(), '')
+    print(f"{color}[{timestamp}] [{level.upper()}] {message}{reset}")
+
+# ============================================
+# 防掉线功能
+# ============================================
+def prevent_colab_timeout():
+    """防止Colab超时断开连接"""
+    try:
+        display(Javascript('''
+            function ClickConnect(){
+                console.log("Clicking connect button...");
+                document.querySelector("colab-connect-button").click()
+            }
+            setInterval(ClickConnect, 60000);
+        '''))
+        log_message("INFO", "已启动防超时功能")
+    except Exception as e:
+        log_message("WARNING", f"启动防超时功能失败: {str(e)}")
+
+# ============================================
+# API连接测试
+# ============================================
+def test_api_connection():
+    """测试交易所API连接"""
+    try:
+        exchange.fetch_balance()
+        log_message("SUCCESS", "API连接测试成功")
+        return True
+    except Exception as e:
+        log_message("ERROR", f"API连接测试失败: {str(e)}")
+        return False
+
+# ============================================
+# 获取K线数据
+# ============================================
+def get_klines(symbol, timeframe, limit=100):
+    """获取K线数据，带缓存机制"""
+    try:
+        cache_key = f"{symbol}_{timeframe}"
+        if cache_key in klines_cache:
+            cached_data, fetch_time = klines_cache[cache_key]
+            cache_duration = 60 if timeframe == '1m' else 3600 if timeframe == '1h' else 300
+            if (time.time() - fetch_time) < cache_duration:
+                return cached_data
+
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        klines_cache[cache_key] = (ohlcv, time.time())
+        return ohlcv
+        
+    except Exception as e:
+        log_message("ERROR", f"获取 {symbol} {timeframe} K线数据失败: {str(e)}")
+        return None
+
+# ============================================
+# 获取账户信息
+# ============================================
+def get_account_info():
+    """获取账户信息"""
+    try:
+        balance = exchange.fetch_balance()
+        usdt_balance = balance.get('USDT', {})
+        free_balance = usdt_balance.get('free', 0)
+        used_balance = usdt_balance.get('used', 0)
+        total_balance = usdt_balance.get('total', 0)
+        
+        unrealized_pnl = 0
+        try:
+            positions = exchange.fetch_positions()
+            for position in positions:
+                if position['contracts'] > 0:
+                    unrealized_pnl += float(position.get('unrealizedPnl', 0))
+        except Exception as e:
+            log_message("WARNING", f"获取未实现盈亏失败: {str(e)}")
+        
+        account_info = {
+            'free_balance': free_balance,
+            'used_balance': used_balance,
+            'total_balance': total_balance,
+            'unrealized_pnl': unrealized_pnl,
+            'available_balance': free_balance,
+            'equity': total_balance + unrealized_pnl
+        }
+        
+        return account_info
+        
+    except Exception as e:
+        log_message("ERROR", f"获取账户信息失败: {str(e)}")
+        return None
+
+# ============================================
+# 计算仓位大小
+# ============================================
+def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
+    """计算仓位大小"""
+    try:
+        # 获取账户总额 - 直接使用总额而不是可用余额
+        total_balance = account_info.get('total_balance', 0)
+        if total_balance <= 0:
+            log_message("ERROR", f"账户总额为0，无法计算仓位大小")
+            return 0
+        
+        # 使用账户总额的80%来下单，无论账户余额多少
+        # 使用总额的80%作为实际可用资金
+        usable_balance = total_balance * 0.8
+        log_message("INFO", f"账户总额: {total_balance:.4f} USDT, 可用于交易的资金(80%): {usable_balance:.4f} USDT")
+        
+        # 计算用于此次交易的资金量 - 直接使用80%的总额
+        position_value = usable_balance
+        log_message("INFO", f"本次交易使用资金: {position_value:.4f} USDT (账户总额的80%)")
+        
+        if stop_loss <= 0 or price <= 0:
+            log_message("ERROR", f"价格或止损价格无效")
+            return 0
+        
+        # 计算仓位大小：资金量除以价格
+        position_size = position_value / price
+        
+        # 应用杠杆 - 确保使用足够的杠杆来放大仓位
+        leverage = DEFAULT_LEVERAGE
+        position_size = position_size * leverage
+        log_message("INFO", f"应用杠杆后的仓位大小: {position_size} (杠杆: {leverage}x)")
+        
+        # 确保下单金额足够大
+        log_message("INFO", f"下单金额检查: {position_size * price:.4f} USDT")
+        
+        # 检查最小交易量要求
+        # 获取交易对的最小交易量信息
+        try:
+            markets = exchange.load_markets()
+            market = markets.get(symbol)
+            
+            if market:
+                min_amount = market.get('limits', {}).get('amount', {}).get('min', 0.1)
+                log_message("INFO", f"{symbol} 最小交易量要求: {min_amount}")
+                
+                # 如果计算出的仓位小于最小交易量，则使用最小交易量
+                if position_size < min_amount:
+                    log_message("INFO", f"计算的仓位 {position_size:.4f} 小于最小交易量 {min_amount}，将使用最小交易量")
+                    position_size = min_amount
+            else:
+                # 如果无法获取市场信息，使用默认最小交易量0.1
+                if position_size < 0.1:
+                    log_message("INFO", f"无法获取市场信息，使用默认最小交易量0.1")
+                    position_size = 0.1
+        except Exception as e:
+            log_message("WARNING", f"获取最小交易量信息失败: {str(e)}，使用默认最小交易量0.1")
+            if position_size < 0.1:
+                position_size = 0.1
+        
+        # 四舍五入到合适的精度
+        position_size = round(position_size, 4)
+        
+        log_message("INFO", f"计算的仓位大小: {position_size} {symbol.split('/')[0]}")
+        return position_size
+        
+    except Exception as e:
+        log_message("ERROR", f"计算仓位大小时出错: {str(e)}")
+        traceback.print_exc()
+        return 0
+
+# ============================================
+# 执行交易
+# ============================================
+def execute_trade(symbol, signal, signal_strength):
+    """执行交易"""
+    try:
+        # 检查冷却期
+        if symbol in cooldown_symbols and cooldown_symbols[symbol] > time.time():
+            remaining_time = int(cooldown_symbols[symbol] - time.time())
+            log_message("DEBUG", f"{symbol} 在冷却期内，还剩 {remaining_time} 秒")
+            return False
+        
+        # 检查是否已有相同方向的持仓
+        if symbol in position_tracker['positions']:
+            existing_position = position_tracker['positions'][symbol]
+            if (existing_position['side'] == 'long' and signal == "做多") or \
+               (existing_position['side'] == 'short' and signal == "做空"):
+                log_message("DEBUG", f"{symbol} 已有{signal}持仓，不重复开仓")
+                return False
+        
+        # 检查持仓数量限制
+        open_positions = len([pos for pos in position_tracker['positions'].values() if pos['size'] > 0])
+        if open_positions >= MAX_OPEN_POSITIONS:
+            log_message("WARNING", f"已达到最大持仓数量 ({MAX_OPEN_POSITIONS})")
+            return False
+        
+        # 执行风险管理检查
+        adjusted_risk = check_and_execute_risk_management(symbol, signal, signal_strength)
+        if adjusted_risk is None:
+            log_message("WARNING", f"{symbol} 风险管理检查未通过")
+            return False
+        
+        # 获取当前价格
+        ticker = exchange.fetch_ticker(symbol)
+        price = ticker['last']
+        
+        # 获取K线数据用于计算止损止盈
+        ohlcv = get_klines(symbol, timeframe_1h)
+        if ohlcv is None:
+            log_message("ERROR", f"{symbol} 获取K线数据失败")
+            return False
+        
+        df = process_klines(ohlcv)
+        if df is None or df['ATR_14'].isna().all():
+            log_message("ERROR", f"{symbol} ATR指标计算失败")
+            return False
+        
+        atr_value = df['ATR_14'].iloc[-1]
+        
+        # 计算止损止盈
+        sl, tp = calculate_stop_loss_take_profit(symbol, price, signal, atr_value)
+        
+        # 获取账户信息
+        account_info = get_account_info()
+        if not account_info:
+            log_message("ERROR", f"{symbol} 获取账户信息失败")
+            return False
+        
+        # 计算仓位大小
+        position_size = calculate_position_size(account_info, symbol, price, sl, adjusted_risk)
+        
+        if position_size <= 0:
+            log_message("ERROR", f"{symbol} 计算仓位大小失败")
+            return False
+        
+        # 执行下单
+        side = 'buy' if signal == "做多" else 'sell'
+        pos_side = 'long' if signal == "做多" else 'short'
+        
+        try:
+            log_message("TRADE", f"{symbol} 准备下单: {side} {position_size} @ {price}")
+            
+            # 市价下单
+            order = exchange.create_order(
+                symbol=symbol,
+                type='market',
+                side=side,
+                amount=position_size,
+                params={'posSide': pos_side}
+            )
+            
+            log_message("SUCCESS", f"{symbol} 下单成功，订单ID: {order['id']}")
+            
+            # 等待订单执行
+            time.sleep(2)
+            
+            # 验证订单状态
+            try:
+                order_status = exchange.fetch_order(order['id'], symbol)
+                if order_status['status'] != 'closed':
+                    log_message("WARNING", f"{symbol} 订单未完全成交: {order_status['status']}")
+                
+                actual_price = float(order_status.get('average', price))
+                actual_size = float(order_status.get('filled', position_size))
+                
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 获取订单状态失败: {str(e)}")
+                actual_price = price
+                actual_size = position_size
+            
+            log_message("SUCCESS", f"{symbol} 成交确认: {side} {actual_size} @ {actual_price}")
+            
+            # 设置止损止盈
+            sl_side = 'sell' if signal == "做多" else 'buy'
+            tp_side = 'sell' if signal == "做多" else 'buy'
+            
+            sl_order_id = None
+            tp_order_id = None
+            
+            try:
+                # 设置止损
+                sl_order = exchange.create_order(
+                    symbol=symbol,
+                    type='stop',
+                    side=sl_side,
+                    amount=actual_size,
+                    price=sl,
+                    params={'stopLossPrice': sl, 'posSide': pos_side}
+                )
+                sl_order_id = sl_order['id']
+                log_message("SUCCESS", f"{symbol} 设置止损成功: {sl}")
+                
+                # 设置止盈
+                tp_order = exchange.create_order(
+                    symbol=symbol,
+                    type='take_profit',
+                    side=tp_side,
+                    amount=actual_size,
+                    price=tp,
+                    params={'takeProfitPrice': tp, 'posSide': pos_side}
+                )
+                tp_order_id = tp_order['id']
+                log_message("SUCCESS", f"{symbol} 设置止盈成功: {tp}")
+                
+            except Exception as e:
+                log_message("ERROR", f"{symbol} 设置止损止盈失败: {str(e)}")
+            
+            # 更新持仓跟踪器
+            position_tracker['positions'][symbol] = {
+                'entry_price': actual_price,
+                'size': actual_size,
+                'side': 'long' if signal == "做多" else 'short',
+                'pnl': 0.0,
+                'sl': sl,
+                'tp': tp,
+                'entry_time': datetime.now(),
+                'leverage': DEFAULT_LEVERAGE,
+                'order_id': order['id'],
+                'sl_order_id': sl_order_id,
+                'tp_order_id': tp_order_id
+            }
+            
+            # 设置移动止盈跟踪
+            trailing_stops[symbol] = {
+                'active': False,
+                'activation_price': tp if signal == "做多" else sl,
+                'current_trigger': None,
+                'side': 'long' if signal == "做多" else 'short',
+                'size': actual_size,
+                'last_check': time.time()
+            }
+            
+            # 更新交易统计
+            trade_stats['total_trades'] += 1
+            trade_stats['daily_trades'] += 1
+            
+            # 设置冷却期
+            cooldown_symbols[symbol] = time.time() + COOLDOWN_PERIOD
+            
+            return True
+            
+        except Exception as e:
+            log_message("ERROR", f"{symbol} 下单失败: {str(e)}")
+            return False
+            
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 执行交易失败: {str(e)}")
+        return False
+
+# ============================================
+# 更新持仓状态
+# ============================================
+def display_trading_stats():
+    """显示交易统计信息"""
+    try:
+        log_message("INFO", "=" * 60)
+        log_message("INFO", "交易统计")
+        log_message("INFO", "=" * 60)
+        
+        account_info = get_account_info()
+        if account_info:
+            log_message("INFO", f"账户余额: {account_info['total_balance']:.2f} USDT")
+            log_message("INFO", f"可用余额: {account_info['free_balance']:.2f} USDT")
+            log_message("INFO", f"未实现盈亏: {account_info['unrealized_pnl']:.2f} USDT")
+        
+        if trade_stats['initial_balance']:
+            total_return = (account_info['total_balance'] - trade_stats['initial_balance']) / trade_stats['initial_balance'] * 100
+            log_message("INFO", f"总收益率: {total_return:.2f}%")
+        
+        log_message("INFO", f"总交易次数: {trade_stats['total_trades']}")
+        log_message("INFO", f"今日交易次数: {trade_stats['daily_trades']}")
+        log_message("INFO", f"今日盈亏: {trade_stats['daily_pnl']:.2f} USDT")
+    except Exception as e:
+        log_message("ERROR", f"显示交易统计时出错: {str(e)}")
+
+def update_positions():
+    """更新所有持仓状态"""
+    try:
+        from datetime import datetime
+        now = datetime.now()
+        positions = position_tracker['positions'].copy()
+        
+        for symbol, position in positions.items():
+            try:
+                # 获取当前价格
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                # 计算未实现盈亏
+                if position['side'] == 'long':
+                    pnl_percentage = (current_price - position['entry_price']) / position['entry_price']
+                else:
+                    pnl_percentage = (position['entry_price'] - current_price) / position['entry_price']
+                
+                pnl = position['size'] * position['entry_price'] * pnl_percentage * position['leverage']
+                position_tracker['positions'][symbol]['pnl'] = pnl
+                
+                # 检查移动止盈条件
+                check_trailing_stop(symbol, current_price)
+                
+            except Exception as e:
+                log_message("ERROR", f"{symbol} 更新持仓状态失败: {str(e)}")
+        
+        # 检查已平仓的持仓
+        check_closed_positions()
+                
+    except Exception as e:
+        log_message("ERROR", f"更新持仓状态时出错: {str(e)}")
+
+# ============================================
+# 平仓函数
+# ============================================
+def close_position(symbol, reason="手动平仓"):
+    """平仓指定持仓"""
+    try:
+        if symbol not in position_tracker['positions']:
+            log_message("WARNING", f"{symbol} 没有持仓")
+            return False
+        
+        position = position_tracker['positions'][symbol]
+        
+        # 准备平仓订单
+        side = 'sell' if position['side'] == 'long' else 'buy'
+        pos_side = position['side']
+        
+        log_message("TRADE", f"{symbol} 准备平仓: {reason}")
+        
+        # 市价平仓
+        order = exchange.create_order(
+            symbol=symbol,
+            type='market',
+            side=side,
+            amount=position['size'],
+            params={'posSide': pos_side, 'reduceOnly': True}
+        )
+        
+        log_message("SUCCESS", f"{symbol} 平仓订单提交成功，订单ID: {order['id']}")
+        
+        # 取消止损止盈订单
+        try:
+            if position.get('sl_order_id'):
+                exchange.cancel_order(position['sl_order_id'], symbol)
+                log_message("INFO", f"{symbol} 止损订单已取消")
+        except:
+            pass
+        
+        try:
+            if position.get('tp_order_id'):
+                exchange.cancel_order(position['tp_order_id'], symbol)
+                log_message("INFO", f"{symbol} 止盈订单已取消")
+        except:
+            pass
+        
+        # 记录盈亏
+        final_pnl = position.get('pnl', 0)
+        trade_stats['total_profit_loss'] += final_pnl
+        trade_stats['daily_pnl'] += final_pnl
+        
+        if final_pnl > 0:
+            trade_stats['wins'] += 1
+            trade_stats['total_profit'] += final_pnl
+            log_message("SUCCESS", f"{symbol} 盈利平仓: +{final_pnl:.2f} USDT ({reason})")
+        else:
+            trade_stats['losses'] += 1
+            trade_stats['total_loss'] += abs(final_pnl)
+            log_message("WARNING", f"{symbol} 亏损平仓: {final_pnl:.2f} USDT ({reason})")
+        
+        # 从跟踪器移除
+        del position_tracker['positions'][symbol]
+        if symbol in trailing_stops:
+            del trailing_stops[symbol]
+        
+        return True
+        
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 平仓失败: {str(e)}")
+        return False
+
+# ============================================
+# 移动止盈功能
+# ============================================
+def check_trailing_stop(symbol, current_price):
+    """检查并更新移动止盈"""
+    if symbol not in trailing_stops or symbol not in position_tracker['positions']:
+        return
+    
+    ts = trailing_stops[symbol]
+    position = position_tracker['positions'][symbol]
+    
+    # 检查是否需要更新
+    if time.time() - ts['last_check'] < TRAILING_STOP_CHECK_INTERVAL:
+        return
+    
+    ts['last_check'] = time.time()
+    
+    try:
+        # 确保键名一致性
+        if 'activated' in ts and 'active' not in ts:
+            ts['active'] = ts['activated']
+        elif 'active' not in ts:
+            ts['active'] = False
+            
+        # 多头持仓
+        if ts['side'] == 'long':
+            # 检查是否达到激活条件
+            if not ts['active'] and current_price >= position['entry_price'] * (1 + TRAILING_STOP_ACTIVATION_PERCENTAGE):
+                ts['active'] = True
+                ts['current_trigger'] = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                log_message("INFO", f"{symbol} 多头移动止盈已激活，触发价: {ts['current_trigger']:.4f}")
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 如果价格创新高，更新触发价
+                if current_price > (ts['current_trigger'] / (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)):
+                    new_trigger = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    if new_trigger > ts['current_trigger']:
+                        ts['current_trigger'] = new_trigger
+                        log_message("INFO", f"{symbol} 多头移动止盈更新，新触发价: {ts['current_trigger']:.4f}")
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price <= ts['current_trigger']:
+                    log_message("TRADE", f"{symbol} 触发多头移动止盈，当前价: {current_price:.4f}, 触发价: {ts['current_trigger']:.4f}")
+                    close_position(symbol, "移动止盈触发")
+        
+        # 空头持仓
+        else:
+            # 检查是否达到激活条件
+            if not ts['active'] and current_price <= position['entry_price'] * (1 - TRAILING_STOP_ACTIVATION_PERCENTAGE):
+                ts['active'] = True
+                ts['current_trigger'] = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                log_message("INFO", f"{symbol} 空头移动止盈已激活，触发价: {ts['current_trigger']:.4f}")
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 如果价格创新低，更新触发价
+                if current_price < (ts['current_trigger'] / (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)):
+                    new_trigger = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    if new_trigger < ts['current_trigger']:
+                        ts['current_trigger'] = new_trigger
+                        log_message("INFO", f"{symbol} 空头移动止盈更新，新触发价: {ts['current_trigger']:.4f}")
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price >= ts['current_trigger']:
+                    log_message("TRADE", f"{symbol} 触发空头移动止盈，当前价: {current_price:.4f}, 触发价: {ts['current_trigger']:.4f}")
+                    close_position(symbol, "移动止盈触发")
+    
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 检查移动止盈失败: {str(e)}")
+
+# ============================================
+# 检查已平仓的持仓
+# ============================================
+def check_closed_positions():
+    """检查是否有已经被交易所平仓的持仓"""
+    try:
+        # 获取当前持仓
+        exchange_positions = {}
+        try:
+            positions = exchange.fetch_positions()
+            for position in positions:
+                if float(position['contracts']) > 0:
+                    symbol = position['symbol']
+                    exchange_positions[symbol] = position
+        except Exception as e:
+            log_message("ERROR", f"获取交易所持仓失败: {str(e)}")
+            return
+        
+        # 检查本地跟踪的持仓是否在交易所中已经平仓
+        for symbol in list(position_tracker['positions'].keys()):
+            if symbol not in exchange_positions:
+                log_message("INFO", f"{symbol} 在交易所已平仓，同步本地状态")
+                position = position_tracker['positions'][symbol]
+                
+                # 记录盈亏
+                final_pnl = position.get('pnl', 0)
+                trade_stats['total_profit_loss'] += final_pnl
+                trade_stats['daily_pnl'] += final_pnl
+                
+                if final_pnl > 0:
+                    trade_stats['winning_trades'] += 1
+                    log_message("SUCCESS", f"{symbol} 盈利平仓: +{final_pnl:.2f} USDT (交易所平仓)")
+                else:
+                    trade_stats['losing_trades'] += 1
+                    log_message("WARNING", f"{symbol} 亏损平仓: {final_pnl:.2f} USDT (交易所平仓)")
+                
+                # 从跟踪器移除
+                del position_tracker['positions'][symbol]
+                if symbol in trailing_stops:
+                    del trailing_stops[symbol]
+    
+    except Exception as e:
+        log_message("ERROR", f"检查已平仓持仓失败: {str(e)}")
+        trade_stats['daily_trades'] = 0
+        trade_stats['daily_pnl'] = 0.0
+        trade_stats['daily_reset_time'] = now.replace(hour=0, minute=0, second=0, microsecond=0)
+
+# ============================================
+# 服务器状态检测函数
+# ============================================
+def check_server_status():
+    """检查服务器连接状态"""
+    try:
+        # 尝试获取服务器时间，这是一个轻量级API调用
+        exchange.fetch_time()
+        
+        # 如果成功，重置失败计数
+        server_status['check_failures'] = 0
+        server_status['is_online'] = True
+        return True
+    except Exception as e:
+        # 增加失败计数
+        server_status['check_failures'] += 1
+        
+        # 如果连续失败次数超过阈值，标记为离线
+        if server_status['check_failures'] >= MAX_SERVER_CHECK_FAILURES:
+            server_status['is_online'] = False
+            log_message("WARNING", f"服务器连接异常 ({server_status['check_failures']}次失败): {str(e)}")
+        
+        return False
+
+# ============================================
+# 移动止损更新函数
+# ============================================
+def update_trailing_stops():
+    """更新所有持仓的移动止损"""
+    if not server_status['is_online']:
+        log_message("WARNING", "服务器离线，跳过移动止损更新")
+        return
+    
+    for symbol, position in list(position_tracker['positions'].items()):
+        try:
+            # 初始化移动止损跟踪（如果不存在）
+            if symbol not in trailing_stops:
+                trailing_stops[symbol] = {
+                    'activated': False,
+                    'activation_price': 0,
+                    'current_stop': 0
+                }
+            
+            # 获取当前市场价格
+            ticker = exchange.fetch_ticker(symbol)
+            current_price = ticker['last']
+            
+            # 多头持仓
+            if position['side'] == 'long':
+                # 检查是否已激活移动止损
+                if not trailing_stops[symbol]['activated']:
+                    # 计算激活价格（入场价格 + 激活百分比）
+                    activation_price = position['entry_price'] * (1 + TRAILING_STOP_ACTIVATION_PERCENTAGE)
+                    trailing_stops[symbol]['activation_price'] = activation_price
+                    
+                    # 如果价格达到激活水平，激活移动止损
+                    if current_price >= activation_price:
+                        trailing_stops[symbol]['activated'] = True
+                        trailing_stops[symbol]['current_stop'] = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                        log_message("INFO", f"{symbol} 多头移动止损已激活，当前价格: {current_price:.4f}，止损价格: {trailing_stops[symbol]['current_stop']:.4f}")
+                
+                # 如果已激活，更新止损价格
+                elif current_price > position['entry_price']:
+                    new_stop = current_price * (1 - TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    
+                    # 只有当新止损价格高于当前止损价格时才更新
+                    if new_stop > trailing_stops[symbol]['current_stop']:
+                        old_stop = trailing_stops[symbol]['current_stop']
+                        trailing_stops[symbol]['current_stop'] = new_stop
+                        
+                        log_message("INFO", f"{symbol} 多头移动止损更新: {old_stop:.4f} -> {new_stop:.4f}")
+                        
+                        # 更新交易所订单
+                        if position.get('sl_order_id'):
+                            try:
+                                # 取消旧的止损订单
+                                exchange.cancel_order(position['sl_order_id'], symbol)
+                                
+                                # 创建新的止损订单
+                                sl_order = exchange.create_order(
+                                    symbol=symbol,
+                                    type='stop_market',
+                                    side='sell',
+                                    amount=position['size'],
+                                    price=new_stop,
+                                    params={
+                                        'stopPrice': new_stop,
+                                        'posSide': 'long',
+                                        'reduceOnly': True
+                                    }
+                                )
+                                
+                                # 更新止损订单ID
+                                position_tracker['positions'][symbol]['sl_order_id'] = sl_order['id']
+                                log_message("INFO", f"{symbol} 多头移动止损订单已更新，新订单ID: {sl_order['id']}")
+                                
+                            except Exception as e:
+                                log_message("ERROR", f"{symbol} 更新多头移动止损订单失败: {str(e)}")
+            
+            # 空头持仓
+            elif position['side'] == 'short':
+                # 检查是否已激活移动止损
+                if not trailing_stops[symbol]['activated']:
+                    # 计算激活价格（入场价格 - 激活百分比）
+                    activation_price = position['entry_price'] * (1 - TRAILING_STOP_ACTIVATION_PERCENTAGE)
+                    trailing_stops[symbol]['activation_price'] = activation_price
+                    
+                    # 如果价格达到激活水平，激活移动止损
+                    if current_price <= activation_price:
+                        trailing_stops[symbol]['activated'] = True
+                        trailing_stops[symbol]['current_stop'] = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                        log_message("INFO", f"{symbol} 空头移动止损已激活，当前价格: {current_price:.4f}，止损价格: {trailing_stops[symbol]['current_stop']:.4f}")
+                
+                # 如果已激活，更新止损价格
+                elif current_price < position['entry_price']:
+                    new_stop = current_price * (1 + TRAILING_STOP_CALLBACK_PERCENTAGE)
+                    
+                    # 只有当新止损价格低于当前止损价格时才更新
+                    if new_stop < trailing_stops[symbol]['current_stop'] or trailing_stops[symbol]['current_stop'] == 0:
+                        old_stop = trailing_stops[symbol]['current_stop']
+                        trailing_stops[symbol]['current_stop'] = new_stop
+                        
+                        log_message("INFO", f"{symbol} 空头移动止损更新: {old_stop:.4f} -> {new_stop:.4f}")
+                        
+                        # 更新交易所订单
+                        if position.get('sl_order_id'):
+                            try:
+                                # 取消旧的止损订单
+                                exchange.cancel_order(position['sl_order_id'], symbol)
+                                
+                                # 创建新的止损订单
+                                sl_order = exchange.create_order(
+                                    symbol=symbol,
+                                    type='stop_market',
+                                    side='buy',
+                                    amount=position['size'],
+                                    price=new_stop,
+                                    params={
+                                        'stopPrice': new_stop,
+                                        'posSide': 'short',
+                                        'reduceOnly': True
+                                    }
+                                )
+                                
+                                # 更新止损订单ID
+                                position_tracker['positions'][symbol]['sl_order_id'] = sl_order['id']
+                                log_message("INFO", f"{symbol} 空头移动止损订单已更新，新订单ID: {sl_order['id']}")
+                                
+                            except Exception as e:
+                                log_message("ERROR", f"{symbol} 更新空头移动止损订单失败: {str(e)}")
+        
+        except Exception as e:
+            log_message("ERROR", f"{symbol} 更新移动止损时出错: {str(e)}")
+
+# ============================================
+# 处理K线数据并计算指标
+# ============================================
+def process_klines(ohlcv):
+    """处理K线数据并计算技术指标"""
+    try:
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        df.set_index('timestamp', inplace=True)
+
+        # 计算EMA
+        df['EMA_10'] = ta.ema(df['close'], length=MA_10_PERIOD)
+        df['EMA_20'] = ta.ema(df['close'], length=MA_20_PERIOD)
+        
+        # 计算ATR（仅用于止盈止损）
+        df['ATR_14'] = ta.atr(high=df['high'], low=df['low'], close=df['close'], length=ATR_PERIOD)
+        
+        # 计算ADX（用于趋势/震荡判断）
+        adx = ta.adx(high=df['high'], low=df['low'], close=df['close'], length=ADX_PERIOD)
+        df['ADX'] = adx[f'ADX_{ADX_PERIOD}']
+        
+        return df
+        
+    except Exception as e:
+        log_message("ERROR", f"处理K线数据失败: {str(e)}")
+        return None
+
+# ============================================
+# 生成交易信号 - 简化版（EMA交叉 + ADX过滤）
+# ============================================
+def generate_signal(symbol):
+    """基于EMA10和EMA20交叉生成交易信号，使用ADX过滤震荡市场"""
+    try:
+        ohlcv = get_klines(symbol, timeframe_1h, limit=100)
+        if ohlcv is None or len(ohlcv) < 50:
+            log_message("WARNING", f"{symbol} 获取K线数据失败或数据不足")
+            return None, 0
+        
+        df = process_klines(ohlcv)
+        if df is None:
+            return None, 0
+        
+        # 检查是否成功计算了指标
+        if df['EMA_10'].isna().all() or df['EMA_20'].isna().all():
+            log_message("WARNING", f"{symbol} EMA指标计算失败")
+            return None, 0
+        
+        current_ema10 = df['EMA_10'].iloc[-1]
+        current_ema20 = df['EMA_20'].iloc[-1]
+        prev_ema10 = df['EMA_10'].iloc[-2]
+        prev_ema20 = df['EMA_20'].iloc[-2]
+        
+        # === ADX趋势/震荡判断 ===
+        adx_value = df['ADX'].iloc[-1] if 'ADX' in df.columns and not df['ADX'].isna().all() else 0
+        is_trending = adx_value > ADX_THRESHOLD_HIGH
+        is_ranging = adx_value < ADX_THRESHOLD_LOW
+        
+        # 如果ADX低于阈值，市场处于震荡状态，不产生信号
+        if is_ranging:
+            log_message("DEBUG", f"{symbol} ADX值为 {adx_value:.2f}，低于{ADX_THRESHOLD_LOW}，震荡市场，不产生信号")
+            return None, 0
+        
+        # === 震荡行情过滤 ===
+        # 使用ADX判断市场状态，ADX低于阈值视为震荡市场
+        if is_ranging:
+            log_message("DEBUG", f"{symbol} ADX值为 {adx_value:.2f}，低于{ADX_THRESHOLD_LOW}，震荡市场，不产生信号")
+            return None, 0
+        
+        # ATR波动率过滤（仅用于避免过度波动的市场）
+        if not df['ATR_14'].isna().all():
+            current_close = df['close'].iloc[-1]
+            atr_value = df['ATR_14'].iloc[-1]
+            atr_percentage = atr_value / current_close
+            
+            if atr_percentage > MAX_ATR_PERCENTAGE:
+                log_message("DEBUG", f"{symbol} ATR波动率过高 ({atr_percentage:.4f})，市场过于激烈")
+                return None, 0
+        
+        # === 核心信号：EMA交叉 ===
+        signal = None
+        strength = 0
+        
+        # EMA金叉 - 做多信号
+        if prev_ema10 <= prev_ema20 and current_ema10 > current_ema20:
+            signal = "做多"
+            # 计算信号强度：基于EMA差距和ADX值
+            ema_diff_pct = ((current_ema10 - current_ema20) / current_ema20) * 100
+            # 如果是趋势市场，增加信号强度
+            adx_bonus = 10 if is_trending else 0
+            strength = min(100, int(50 + ema_diff_pct * 1000 + adx_bonus))
+            log_message("SIGNAL", f"{symbol} EMA10上穿EMA20，ADX={adx_value:.2f}，生成做多信号，强度: {strength}")
+        
+        # EMA死叉 - 做空信号
+        elif prev_ema10 >= prev_ema20 and current_ema10 < current_ema20:
+            signal = "做空"
+            # 计算信号强度：基于EMA差距和ADX值
+            ema_diff_pct = ((current_ema20 - current_ema10) / current_ema10) * 100
+            # 如果是趋势市场，增加信号强度
+            adx_bonus = 10 if is_trending else 0
+            strength = min(100, int(50 + ema_diff_pct * 1000 + adx_bonus))
+            log_message("SIGNAL", f"{symbol} EMA10下穿EMA20，ADX={adx_value:.2f}，生成做空信号，强度: {strength}")
+        
+        return signal, strength
+        
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 生成信号时出错: {str(e)}")
+        traceback.print_exc()
+        return None, 0
+
+# ============================================
+# 交易循环函数
+# ============================================
+def trading_loop():
+    """主交易循环"""
+    try:
+        log_message("INFO", "启动交易循环...")
+        
+        # 设置交易对列表
+        trading_pairs = [
+            'BTC/USDT:USDT', 'ETH/USDT:USDT', 'BNB/USDT:USDT', 'SOL/USDT:USDT',
+            'XRP/USDT:USDT', 'ADA/USDT:USDT', 'DOGE/USDT:USDT', 'SHIB/USDT:USDT',
+            'AVAX/USDT:USDT', 'DOT/USDT:USDT', 'LTC/USDT:USDT',
+            'LINK/USDT:USDT', 'UNI/USDT:USDT', 'ATOM/USDT:USDT', 'ETC/USDT:USDT',
+            'XLM/USDT:USDT', 'NEAR/USDT:USDT', 'FIL/USDT:USDT', 'APE/USDT:USDT',
+            'ARB/USDT:USDT', 'ZRO/USDT:USDT', 'WIF/USDT:USDT', 'WLD/USDT:USDT'
+        ]
+        
+        # 初始化交易统计
+        account_info = get_account_info()
+        if account_info:
+            trade_stats['initial_balance'] = account_info['total_balance']
+            trade_stats['current_balance'] = account_info['total_balance']
+            log_message("SUCCESS", f"初始余额: {trade_stats['initial_balance']:.2f} USDT")
+        
+        loop_count = 0
+        last_trailing_stop_check = time.time()
+        last_server_check = time.time()
+        
+        # 主循环
+        while True:
+            try:
+                loop_count += 1
+                log_message("INFO", f"\n{'='*60}")
+                log_message("INFO", f"循环 #{loop_count} - {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+                log_message("INFO", f"{'='*60}")
+                
+                # 检查服务器状态
+                current_time = time.time()
+                if current_time - last_server_check > SERVER_CHECK_INTERVAL:
+                    is_online = check_server_status()
+                    last_server_check = current_time
+                    if not is_online:
+                        log_message("WARNING", "服务器连接异常，将使用固定止损止盈")
+                
+                # 更新移动止损（仅在服务器在线时）
+                if server_status['is_online'] and current_time - last_trailing_stop_check > TRAILING_STOP_CHECK_INTERVAL:
+                    update_trailing_stops()
+                    last_trailing_stop_check = current_time
+                
+                # 检查每日重置
+                check_daily_reset()
+                
+                # 更新持仓状态
+                update_positions()
+                
+                # 检查每个交易对的信号
+                for symbol in trading_pairs:
+                    try:
+                        # 生成信号（EMA交叉 + ADX过滤）
+                        signal, strength = generate_signal(symbol)
+                        
+                        # 更新最新信号
+                        latest_signals[symbol] = (signal, strength, datetime.now())
+                        
+                        # 如果有信号，执行交易
+                        if signal and strength > 40:  # 只交易强度大于40的信号
+                            log_message("SIGNAL", f"{symbol} 生成{signal}信号，强度: {strength}")
+                            execute_trade(symbol, signal, strength)
+                        
+                        # 避免请求过快
+                        time.sleep(1)
+                        
+                    except Exception as e:
+                        log_message("ERROR", f"{symbol} 处理信号时出错: {str(e)}")
+                
+                # 显示交易统计（每10个循环显示一次）
+                if loop_count % 10 == 0:
+                    display_trading_stats()
+                
+                # 等待下一个循环
+                log_message("INFO", "等待60秒后继续下一个循环...")
+                time.sleep(60)
+                
+            except Exception as e:
+                log_message("ERROR", f"交易循环中出错: {str(e)}")
+                traceback.print_exc()
+                time.sleep(60)
+                
+    except KeyboardInterrupt:
+        log_message("INFO", "交易循环被手动中断")
+        display_trading_stats()
+    except Exception as e:
+        log_message("ERROR", f"交易循环启动失败: {str(e)}")
+        traceback.print_exc()
+
+# ============================================
+# 启动交易系统
+# ============================================
+if __name__ == "__main__":
+    try:
+        # 测试API连接
+        if not test_api_connection():
+            log_message("ERROR", "API连接测试失败，请检查配置")
+            raise Exception("API连接失败")
+        
+        # 防止Colab掉线
+        prevent_colab_timeout()
+        
+        # 显示启动信息
+        log_message("SUCCESS", "=" * 60)
+        log_message("SUCCESS", "EMA10/EMA20交叉策略实盘交易系统")
+        log_message("SUCCESS", "=" * 60)
+        log_message("INFO", f"杠杆: {DEFAULT_LEVERAGE}x")
+        log_message("INFO", f"单次风险: {RISK_PER_TRADE*100}%")
+        log_message("INFO", f"最大持仓: {MAX_OPEN_POSITIONS}")
+        log_message("INFO", f"冷却期: {COOLDOWN_PERIOD//60}分钟")
+        log_message("INFO", f"每日最大交易: {MAX_DAILY_TRADES}")
+        log_message("INFO", f"每日最大亏损: {MAX_DAILY_LOSS*100}%")
+        log_message("INFO", "入场信号: EMA10上穿/下穿EMA20")
+        log_message("INFO", "震荡过滤: ADX < 20")
+        log_message("INFO", "趋势确认: ADX > 25")
+        log_message("INFO", "平仓条件: 止损/止盈")
+        log_message("INFO", f"移动止损: 激活阈值 {TRAILING_STOP_ACTIVATION_PERCENTAGE*100}%, 回调 {TRAILING_STOP_CALLBACK_PERCENTAGE*100}%")
+        log_message("INFO", "已移除交易对: MATIC/USDT:USDT")
+        log_message("SUCCESS", "=" * 60)
+        
+        # 启动交易循环
+        trading_loop()
+        
+    except Exception as e:
+        log_message("ERROR", f"启动交易系统失败: {str(e)}")
+        traceback.print_exc()
