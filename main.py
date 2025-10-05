@@ -158,9 +158,12 @@ exchange = None  # 延迟初始化，在启动时设置
 # ============================================
 # 全局配置常量
 # ============================================
-MAX_LEVERAGE_BTC_ETH = 50
-MAX_LEVERAGE_OTHERS = 30
-DEFAULT_LEVERAGE = 20
+MAX_LEVERAGE_BTC = 100        # BTC最大杠杆100倍
+MAX_LEVERAGE_ETH = 50         # ETH最大杠杆50倍
+MAX_LEVERAGE_OTHERS = 30      # 其他币种最大杠杆30倍
+DEFAULT_LEVERAGE_BTC = 50     # BTC默认杠杆50倍
+DEFAULT_LEVERAGE_ETH = 30     # ETH默认杠杆30倍
+DEFAULT_LEVERAGE_OTHERS = 20  # 其他币种默认杠杆20倍
 RISK_PER_TRADE = 0.1
 MIN_TRADE_AMOUNT_USD = 1
 MAX_OPEN_POSITIONS = 5
@@ -313,6 +316,43 @@ def get_klines(symbol, timeframe, limit=100):
         return None
 
 # ============================================
+# 动态杠杆选择
+# ============================================
+def get_leverage_for_symbol(symbol):
+    """根据交易对选择合适的杠杆倍数"""
+    try:
+        # 提取基础货币名称
+        base_currency = symbol.split('-')[0].upper()
+        
+        if base_currency == 'BTC':
+            return DEFAULT_LEVERAGE_BTC
+        elif base_currency == 'ETH':
+            return DEFAULT_LEVERAGE_ETH
+        else:
+            return DEFAULT_LEVERAGE_OTHERS
+            
+    except Exception as e:
+        log_message("WARNING", f"获取{symbol}杠杆失败，使用默认值: {str(e)}")
+        return DEFAULT_LEVERAGE_OTHERS
+
+def get_max_leverage_for_symbol(symbol):
+    """根据交易对获取最大杠杆倍数"""
+    try:
+        # 提取基础货币名称
+        base_currency = symbol.split('-')[0].upper()
+        
+        if base_currency == 'BTC':
+            return MAX_LEVERAGE_BTC
+        elif base_currency == 'ETH':
+            return MAX_LEVERAGE_ETH
+        else:
+            return MAX_LEVERAGE_OTHERS
+            
+    except Exception as e:
+        log_message("WARNING", f"获取{symbol}最大杠杆失败，使用默认值: {str(e)}")
+        return MAX_LEVERAGE_OTHERS
+
+# ============================================
 # 获取账户信息
 # ============================================
 def get_account_info():
@@ -368,7 +408,9 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
         
         for pos_symbol, pos_data in position_tracker['positions'].items():
             if 'entry_price' in pos_data and 'size' in pos_data:
-                pos_value = pos_data['entry_price'] * pos_data['size'] / DEFAULT_LEVERAGE
+                # 使用该币种的动态杠杆
+                pos_leverage = get_leverage_for_symbol(pos_symbol)
+                pos_value = pos_data['entry_price'] * pos_data['size'] / pos_leverage
                 current_positions_value += pos_value
         
         # 计算总可用交易资金（账户总额的80%）
@@ -429,10 +471,15 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
         
         log_message("INFO", f"本次交易分配资金: {position_fund:.2f} USDT")
         
-        # 计算仓位大小（考虑杠杆）
-        position_value_with_leverage = position_fund * DEFAULT_LEVERAGE
+        # 获取该币种的动态杠杆
+        leverage = get_leverage_for_symbol(symbol)
+        max_leverage = get_max_leverage_for_symbol(symbol)
+        
+        # 计算仓位大小（考虑动态杠杆）
+        position_value_with_leverage = position_fund * leverage
         position_size = position_value_with_leverage / price
         
+        log_message("INFO", f"使用杠杆: {leverage}x (最大{max_leverage}x)")
         log_message("INFO", f"杠杆后仓位价值: {position_value_with_leverage:.2f} USDT")
         log_message("INFO", f"计算仓位大小: {position_size:.6f}")
         
@@ -484,7 +531,7 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
             log_message("WARNING", f"获取市场信息失败: {e}")
             # 使用保守的默认最小值
             if position_size < 0.01:  # 提高默认最小值到0.01
-                if (0.01 * price) / DEFAULT_LEVERAGE <= total_trading_fund:
+                if (0.01 * price) / leverage <= total_trading_fund:
                     position_size = 0.01
                     log_message("INFO", f"使用默认最小交易量: {position_size}")
                 else:
@@ -492,7 +539,7 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
                     return 0
         
         # 最终验证
-        final_trade_value = (position_size * price) / DEFAULT_LEVERAGE
+        final_trade_value = (position_size * price) / leverage
         log_message("INFO", f"最终交易价值: {final_trade_value:.2f} USDT")
         log_message("INFO", f"最终仓位大小: {position_size:.6f}")
         
@@ -905,7 +952,7 @@ def execute_trade(symbol, signal, signal_strength):
                 'sl': sl,
                 'tp': tp,
                 'entry_time': datetime.now(),
-                'leverage': DEFAULT_LEVERAGE,
+                'leverage': leverage,
                 'order_id': order['id'],
                 'sl_order_id': sl_order_id,
                 'tp_order_id': tp_order_id
@@ -1635,7 +1682,7 @@ def start_trading_system():
         log_message("SUCCESS", "MACD(6,32,9)策略实盘交易系统 - OKX版")
         log_message("SUCCESS", "=" * 60)
         log_message("INFO", f"交易所: OKX")
-        log_message("INFO", f"杠杆: {DEFAULT_LEVERAGE}x")
+        log_message("INFO", f"杠杆: BTC {DEFAULT_LEVERAGE_BTC}x, ETH {DEFAULT_LEVERAGE_ETH}x, 其他 {DEFAULT_LEVERAGE_OTHERS}x")
         log_message("INFO", f"单次风险: {RISK_PER_TRADE*100}%")
         log_message("INFO", f"最大持仓: {MAX_OPEN_POSITIONS}")
         log_message("INFO", f"冷却期: {COOLDOWN_PERIOD//60}分钟")
@@ -1731,7 +1778,7 @@ def setup_missing_stop_orders():
                             'sl': sl,
                             'tp': tp,
                             'entry_time': datetime.now(),
-                            'leverage': DEFAULT_LEVERAGE,
+                            'leverage': get_leverage_for_symbol(symbol),
                             'order_id': None,  # 原始开仓订单ID未知
                             'sl_order_id': sl_order_id,
                             'tp_order_id': tp_order_id
