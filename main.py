@@ -1151,7 +1151,7 @@ def update_positions():
                 # 2. 检查移动止盈
                 check_trailing_stop(symbol, current_price)
                 
-                # 检查MACD金叉/死叉平仓条件
+                # 3. 检查MACD金叉/死叉平仓条件（K线确认）
                 ohlcv = get_klines(symbol, '30m', limit=100)
                 if ohlcv:
                     df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
@@ -1166,37 +1166,31 @@ def update_positions():
                     prev_macd = df['MACD'].iloc[-2]
                     prev_signal = df['MACD_SIGNAL'].iloc[-2]
                     
-                    # 检查持仓时间，避免过早平仓
-                    entry_time = position.get('entry_time', now)
-                    hold_duration = (now - entry_time).total_seconds() / 60  # 分钟
-                    min_hold_time = 30  # 最少持仓30分钟
+                    # K线方向判断
+                    current_open = df['open'].iloc[-1]
+                    current_close = df['close'].iloc[-1]
+                    is_bullish_candle = current_close > current_open  # 阳线
+                    is_bearish_candle = current_close < current_open  # 阴线
                     
-                    # 检查是否盈利，只在盈利时考虑MACD平仓
-                    is_profitable = pnl > 0
-                    
-                    # 3. 检查MACD平仓条件（有限制）
-                    if hold_duration >= min_hold_time:
-                        # 做多持仓，检查死叉平仓条件
-                        if (position['side'] == 'long' and 
-                            prev_macd >= prev_signal and current_macd < current_signal):
-                            
-                            if is_profitable:
-                                log_message("SIGNAL", f"{symbol} MACD死叉且盈利，平仓做多持仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
-                                close_position(symbol, reason="MACD死叉平仓(盈利)")
-                            else:
-                                log_message("INFO", f"{symbol} MACD死叉但亏损，暂不平仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
+                    # 做多持仓，检查死叉+阴线平仓条件
+                    if (position['side'] == 'long' and 
+                        prev_macd >= prev_signal and current_macd < current_signal):
                         
-                        # 做空持仓，检查金叉平仓条件
-                        elif (position['side'] == 'short' and 
-                              prev_macd <= prev_signal and current_macd > current_signal):
-                            
-                            if is_profitable:
-                                log_message("SIGNAL", f"{symbol} MACD金叉且盈利，平仓做空持仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
-                                close_position(symbol, reason="MACD金叉平仓(盈利)")
-                            else:
-                                log_message("INFO", f"{symbol} MACD金叉但亏损，暂不平仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
-                    else:
-                        log_message("DEBUG", f"{symbol} 持仓时间不足{min_hold_time}分钟，跳过MACD平仓检查")
+                        if is_bearish_candle:
+                            log_message("SIGNAL", f"{symbol} MACD死叉+阴线确认，平仓做多持仓 (盈亏:{pnl:.2f})")
+                            close_position(symbol, reason="MACD死叉+阴线平仓")
+                        else:
+                            log_message("DEBUG", f"{symbol} MACD死叉但当前K线收阳线，等待阴线确认")
+                    
+                    # 做空持仓，检查金叉+阳线平仓条件
+                    elif (position['side'] == 'short' and 
+                          prev_macd <= prev_signal and current_macd > current_signal):
+                        
+                        if is_bullish_candle:
+                            log_message("SIGNAL", f"{symbol} MACD金叉+阳线确认，平仓做空持仓 (盈亏:{pnl:.2f})")
+                            close_position(symbol, reason="MACD金叉+阳线平仓")
+                        else:
+                            log_message("DEBUG", f"{symbol} MACD金叉但当前K线收阴线，等待阳线确认")
                 
             except Exception as e:
                 log_message("ERROR", f"{symbol} 更新持仓状态失败: {str(e)}")
