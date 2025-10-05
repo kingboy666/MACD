@@ -22,8 +22,7 @@ else:
     print("未找到任何 OKX 相关环境变量")
 
 print(f"总环境变量数量: {len(all_vars)}")
-print("=== 诊断完成，继续启动程序 ===
-")
+print("=== 诊断完成，继续启动程序 ===")
 
 # 自定义技术指标计算函数
 def calculate_macd(close, fast=6, slow=32, signal=9):
