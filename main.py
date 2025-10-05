@@ -823,30 +823,72 @@ def execute_trade(symbol, signal, signal_strength):
             tp_order_id = None
             
             try:
-                # 设置市价止损订单
+                # 设置止损订单 - OKX格式
+                log_message("INFO", f"{symbol} 准备设置止损: {sl:.6f}, 方向: {sl_side}")
                 sl_order = exchange.create_order(
                     symbol=symbol,
-                    type='stop_market',
+                    type='market',
                     side=sl_side,
                     amount=actual_size,
-                    params={'stopPrice': sl, 'posSide': pos_side, 'reduceOnly': True}
+                    params={
+                        'stopLossPrice': sl,
+                        'posSide': pos_side,
+                        'reduceOnly': True,
+                        'ordType': 'conditional'
+                    }
                 )
                 sl_order_id = sl_order['id']
-                log_message("SUCCESS", f"{symbol} 设置止损成功: {sl:.6f}")
+                log_message("SUCCESS", f"{symbol} 设置止损成功: {sl:.6f}, 订单ID: {sl_order_id}")
                 
-                # 设置市价止盈订单
+                # 设置止盈订单 - OKX格式
+                log_message("INFO", f"{symbol} 准备设置止盈: {tp:.6f}, 方向: {tp_side}")
                 tp_order = exchange.create_order(
                     symbol=symbol,
-                    type='take_profit_market', 
+                    type='market',
                     side=tp_side,
                     amount=actual_size,
-                    params={'stopPrice': tp, 'posSide': pos_side, 'reduceOnly': True}
+                    params={
+                        'takeProfitPrice': tp,
+                        'posSide': pos_side,
+                        'reduceOnly': True,
+                        'ordType': 'conditional'
+                    }
                 )
                 tp_order_id = tp_order['id']
-                log_message("SUCCESS", f"{symbol} 设置止盈成功: {tp:.6f}")
+                log_message("SUCCESS", f"{symbol} 设置止盈成功: {tp:.6f}, 订单ID: {tp_order_id}")
                 
             except Exception as e:
                 log_message("ERROR", f"{symbol} 设置止损止盈失败: {str(e)}")
+                # 尝试备用方案 - 使用limit订单
+                try:
+                    log_message("INFO", f"{symbol} 尝试备用止损止盈方案...")
+                    # 简化的止损订单
+                    sl_order = exchange.create_order(
+                        symbol=symbol,
+                        type='stop',
+                        side=sl_side,
+                        amount=actual_size,
+                        price=sl,
+                        params={'posSide': pos_side, 'reduceOnly': True}
+                    )
+                    sl_order_id = sl_order['id']
+                    log_message("SUCCESS", f"{symbol} 备用止损设置成功: {sl:.6f}")
+                    
+                    # 简化的止盈订单
+                    tp_order = exchange.create_order(
+                        symbol=symbol,
+                        type='limit',
+                        side=tp_side,
+                        amount=actual_size,
+                        price=tp,
+                        params={'posSide': pos_side, 'reduceOnly': True}
+                    )
+                    tp_order_id = tp_order['id']
+                    log_message("SUCCESS", f"{symbol} 备用止盈设置成功: {tp:.6f}")
+                    
+                except Exception as e2:
+                    log_message("ERROR", f"{symbol} 备用止损止盈方案也失败: {str(e2)}")
+                    log_message("WARNING", f"{symbol} 将依赖程序监控进行止损止盈")
             
             # 更新持仓跟踪器
             position_tracker['positions'][symbol] = {
@@ -981,7 +1023,33 @@ def update_positions():
                 pnl = position['size'] * position['entry_price'] * pnl_percentage * position['leverage']
                 position_tracker['positions'][symbol]['pnl'] = pnl
                 
-                # 检查移动止损
+                # 1. 检查固定止损止盈（程序监控）
+                entry_price = position['entry_price']
+                sl_price = position['sl']
+                tp_price = position['tp']
+                
+                if position['side'] == 'long':
+                    # 做多仓位检查
+                    if current_price <= sl_price:
+                        log_message("SIGNAL", f"{symbol} 触发固定止损: 当前价格 {current_price:.6f} <= 止损价格 {sl_price:.6f}")
+                        close_position(symbol, reason="固定止损")
+                        continue
+                    elif current_price >= tp_price:
+                        log_message("SIGNAL", f"{symbol} 触发固定止盈: 当前价格 {current_price:.6f} >= 止盈价格 {tp_price:.6f}")
+                        close_position(symbol, reason="固定止盈")
+                        continue
+                else:
+                    # 做空仓位检查
+                    if current_price >= sl_price:
+                        log_message("SIGNAL", f"{symbol} 触发固定止损: 当前价格 {current_price:.6f} >= 止损价格 {sl_price:.6f}")
+                        close_position(symbol, reason="固定止损")
+                        continue
+                    elif current_price <= tp_price:
+                        log_message("SIGNAL", f"{symbol} 触发固定止盈: 当前价格 {current_price:.6f} <= 止盈价格 {tp_price:.6f}")
+                        close_position(symbol, reason="固定止盈")
+                        continue
+                
+                # 2. 检查移动止损
                 if update_trailing_stop(symbol, position, current_price):
                     continue  # 如果触发移动止损，跳过后续检查
                 
@@ -1000,15 +1068,37 @@ def update_positions():
                     prev_macd = df['MACD'].iloc[-2]
                     prev_signal = df['MACD_SIGNAL'].iloc[-2]
                     
-                    # 做多持仓，检查死叉平仓条件
-                    if position['side'] == 'long' and prev_macd >= prev_signal and current_macd < current_signal:
-                        log_message("SIGNAL", f"{symbol} MACD死叉，平仓做多持仓")
-                        close_position(symbol, reason="MACD死叉平仓")
+                    # 检查持仓时间，避免过早平仓
+                    entry_time = position.get('entry_time', now)
+                    hold_duration = (now - entry_time).total_seconds() / 60  # 分钟
+                    min_hold_time = 30  # 最少持仓30分钟
                     
-                    # 做空持仓，检查金叉平仓条件
-                    elif position['side'] == 'short' and prev_macd <= prev_signal and current_macd > current_signal:
-                        log_message("SIGNAL", f"{symbol} MACD金叉，平仓做空持仓")
-                        close_position(symbol, reason="MACD金叉平仓")
+                    # 检查是否盈利，只在盈利时考虑MACD平仓
+                    is_profitable = pnl > 0
+                    
+                    # 3. 检查MACD平仓条件（有限制）
+                    if hold_duration >= min_hold_time:
+                        # 做多持仓，检查死叉平仓条件
+                        if (position['side'] == 'long' and 
+                            prev_macd >= prev_signal and current_macd < current_signal):
+                            
+                            if is_profitable:
+                                log_message("SIGNAL", f"{symbol} MACD死叉且盈利，平仓做多持仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
+                                close_position(symbol, reason="MACD死叉平仓(盈利)")
+                            else:
+                                log_message("INFO", f"{symbol} MACD死叉但亏损，暂不平仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
+                        
+                        # 做空持仓，检查金叉平仓条件
+                        elif (position['side'] == 'short' and 
+                              prev_macd <= prev_signal and current_macd > current_signal):
+                            
+                            if is_profitable:
+                                log_message("SIGNAL", f"{symbol} MACD金叉且盈利，平仓做空持仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
+                                close_position(symbol, reason="MACD金叉平仓(盈利)")
+                            else:
+                                log_message("INFO", f"{symbol} MACD金叉但亏损，暂不平仓 (持仓{hold_duration:.1f}分钟, 盈亏:{pnl:.2f})")
+                    else:
+                        log_message("DEBUG", f"{symbol} 持仓时间不足{min_hold_time}分钟，跳过MACD平仓检查")
                 
             except Exception as e:
                 log_message("ERROR", f"{symbol} 更新持仓状态失败: {str(e)}")
