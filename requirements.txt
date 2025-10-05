@@ -1,6 +1,6 @@
-pandas==2.0.3
-numpy==1.24.3
-ccxt==4.1.0
+pandas==1.5.3
+numpy==1.21.6
+ccxt==4.0.112
 pandas-ta==0.3.14b0
-tenacity==8.2.3
+tenacity==8.2.2
 python-dotenv==1.0.0
