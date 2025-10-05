@@ -822,73 +822,11 @@ def execute_trade(symbol, signal, signal_strength):
             sl_order_id = None
             tp_order_id = None
             
-            try:
-                # 设置止损订单 - OKX格式
-                log_message("INFO", f"{symbol} 准备设置止损: {sl:.6f}, 方向: {sl_side}")
-                sl_order = exchange.create_order(
-                    symbol=symbol,
-                    type='market',
-                    side=sl_side,
-                    amount=actual_size,
-                    params={
-                        'stopLossPrice': sl,
-                        'posSide': pos_side,
-                        'reduceOnly': True,
-                        'ordType': 'conditional'
-                    }
-                )
-                sl_order_id = sl_order['id']
-                log_message("SUCCESS", f"{symbol} 设置止损成功: {sl:.6f}, 订单ID: {sl_order_id}")
-                
-                # 设置止盈订单 - OKX格式
-                log_message("INFO", f"{symbol} 准备设置止盈: {tp:.6f}, 方向: {tp_side}")
-                tp_order = exchange.create_order(
-                    symbol=symbol,
-                    type='market',
-                    side=tp_side,
-                    amount=actual_size,
-                    params={
-                        'takeProfitPrice': tp,
-                        'posSide': pos_side,
-                        'reduceOnly': True,
-                        'ordType': 'conditional'
-                    }
-                )
-                tp_order_id = tp_order['id']
-                log_message("SUCCESS", f"{symbol} 设置止盈成功: {tp:.6f}, 订单ID: {tp_order_id}")
-                
-            except Exception as e:
-                log_message("ERROR", f"{symbol} 设置止损止盈失败: {str(e)}")
-                # 尝试备用方案 - 使用limit订单
-                try:
-                    log_message("INFO", f"{symbol} 尝试备用止损止盈方案...")
-                    # 简化的止损订单
-                    sl_order = exchange.create_order(
-                        symbol=symbol,
-                        type='stop',
-                        side=sl_side,
-                        amount=actual_size,
-                        price=sl,
-                        params={'posSide': pos_side, 'reduceOnly': True}
-                    )
-                    sl_order_id = sl_order['id']
-                    log_message("SUCCESS", f"{symbol} 备用止损设置成功: {sl:.6f}")
-                    
-                    # 简化的止盈订单
-                    tp_order = exchange.create_order(
-                        symbol=symbol,
-                        type='limit',
-                        side=tp_side,
-                        amount=actual_size,
-                        price=tp,
-                        params={'posSide': pos_side, 'reduceOnly': True}
-                    )
-                    tp_order_id = tp_order['id']
-                    log_message("SUCCESS", f"{symbol} 备用止盈设置成功: {tp:.6f}")
-                    
-                except Exception as e2:
-                    log_message("ERROR", f"{symbol} 备用止损止盈方案也失败: {str(e2)}")
-                    log_message("WARNING", f"{symbol} 将依赖程序监控进行止损止盈")
+            # 暂时跳过交易所止损止盈订单，完全依赖程序监控
+            log_message("INFO", f"{symbol} 使用程序监控方式进行止损止盈保护")
+            log_message("INFO", f"{symbol} 止损价格: {sl:.6f}, 止盈价格: {tp:.6f}")
+            sl_order_id = None
+            tp_order_id = None
             
             # 更新持仓跟踪器
             position_tracker['positions'][symbol] = {
@@ -1027,6 +965,9 @@ def update_positions():
                 entry_price = position['entry_price']
                 sl_price = position['sl']
                 tp_price = position['tp']
+                
+                # 显示当前监控状态
+                log_message("DEBUG", f"{symbol} 监控中 - 当前价格:{current_price:.6f}, 止损:{sl_price:.6f}, 止盈:{tp_price:.6f}, 盈亏:{pnl:.2f}")
                 
                 if position['side'] == 'long':
                     # 做多仓位检查
@@ -1328,9 +1269,9 @@ def trading_loop():
                 if loop_count % 10 == 0:
                     display_trading_stats()
                 
-                # 等待下一个循环
-                log_message("INFO", "等待60秒后继续下一个循环...")
-                time.sleep(60)
+                # 等待下一个循环 - 缩短到30秒以便更及时的止损止盈监控
+                log_message("INFO", "等待30秒后继续下一个循环...")
+                time.sleep(30)
                 
             except Exception as e:
                 log_message("ERROR", f"交易循环中出错: {str(e)}")
