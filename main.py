@@ -822,11 +822,80 @@ def execute_trade(symbol, signal, signal_strength):
             sl_order_id = None
             tp_order_id = None
             
-            # 暂时跳过交易所止损止盈订单，完全依赖程序监控
-            log_message("INFO", f"{symbol} 使用程序监控方式进行止损止盈保护")
-            log_message("INFO", f"{symbol} 止损价格: {sl:.6f}, 止盈价格: {tp:.6f}")
-            sl_order_id = None
-            tp_order_id = None
+            try:
+                # 设置OKX条件止损订单
+                log_message("INFO", f"{symbol} 准备设置止损条件单: {sl:.6f}")
+                sl_order = exchange.create_order(
+                    symbol=symbol,
+                    type='market',
+                    side=sl_side,
+                    amount=actual_size,
+                    params={
+                        'stopLossPrice': sl,
+                        'posSide': pos_side,
+                        'reduceOnly': True
+                    }
+                )
+                sl_order_id = sl_order['id']
+                log_message("SUCCESS", f"{symbol} 止损条件单设置成功: {sl:.6f}, ID: {sl_order_id}")
+                
+                # 设置OKX条件止盈订单
+                log_message("INFO", f"{symbol} 准备设置止盈条件单: {tp:.6f}")
+                tp_order = exchange.create_order(
+                    symbol=symbol,
+                    type='market',
+                    side=tp_side,
+                    amount=actual_size,
+                    params={
+                        'takeProfitPrice': tp,
+                        'posSide': pos_side,
+                        'reduceOnly': True
+                    }
+                )
+                tp_order_id = tp_order['id']
+                log_message("SUCCESS", f"{symbol} 止盈条件单设置成功: {tp:.6f}, ID: {tp_order_id}")
+                
+            except Exception as e:
+                log_message("ERROR", f"{symbol} 设置条件单失败: {str(e)}")
+                # 尝试使用不同的参数格式
+                try:
+                    log_message("INFO", f"{symbol} 尝试备用条件单格式...")
+                    
+                    # 备用止损条件单
+                    sl_order = exchange.create_order(
+                        symbol=symbol,
+                        type='stop_market',
+                        side=sl_side,
+                        amount=actual_size,
+                        params={
+                            'triggerPrice': sl,
+                            'posSide': pos_side,
+                            'reduceOnly': True
+                        }
+                    )
+                    sl_order_id = sl_order['id']
+                    log_message("SUCCESS", f"{symbol} 备用止损条件单成功: {sl:.6f}")
+                    
+                    # 备用止盈条件单
+                    tp_order = exchange.create_order(
+                        symbol=symbol,
+                        type='take_profit_market',
+                        side=tp_side,
+                        amount=actual_size,
+                        params={
+                            'triggerPrice': tp,
+                            'posSide': pos_side,
+                            'reduceOnly': True
+                        }
+                    )
+                    tp_order_id = tp_order['id']
+                    log_message("SUCCESS", f"{symbol} 备用止盈条件单成功: {tp:.6f}")
+                    
+                except Exception as e2:
+                    log_message("ERROR", f"{symbol} 备用条件单也失败: {str(e2)}")
+                    sl_order_id = None
+                    tp_order_id = None
+                    log_message("WARNING", f"{symbol} 条件单设置失败，将完全依赖程序监控")
             
             # 更新持仓跟踪器
             position_tracker['positions'][symbol] = {
@@ -935,6 +1004,83 @@ def update_trailing_stop(symbol, position, current_price):
     except Exception as e:
         log_message("ERROR", f"{symbol} 移动止损更新失败: {str(e)}")
         return False
+
+# ============================================
+# 为已存在的持仓设置止损止盈条件单
+# ============================================
+def setup_missing_stop_orders():
+    """为没有止损止盈订单的持仓补充设置条件单"""
+    try:
+        for symbol, position in position_tracker['positions'].items():
+            # 检查是否缺少止损止盈订单
+            if not position.get('sl_order_id') or not position.get('tp_order_id'):
+                log_message("INFO", f"{symbol} 检测到缺少止损止盈订单，正在补充设置...")
+                
+                entry_price = position['entry_price']
+                side = position['side']
+                size = position['size']
+                
+                # 重新计算止损止盈价格
+                sl_price = position.get('sl')
+                tp_price = position.get('tp')
+                
+                if not sl_price or not tp_price:
+                    # 如果没有止损止盈价格，重新计算
+                    if side == 'long':
+                        sl_price = entry_price * (1 - FIXED_SL_PERCENTAGE)
+                        tp_price = entry_price * (1 + FIXED_TP_PERCENTAGE)
+                    else:
+                        sl_price = entry_price * (1 + FIXED_SL_PERCENTAGE)
+                        tp_price = entry_price * (1 - FIXED_TP_PERCENTAGE)
+                    
+                    position_tracker['positions'][symbol]['sl'] = sl_price
+                    position_tracker['positions'][symbol]['tp'] = tp_price
+                
+                # 设置订单方向和仓位方向
+                sl_side = 'sell' if side == 'long' else 'buy'
+                tp_side = 'sell' if side == 'long' else 'buy'
+                pos_side = 'long' if side == 'long' else 'short'
+                
+                # 设置止损条件单
+                if not position.get('sl_order_id'):
+                    try:
+                        sl_order = exchange.create_order(
+                            symbol=symbol,
+                            type='market',
+                            side=sl_side,
+                            amount=size,
+                            params={
+                                'stopLossPrice': sl_price,
+                                'posSide': pos_side,
+                                'reduceOnly': True
+                            }
+                        )
+                        position_tracker['positions'][symbol]['sl_order_id'] = sl_order['id']
+                        log_message("SUCCESS", f"{symbol} 补充止损条件单成功: {sl_price:.6f}")
+                    except Exception as e:
+                        log_message("ERROR", f"{symbol} 补充止损条件单失败: {str(e)}")
+                
+                # 设置止盈条件单
+                if not position.get('tp_order_id'):
+                    try:
+                        tp_order = exchange.create_order(
+                            symbol=symbol,
+                            type='market',
+                            side=tp_side,
+                            amount=size,
+                            params={
+                                'takeProfitPrice': tp_price,
+                                'posSide': pos_side,
+                                'reduceOnly': True
+                            }
+                        )
+                        position_tracker['positions'][symbol]['tp_order_id'] = tp_order['id']
+                        log_message("SUCCESS", f"{symbol} 补充止盈条件单成功: {tp_price:.6f}")
+                    except Exception as e:
+                        log_message("ERROR", f"{symbol} 补充止盈条件单失败: {str(e)}")
+                        
+    except Exception as e:
+        log_message("ERROR", f"补充设置止损止盈条件单时出错: {str(e)}")
 
 # ============================================
 # 更新持仓状态
@@ -1238,6 +1384,9 @@ def trading_loop():
                 
                 # 更新持仓状态
                 update_positions()
+                
+                # 检查并补充缺失的止损止盈条件单
+                setup_missing_stop_orders()
                 
                 # 检查每个交易对的信号
                 for symbol in trading_pairs:
