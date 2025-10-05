@@ -1,0 +1,116 @@
+{
+  "account": {
+    "totalBalance": 0.00,
+    "freeBalance": 0.00,
+    "dailyPnl": 0.00,
+    "totalPnl": 0.00
+  },
+  "stats": {
+    "totalTrades": 0,
+    "winTrades": 0,
+    "loseTrades": 0,
+    "winRate": 0.0
+  },
+  "positions": [],
+  "signals": [
+    {
+      "symbol": "BTC-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 67000.00,
+      "strength": 0
+    },
+    {
+      "symbol": "ETH-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 2600.00,
+      "strength": 0
+    },
+    {
+      "symbol": "SOL-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 140.00,
+      "strength": 0
+    },
+    {
+      "symbol": "BNB-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 590.00,
+      "strength": 0
+    },
+    {
+      "symbol": "XRP-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 0.52,
+      "strength": 0
+    },
+    {
+      "symbol": "DOGE-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 0.14,
+      "strength": 0
+    },
+    {
+      "symbol": "ADA-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 0.35,
+      "strength": 0
+    },
+    {
+      "symbol": "AVAX-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 25.00,
+      "strength": 0
+    },
+    {
+      "symbol": "SHIB-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 0.000018,
+      "strength": 0
+    },
+    {
+      "symbol": "DOT-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 4.20,
+      "strength": 0
+    },
+    {
+      "symbol": "FIL-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 3.80,
+      "strength": 0
+    },
+    {
+      "symbol": "ZRO-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 4.50,
+      "strength": 0
+    },
+    {
+      "symbol": "WIF-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 2.10,
+      "strength": 0
+    },
+    {
+      "symbol": "WLD-USDT-SWAP",
+      "status": "none",
+      "statusText": "无信号",
+      "price": 2.30,
+      "strength": 0
+    }
+  ],
+  "lastUpdate": "2025-10-06T03:00:00"
+}

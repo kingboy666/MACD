@@ -1538,6 +1538,112 @@ def check_closed_positions():
 # ============================================
 # 显示交易统计
 # ============================================
+# 保存数据到文件供Web界面使用
+# ============================================
+def save_dashboard_data():
+    """保存交易数据到JSON文件供Web界面读取"""
+    try:
+        # 获取账户信息
+        account_info = get_account_info()
+        if account_info:
+            trade_stats['current_balance'] = account_info['total_balance']
+        
+        # 计算胜率
+        total_trades = trade_stats.get('total_trades', 0)
+        win_trades = trade_stats.get('winning_trades', 0)
+        lose_trades = trade_stats.get('losing_trades', 0)
+        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
+        
+        # 准备持仓数据
+        positions = []
+        for symbol, position in position_tracker['positions'].items():
+            try:
+                # 获取当前价格
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                positions.append({
+                    'symbol': symbol,
+                    'side': position['side'],
+                    'entryPrice': position['entry_price'],
+                    'currentPrice': current_price,
+                    'size': position['size'],
+                    'leverage': position.get('leverage', get_leverage_for_symbol(symbol)),
+                    'stopLoss': position.get('sl', 0),
+                    'takeProfit': position.get('tp', 0),
+                    'pnl': position.get('pnl', 0)
+                })
+            except Exception as e:
+                log_message("WARNING", f"获取{symbol}价格失败: {e}")
+        
+        # 准备信号数据
+        trading_pairs = [
+            'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'BNB-USDT-SWAP',
+            'XRP-USDT-SWAP', 'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'AVAX-USDT-SWAP',
+            'SHIB-USDT-SWAP', 'DOT-USDT-SWAP', 'FIL-USDT-SWAP', 'ZRO-USDT-SWAP',
+            'WIF-USDT-SWAP', 'WLD-USDT-SWAP'
+        ]
+        
+        signals = []
+        for symbol in trading_pairs:
+            try:
+                # 获取当前价格
+                ticker = exchange.fetch_ticker(symbol)
+                current_price = ticker['last']
+                
+                # 获取最新信号
+                signal_info = latest_signals.get(symbol, (None, 0, None))
+                signal, strength, timestamp = signal_info
+                
+                if signal == "做多":
+                    status = 'buy'
+                    status_text = '做多'
+                elif signal == "做空":
+                    status = 'sell'
+                    status_text = '做空'
+                else:
+                    status = 'none'
+                    status_text = '无信号'
+                
+                signals.append({
+                    'symbol': symbol,
+                    'status': status,
+                    'statusText': status_text,
+                    'price': current_price,
+                    'strength': strength or 0
+                })
+            except Exception as e:
+                log_message("WARNING", f"获取{symbol}信号失败: {e}")
+        
+        # 组装完整数据
+        dashboard_data = {
+            'account': {
+                'totalBalance': trade_stats.get('current_balance', 0),
+                'freeBalance': account_info.get('free_balance', 0) if account_info else 0,
+                'dailyPnl': trade_stats.get('daily_pnl', 0),
+                'totalPnl': trade_stats.get('total_profit_loss', 0)
+            },
+            'stats': {
+                'totalTrades': total_trades,
+                'winTrades': win_trades,
+                'loseTrades': lose_trades,
+                'winRate': win_rate
+            },
+            'positions': positions,
+            'signals': signals,
+            'lastUpdate': datetime.now().isoformat()
+        }
+        
+        # 保存到文件
+        with open('dashboard_data.json', 'w', encoding='utf-8') as f:
+            json.dump(dashboard_data, f, ensure_ascii=False, indent=2)
+        
+        log_message("DEBUG", f"仪表板数据已更新: 余额{dashboard_data['account']['totalBalance']:.2f}, 持仓{len(positions)}, 胜率{win_rate:.1f}%")
+        
+    except Exception as e:
+        log_message("ERROR", f"保存仪表板数据失败: {str(e)}")
+
+# ============================================
 def display_trading_stats():
     """显示交易统计信息"""
     try:
@@ -1568,8 +1674,19 @@ def display_trading_stats():
             for symbol, pos in position_tracker['positions'].items():
                 print(f"  {symbol}: {pos['side']} {pos['size']:.4f} @ {pos['entry_price']:.4f} | 盈亏: {pos['pnl']:.2f} USDT")
         
+        # 保存数据供Web界面使用
+        save_dashboard_data()
+        
     except Exception as e:
         log_message("ERROR", f"显示统计信息失败: {str(e)}")
+
+# 在主循环中也定期保存数据
+def periodic_save_data():
+    """定期保存数据供Web界面使用"""
+    try:
+        save_dashboard_data()
+    except Exception as e:
+        log_message("ERROR", f"定期保存数据失败: {str(e)}")
 
 # ============================================
 # 交易循环函数
@@ -1663,6 +1780,27 @@ def trading_loop():
         traceback.print_exc()
 
 # ============================================
+# 启动Web仪表板
+# ============================================
+def start_web_dashboard():
+    """启动Web仪表板服务器"""
+    try:
+        from web_server import start_web_server
+        import threading
+        
+        # 在单独线程中启动Web服务器
+        web_thread = threading.Thread(target=start_web_server, kwargs={'port': 8080, 'debug': False}, daemon=True)
+        web_thread.start()
+        
+        log_message("SUCCESS", "🌐 Web仪表板已启动")
+        log_message("INFO", "📱 访问地址: http://localhost:8080")
+        
+        return True
+    except Exception as e:
+        log_message("ERROR", f"启动Web仪表板失败: {str(e)}")
+        return False
+
+# ============================================
 # 启动交易系统
 # ============================================
 def start_trading_system():
@@ -1676,6 +1814,9 @@ def start_trading_system():
         if not test_api_connection():
             log_message("ERROR", "API连接测试失败，请检查配置")
             return
+        
+        # 启动Web仪表板
+        start_web_dashboard()
         
         # 显示启动信息
         log_message("SUCCESS", "=" * 60)
@@ -1695,6 +1836,7 @@ def start_trading_system():
         log_message("INFO", "平仓条件: MACD反向交叉")
         log_message("INFO", "MACD平仓规则: 做多时MACD死叉平仓，做空时MACD金叉平仓")
         log_message("INFO", f"交易对: 热度前10 + FIL, ZRO, WIF, WLD (共14个)")
+        log_message("INFO", "🌐 Web仪表板: http://localhost:8080")
         log_message("SUCCESS", "=" * 60)
         
         # 启动交易循环
