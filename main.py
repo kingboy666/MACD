@@ -940,10 +940,10 @@ def check_trailing_stop(symbol, position_info):
         log_message("ERROR", f"检查动态止损失败 {symbol}: {e}")
         return False
 
-def setup_missing_stop_orders(position):
+def setup_missing_stop_orders(position, symbol):
     """为现有持仓设置止盈止损"""
     try:
-        symbol = position['symbol']
+        # symbol 由调用方传入，避免 position 缺少该字段导致的 KeyError
         entry_price = float(position['entry_price'])
         side = position['side']
         size = float(position['size'])
@@ -1146,7 +1146,7 @@ def manage_conditional_orders():
             has_stop_loss = any(o['type'] == 'stop' for o in current_orders)
             
             if not has_stop_loss:
-                setup_missing_stop_orders(position)
+                setup_missing_stop_orders(position, symbol)
         
     except Exception as e:
         log_message("ERROR", f"管理条件单失败: {e}")
@@ -1251,7 +1251,7 @@ def enhanced_trading_loop():
                                 # 设置止盈止损
                                 time.sleep(2)  # 等待订单确认
                                 if symbol in position_tracker['positions']:
-                                    setup_missing_stop_orders(position_tracker['positions'][symbol])
+                                    setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
                         
                         time.sleep(1)  # 短暂延迟避免API限制
                         
