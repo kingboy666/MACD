@@ -167,6 +167,9 @@ position_tracker = {
         'date': datetime.now().strftime('%Y-%m-%d'),
         'trades_count': 0,
         'total_pnl': 0
+
+# 全局订单跟踪字典，防止重复设置止盈止损
+order_tracking = {}
     }
 }
 
@@ -745,6 +748,11 @@ def close_position(symbol, reason="手动平仓"):
             # 清理持仓记录
             del position_tracker['positions'][symbol]
             
+            # 清理订单跟踪信息，防止重复设置止盈止损
+            if symbol in order_tracking:
+                del order_tracking[symbol]
+                log_message("DEBUG", f"清理 {symbol} 订单跟踪信息")
+            
             return True
         
         return False
@@ -1217,11 +1225,18 @@ def setup_missing_stop_orders(position, symbol):
         side = position['side']
         size = float(position['size'])
         
+        # 检查是否最近已经设置过止盈止损（使用全局order_tracking字典）
+        if symbol in order_tracking:
+            last_setup_time = order_tracking[symbol]['last_setup_time']
+            if time.time() - last_setup_time < 300:  # 5分钟内不重复设置
+                log_message("DEBUG", f"{symbol} 最近已设置过止盈止损，跳过重复设置")
+                return False
+        
         # 检查是否最近已经设置过止盈止损（避免重复设置）
         current_time = datetime.now()
         last_setup_time = position_tracker.get('last_stop_setup', {}).get(symbol)
         
-        if last_setup_time and (current_time - last_setup_time).total_seconds() < 300:  # 5分钟内不重复设置
+        if last_setup_time and (current_time - last_setup_time).total_seconds() < 600:  # 10分钟内不重复设置
             log_message("DEBUG", f"{symbol} 最近已设置过止盈止损，跳过重复设置")
             return False
         
@@ -1229,6 +1244,18 @@ def setup_missing_stop_orders(position, symbol):
         if 'last_stop_setup' not in position_tracker:
             position_tracker['last_stop_setup'] = {}
         position_tracker['last_stop_setup'][symbol] = current_time
+        
+        # 添加全局订单跟踪，防止重复设置
+        if 'active_stop_orders' not in position_tracker:
+            position_tracker['active_stop_orders'] = {}
+        
+        # 检查是否已经有活跃的止盈止损订单
+        if symbol in position_tracker['active_stop_orders']:
+            active_orders = position_tracker['active_stop_orders'][symbol]
+            order_time = active_orders.get('timestamp')
+            if order_time and (current_time - order_time).total_seconds() < 600:  # 10分钟内不重复设置
+                log_message("DEBUG", f"{symbol} 已有活跃的止盈止损订单，跳过重复设置")
+                return False
         
         # 获取ATR
         ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=50)
@@ -1243,13 +1270,48 @@ def setup_missing_stop_orders(position, symbol):
         stop_loss = stop_loss_tp['stop_loss']
         take_profit = stop_loss_tp['take_profit']
         
-        # 检查是否已有止损单（修复：检查条件单而不是stop类型）
+        # 检查是否已有止损单（修复：改进订单状态检查逻辑）
         current_orders = exchange.fetch_open_orders(symbol)
-        has_stop_loss = any(o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {}) for o in current_orders)
-        has_take_profit = any(o['type'] == 'conditional' and 'tpTriggerPx' in o.get('info', {}).get('params', {}) for o in current_orders)
         
-        # 添加日志显示当前订单状态
-        log_message("DEBUG", f"{symbol} 当前订单状态 - 止损单: {has_stop_loss}, 止盈单: {has_take_profit}")
+        # 改进的订单检查逻辑：检查订单类型、价格和详细信息
+        has_stop_loss = False
+        has_take_profit = False
+        
+        for order in current_orders:
+            order_type = order.get('type', '')
+            order_price = float(order.get('price', 0))
+            order_side = order.get('side', '')
+            order_amount = float(order.get('amount', 0))
+            order_info = order.get('info', {})
+            
+            # 打印订单详细信息用于调试
+            log_message("DEBUG", f"检查订单: 类型={order_type}, 价格={order_price:.4f}, 方向={order_side}, 数量={order_amount}")
+            
+            # 检查止损单：价格接近止损价，且是条件单或止损单
+            if (order_type in ['conditional', 'stop', 'stop_loss']) and abs(order_price - stop_loss) < stop_loss * 0.01:
+                has_stop_loss = True
+                log_message("DEBUG", f"找到止损单: 价格={order_price:.4f}, 止损价={stop_loss:.4f}")
+            
+            # 检查止盈单：价格接近止盈价，且是条件单或限价单
+            if (order_type in ['conditional', 'limit', 'take_profit']) and abs(order_price - take_profit) < take_profit * 0.01:
+                has_take_profit = True
+                log_message("DEBUG", f"找到止盈单: 价格={order_price:.4f}, 止盈价={take_profit:.4f}")
+            
+            # 额外检查：通过订单信息中的参数识别
+            if 'slTriggerPx' in str(order_info) or 'stopPrice' in str(order_info):
+                trigger_price = float(order_info.get('slTriggerPx') or order_info.get('stopPrice') or 0)
+                if abs(trigger_price - stop_loss) < stop_loss * 0.01:
+                    has_stop_loss = True
+                    log_message("DEBUG", f"通过参数找到止损单: 触发价={trigger_price:.4f}")
+            
+            if 'tpTriggerPx' in str(order_info) or 'takeProfitPrice' in str(order_info):
+                trigger_price = float(order_info.get('tpTriggerPx') or order_info.get('takeProfitPrice') or 0)
+                if abs(trigger_price - take_profit) < take_profit * 0.01:
+                    has_take_profit = True
+                    log_message("DEBUG", f"通过参数找到止盈单: 触发价={trigger_price:.4f}")
+        
+        # 添加详细日志显示当前订单状态
+        log_message("DEBUG", f"{symbol} 当前订单状态 - 止损单: {has_stop_loss}, 止盈单: {has_take_profit}, 总订单数: {len(current_orders)}")
         
         # 设置止损单（修复：使用条件单而不是stop类型）
         if not has_stop_loss:
@@ -1351,6 +1413,25 @@ def setup_missing_stop_orders(position, symbol):
                 )
             
             log_message("INFO", f"设置止盈单 {symbol}: {take_profit:.4f} (当前价: {current_price:.4f}, 入场价: {entry_price:.4f})")
+        
+        # 更新全局订单跟踪信息
+        position_tracker['active_stop_orders'][symbol] = {
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'timestamp': current_time,
+            'entry_price': entry_price
+        }
+        
+        log_message("DEBUG", f"{symbol} 止盈止损订单跟踪已更新")
+        
+        # 更新全局订单跟踪字典，防止重复设置
+        order_tracking[symbol] = {
+            'last_setup_time': time.time(),
+            'stop_loss': stop_loss,
+            'take_profit': take_profit,
+            'entry_price': entry_price
+        }
+        log_message("DEBUG", f"{symbol} 全局订单跟踪已更新")
         
         return True
         
