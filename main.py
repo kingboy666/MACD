@@ -323,18 +323,48 @@ def process_klines(ohlcv):
         log_message("ERROR", f"处理K线数据失败: {str(e)}")
         return None
 
+def calculate_bollinger_bands(close, period=20, std_dev=2):
+    """计算布林带指标"""
+    sma = close.rolling(window=period).mean()
+    std = close.rolling(window=period).std()
+    upper_band = sma + (std * std_dev)
+    lower_band = sma - (std * std_dev)
+    return upper_band, sma, lower_band
+
+def calculate_rsi(close, period=14):
+    """计算RSI指标"""
+    delta = close.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=period).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=period).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return rsi
+
+def calculate_stochastic(high, low, close, k_period=14, d_period=3):
+    """计算随机指标"""
+    lowest_low = low.rolling(window=k_period).min()
+    highest_high = high.rolling(window=k_period).max()
+    k = ((close - lowest_low) / (highest_high - lowest_low)) * 100
+    d = k.rolling(window=d_period).mean()
+    return k, d
+
 def generate_signal(symbol):
-    """基于MACD金叉/死叉、K线阴阳线和ADX趋势确认生成交易信号"""
+    """基于MACD趋势策略和布林带震荡策略生成交易信号"""
     try:
         ohlcv = get_klines(symbol, '30m', limit=100)
         if not ohlcv:
             return None
         
         df = process_klines(ohlcv)
-        if df is None or len(df) < 2:
+        if df is None or len(df) < 50:
             return None
         
-        # 获取当前和前一周期数据
+        # 计算布林带震荡策略指标
+        df['BB_UPPER'], df['BB_MIDDLE'], df['BB_LOWER'] = calculate_bollinger_bands(df['close'])
+        df['RSI'] = calculate_rsi(df['close'])
+        df['STOCH_K'], df['STOCH_D'] = calculate_stochastic(df['high'], df['low'], df['close'])
+        
+        # 获取当前数据
         current_macd = df['MACD'].iloc[-1]
         current_signal = df['MACD_SIGNAL'].iloc[-1]
         prev_macd = df['MACD'].iloc[-2]
@@ -344,6 +374,14 @@ def generate_signal(symbol):
         current_open = df['open'].iloc[-1]
         current_close = df['close'].iloc[-1]
         atr_value = df['ATR_14'].iloc[-1]
+        
+        # 布林带震荡策略数据
+        current_bb_upper = df['BB_UPPER'].iloc[-1]
+        current_bb_lower = df['BB_LOWER'].iloc[-1]
+        current_bb_middle = df['BB_MIDDLE'].iloc[-1]
+        current_rsi = df['RSI'].iloc[-1]
+        current_stoch_k = df['STOCH_K'].iloc[-1]
+        current_stoch_d = df['STOCH_D'].iloc[-1]
         
         # 检查MACD金叉死叉
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
@@ -355,8 +393,9 @@ def generate_signal(symbol):
         
         signal = None
         
-        # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认
-        if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情
+        # 策略选择：根据ADX判断市场状态
+        if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情 - 使用MACD策略
+            # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认
             if golden_cross and is_bullish:
                 signal = {
                     'symbol': symbol,
@@ -368,9 +407,10 @@ def generate_signal(symbol):
                     'macd_value': current_macd,
                     'signal_value': current_signal,
                     'is_bullish': is_bullish,
-                    'confirmation_type': 'MACD金叉+阳线确认+ADX趋势'
+                    'confirmation_type': 'MACD金叉+阳线确认+ADX趋势',
+                    'strategy_type': 'trend'
                 }
-                log_message("DEBUG", f"{symbol} 做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
+                log_message("DEBUG", f"{symbol} 趋势策略做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
                 
             elif death_cross and is_bearish:
                 signal = {
@@ -383,14 +423,113 @@ def generate_signal(symbol):
                     'macd_value': current_macd,
                     'signal_value': current_signal,
                     'is_bearish': is_bearish,
-                    'confirmation_type': 'MACD死叉+阴线确认+ADX趋势'
+                    'confirmation_type': 'MACD死叉+阴线确认+ADX趋势',
+                    'strategy_type': 'trend'
                 }
-                log_message("DEBUG", f"{symbol} 做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
+                log_message("DEBUG", f"{symbol} 趋势策略做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
         
-        elif current_adx < ADX_SIDEWAYS_THRESHOLD:  # 震荡行情
-            log_message("DEBUG", f"{symbol} 震荡行情跳过: ADX={current_adx:.2f} < {ADX_SIDEWAYS_THRESHOLD}")
+        elif current_adx < ADX_SIDEWAYS_THRESHOLD:  # 震荡行情 - 使用布林带策略
+            # 布林带震荡策略信号
+            bb_signal = None
+            
+            # 检查布林带位置和指标确认
+            price_near_bb_lower = current_price <= current_bb_lower * 1.02  # 价格接近下轨
+            price_near_bb_upper = current_price >= current_bb_upper * 0.98  # 价格接近上轨
+            
+            # RSI超卖超买确认
+            rsi_oversold = current_rsi < 30  # RSI超卖
+            rsi_overbought = current_rsi > 70  # RSI超买
+            
+            # 随机指标确认
+            stoch_oversold = current_stoch_k < 20 and current_stoch_d < 20  # 随机指标超卖
+            stoch_overbought = current_stoch_k > 80 and current_stoch_d > 80  # 随机指标超买
+            
+            # 震荡策略做多信号：价格接近下轨 + RSI超卖 + 随机指标超卖 + 阳线确认
+            if price_near_bb_lower and rsi_oversold and stoch_oversold and is_bullish:
+                bb_signal = {
+                    'symbol': symbol,
+                    'side': 'long',
+                    'price': current_price,
+                    'signal_strength': 'medium',
+                    'atr_value': atr_value,
+                    'adx_value': current_adx,
+                    'bb_upper': current_bb_upper,
+                    'bb_lower': current_bb_lower,
+                    'bb_middle': current_bb_middle,
+                    'rsi_value': current_rsi,
+                    'stoch_k': current_stoch_k,
+                    'stoch_d': current_stoch_d,
+                    'is_bullish': is_bullish,
+                    'confirmation_type': '布林带下轨+RSI超卖+随机超卖+阳线确认',
+                    'strategy_type': 'oscillation'
+                }
+                log_message("DEBUG", f"{symbol} 震荡策略做多信号: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近下轨")
+            
+            # 震荡策略做空信号：价格接近上轨 + RSI超买 + 随机指标超买 + 阴线确认
+            elif price_near_bb_upper and rsi_overbought and stoch_overbought and is_bearish:
+                bb_signal = {
+                    'symbol': symbol,
+                    'side': 'short',
+                    'price': current_price,
+                    'signal_strength': 'medium',
+                    'atr_value': atr_value,
+                    'adx_value': current_adx,
+                    'bb_upper': current_bb_upper,
+                    'bb_lower': current_bb_lower,
+                    'bb_middle': current_bb_middle,
+                    'rsi_value': current_rsi,
+                    'stoch_k': current_stoch_k,
+                    'stoch_d': current_stoch_d,
+                    'is_bearish': is_bearish,
+                    'confirmation_type': '布林带上轨+RSI超买+随机超买+阴线确认',
+                    'strategy_type': 'oscillation'
+                }
+                log_message("DEBUG", f"{symbol} 震荡策略做空信号: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近上轨")
+            
+            # 中等强度信号：缺少一个指标确认但其他条件满足
+            elif price_near_bb_lower and (rsi_oversold or stoch_oversold) and is_bullish:
+                bb_signal = {
+                    'symbol': symbol,
+                    'side': 'long',
+                    'price': current_price,
+                    'signal_strength': 'weak',
+                    'atr_value': atr_value,
+                    'adx_value': current_adx,
+                    'bb_upper': current_bb_upper,
+                    'bb_lower': current_bb_lower,
+                    'bb_middle': current_bb_middle,
+                    'rsi_value': current_rsi,
+                    'stoch_k': current_stoch_k,
+                    'stoch_d': current_stoch_d,
+                    'is_bullish': is_bullish,
+                    'confirmation_type': '布林带下轨+部分指标确认+阳线确认',
+                    'strategy_type': 'oscillation'
+                }
+                log_message("DEBUG", f"{symbol} 震荡策略弱做多信号: ADX={current_adx:.2f}, 价格接近下轨")
+            
+            elif price_near_bb_upper and (rsi_overbought or stoch_overbought) and is_bearish:
+                bb_signal = {
+                    'symbol': symbol,
+                    'side': 'short',
+                    'price': current_price,
+                    'signal_strength': 'weak',
+                    'atr_value': atr_value,
+                    'adx_value': current_adx,
+                    'bb_upper': current_bb_upper,
+                    'bb_lower': current_bb_lower,
+                    'bb_middle': current_bb_middle,
+                    'rsi_value': current_rsi,
+                    'stoch_k': current_stoch_k,
+                    'stoch_d': current_stoch_d,
+                    'is_bearish': is_bearish,
+                    'confirmation_type': '布林带上轨+部分指标确认+阴线确认',
+                    'strategy_type': 'oscillation'
+                }
+                log_message("DEBUG", f"{symbol} 震荡策略弱做空信号: ADX={current_adx:.2f}, 价格接近上轨")
+            
+            signal = bb_signal
         
-        else:  # 中等趋势强度
+        else:  # 中等趋势强度 - 优先使用趋势策略
             if golden_cross and is_bullish:
                 log_message("DEBUG", f"{symbol} 中等趋势做多信号: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
             elif death_cross and is_bearish:
@@ -1107,7 +1246,7 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
 # =================================
 
 def check_trailing_stop(symbol, position_info):
-    """检查并更新动态止损"""
+    """检查并更新动态止损（修复：区分趋势和震荡策略）"""
     try:
         if not position_info or position_info['size'] == 0:
             return False
@@ -1116,21 +1255,34 @@ def check_trailing_stop(symbol, position_info):
         entry_price = float(position_info['entry_price'])
         side = position_info['side']
         size = float(position_info['size'])
+        strategy_type = position_info.get('strategy_type', 'trend')  # 默认为趋势策略
         
         # 获取ATR值
         ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=50)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
         
-        # 计算当前盈亏
-        if side == 'long':
-            unrealized_pnl = (current_price - entry_price) / entry_price
-            profit_threshold = atr * 1.5 / entry_price  # 1.5倍ATR开始启用动态止损
-            
-            if unrealized_pnl > profit_threshold:
-                # 计算动态止损价格（保护50%利润）
-                profit_protection = unrealized_pnl * 0.5
-                new_stop_loss = entry_price * (1 + profit_protection)
+        # 根据策略类型设置不同的动态止损参数
+        if strategy_type == 'oscillation':
+            # 震荡策略：更早启用动态止损，更紧的保护
+            if side == 'long':
+                unrealized_pnl = (current_price - entry_price) / entry_price
+                profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
+                
+                if unrealized_pnl > profit_threshold:
+                    # 计算动态止损价格（保护60%利润，更紧）
+                    profit_protection = unrealized_pnl * 0.4
+                    new_stop_loss = entry_price * (1 + profit_protection)
+        else:
+            # 趋势策略：原有参数
+            if side == 'long':
+                unrealized_pnl = (current_price - entry_price) / entry_price
+                profit_threshold = atr * 1.5 / entry_price  # 1.5倍ATR开始启用动态止损
+                
+                if unrealized_pnl > profit_threshold:
+                    # 计算动态止损价格（保护50%利润）
+                    profit_protection = unrealized_pnl * 0.5
+                    new_stop_loss = entry_price * (1 + profit_protection)
                 
                 # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
                 current_orders = exchange.fetch_open_orders(symbol)
@@ -1171,45 +1323,57 @@ def check_trailing_stop(symbol, position_info):
         
         else:  # short position
             unrealized_pnl = (entry_price - current_price) / entry_price
-            profit_threshold = atr * 1.5 / entry_price
             
-            if unrealized_pnl > profit_threshold:
-                profit_protection = unrealized_pnl * 0.5
-                new_stop_loss = entry_price * (1 - profit_protection)
+            # 根据策略类型设置不同的动态止损参数
+            if strategy_type == 'oscillation':
+                profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
                 
-                current_orders = exchange.fetch_open_orders(symbol)
-                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
+                if unrealized_pnl > profit_threshold:
+                    profit_protection = unrealized_pnl * 0.4  # 保护60%利润，更紧
+                    new_stop_loss = entry_price * (1 - profit_protection)
+            else:
+                profit_threshold = atr * 1.5 / entry_price
                 
-                should_update = True
+                if unrealized_pnl > profit_threshold:
+                    profit_protection = unrealized_pnl * 0.5
+                    new_stop_loss = entry_price * (1 - profit_protection)
+            
+            # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
+            current_orders = exchange.fetch_open_orders(symbol)
+            stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
+            
+            should_update = True
+            for order in stop_orders:
+                if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
+                    should_update = False
+                    break
+            
+            if should_update:
+                # 取消旧的止损单
                 for order in stop_orders:
-                    if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
-                        should_update = False
-                        break
+                    try:
+                        exchange.cancel_order(order['id'], symbol)
+                    except:
+                        pass
                 
-                if should_update:
-                    for order in stop_orders:
-                        try:
-                            exchange.cancel_order(order['id'], symbol)
-                        except:
-                            pass
-                    
-                    exchange.create_order(
-                        symbol=symbol,
-                        type='conditional',
-                        side='buy',
-                        amount=abs(size),
-                        price=new_stop_loss,
-                        params={
-                            'slTriggerPx': new_stop_loss,
-                            'slOrdPx': new_stop_loss,
-                            'tdMode': 'cross',
-                            'posSide': 'short',
-                            'reduceOnly': True
-                        }
-                    )
-                    
-                    log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
-                    return True
+                # 下新的止损单（修复：使用条件单）
+                exchange.create_order(
+                    symbol=symbol,
+                    type='conditional',
+                    side='buy',
+                    amount=abs(size),
+                    price=new_stop_loss,
+                    params={
+                        'slTriggerPx': new_stop_loss,
+                        'slOrdPx': new_stop_loss,
+                        'tdMode': 'cross',
+                        'posSide': 'short',
+                        'reduceOnly': True
+                    }
+                )
+                
+                log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
+                return True
         
         return False
         
@@ -1218,12 +1382,13 @@ def check_trailing_stop(symbol, position_info):
         return False
 
 def setup_missing_stop_orders(position, symbol):
-    """为现有持仓设置止盈止损（修复：防止重复设置）"""
+    """为现有持仓设置止盈止损（修复：防止重复设置，区分趋势和震荡策略）"""
     try:
         # symbol 由调用方传入，避免 position 缺少该字段导致的 KeyError
         entry_price = float(position['entry_price'])
         side = position['side']
         size = float(position['size'])
+        strategy_type = position.get('strategy_type', 'trend')  # 默认为趋势策略
         
         # 检查是否最近已经设置过止盈止损（使用全局order_tracking字典）
         if symbol in order_tracking:
@@ -1262,13 +1427,39 @@ def setup_missing_stop_orders(position, symbol):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
         
-        # 计算止盈止损价格
-        stop_loss_tp = calculate_stop_loss_take_profit(symbol, entry_price, side, atr)
-        if not stop_loss_tp:
-            return False
-        
-        stop_loss = stop_loss_tp['stop_loss']
-        take_profit = stop_loss_tp['take_profit']
+        # 根据策略类型计算不同的止盈止损参数
+        if strategy_type == 'oscillation':
+            # 震荡策略：更紧的止损，更小的目标
+            if USE_ATR_DYNAMIC_STOPS and atr and atr > 0:
+                # 震荡策略使用更小的ATR倍数
+                atr_sl_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_STOP_LOSS_MULTIPLIER * 0.5))  # 减少50%
+                atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER * 0.6))  # 减少40%
+                
+                if side == 'long':
+                    stop_loss = max(entry_price * 0.96, entry_price - (atr * atr_sl_multiplier))  # 至少4%止损
+                    take_profit = entry_price + (atr * atr_tp_multiplier)
+                else:  # short
+                    stop_loss = min(entry_price * 1.04, entry_price + (atr * atr_sl_multiplier))  # 至少4%止损
+                    take_profit = max(entry_price * 0.95, entry_price - (atr * atr_tp_multiplier))  # 至少5%止盈
+            else:
+                # 固定百分比止损止盈（震荡策略更紧）
+                if side == 'long':
+                    stop_loss = entry_price * 0.96  # 4%止损
+                    take_profit = entry_price * 1.03  # 3%止盈
+                else:  # short
+                    stop_loss = entry_price * 1.04  # 4%止损
+                    take_profit = entry_price * 0.95  # 5%止盈
+            
+            log_message("DEBUG", f"{symbol} 震荡策略止盈止损: 入场价={entry_price:.4f}, 止损={stop_loss:.4f}, 止盈={take_profit:.4f}")
+        else:
+            # 趋势策略：使用原有参数
+            stop_loss_tp = calculate_stop_loss_take_profit(symbol, entry_price, side, atr)
+            if not stop_loss_tp:
+                return False
+            
+            stop_loss = stop_loss_tp['stop_loss']
+            take_profit = stop_loss_tp['take_profit']
+            log_message("DEBUG", f"{symbol} 趋势策略止盈止损: 入场价={entry_price:.4f}, 止损={stop_loss:.4f}, 止盈={take_profit:.4f}")
         
         # 检查是否已有止损单（修复：改进订单状态检查逻辑）
         current_orders = exchange.fetch_open_orders(symbol)
