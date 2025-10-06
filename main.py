@@ -1734,15 +1734,43 @@ def start_trading_system():
 # =================================
 
 def get_historical_data(symbol, days=30):
-    """获取历史数据用于回测"""
+    """获取历史数据用于回测（支持无API密钥的公共行情模式）"""
     try:
+        import ccxt
         # 计算需要获取的K线数量
         limit = days * 24 * 2  # 30分钟K线，每天48根
-        
-        ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=limit)
+
+        # 准备只读公共行情客户端
+        ex = exchange
+        if ex is None:
+            # 优先使用 OKX（与你的合约格式 XXX-USDT-SWAP 一致），失败则回退 Binance
+            try:
+                ex = ccxt.okx()
+            except Exception:
+                ex = ccxt.binance()
+
+        # 统一交易对格式：Binance 无 SWAP 后缀，OKX 需要 -USDT-SWAP
+        sym = symbol
+        if isinstance(ex, ccxt.binance):
+            # 转为 Binance 现货/合约通用格式，如 BTC/USDT
+            if '-USDT-SWAP' in sym:
+                sym = sym.replace('-USDT-SWAP', '/USDT')
+            elif ':' in sym:
+                sym = sym.replace(':USDT', '/USDT')
+        elif isinstance(ex, ccxt.okx):
+            # 确保是 OKX 合约格式
+            if ':USDT' in sym:
+                sym = sym.replace(':USDT', '-USDT-SWAP')
+            elif not sym.endswith('-USDT-SWAP'):
+                sym = sym.split('/USDT')[0] + '-USDT-SWAP' if '/USDT' in sym else sym
+
+        # 拉取30m K线（公共接口无需私钥）
+        ohlcv = ex.fetch_ohlcv(sym, timeframe='30m', limit=limit)
+        if not ohlcv or len(ohlcv) == 0:
+            raise Exception("公共行情返回为空")
+
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-        
         return df
     except Exception as e:
         log_message("ERROR", f"获取历史数据失败 {symbol}: {e}")
@@ -1752,6 +1780,7 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
     """策略回测 - EMA5/EMA10 交叉 + 固定止盈0.0058 + 交叉前一根K线止损；统一50x杠杆"""
     try:
         log_message("INFO", f"开始回测 {symbol}，回测天数: {days}，初始资金: {initial_balance}")
+        log_message("INFO", "已启用BB(20,2)中轨0.5%入场过滤")
         df = get_historical_data(symbol, days)
         if df is None or len(df) < 50:
             log_message("WARNING", f"历史数据不足，无法回测 {symbol}")
@@ -2564,9 +2593,9 @@ def enhanced_trading_loop():
     try:
         log_message("SUCCESS", "开始增强版交易循环...")
         
-        # 启动时运行全面回测
-        log_message("INFO", "正在运行全面策略回测分析...")
-        backtest_results = run_comprehensive_backtest(None, days_list=[7, 14, 30])
+        # 启动时运行单策略（EMA5/EMA10 + BB过滤）回测
+        log_message("INFO", "正在运行单一策略综合回测（EMA5/EMA10 + BB(20,2)过滤，0.5%阈值）...")
+        backtest_results = run_ema_bb_backtest(None, days_list=[7, 14, 30])
         
         if backtest_results:
             # 保存回测结果到文件
