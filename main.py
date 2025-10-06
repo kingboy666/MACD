@@ -364,6 +364,14 @@ def generate_signal(symbol):
         df['RSI'] = calculate_rsi(df['close'])
         df['STOCH_K'], df['STOCH_D'] = calculate_stochastic(df['high'], df['low'], df['close'])
         
+        # 获取当前时间戳，检查K线是否已收盘
+        import time
+        current_timestamp = int(time.time() * 1000)
+        current_kline = ohlcv[-1]
+        current_kline_start = current_kline[0]
+        current_kline_end = current_kline_start + 30 * 60 * 1000  # 30分钟K线结束时间
+        kline_completed = current_timestamp >= current_kline_end
+        
         # 获取当前数据
         current_macd = df['MACD'].iloc[-1]
         current_signal = df['MACD_SIGNAL'].iloc[-1]
@@ -395,38 +403,52 @@ def generate_signal(symbol):
         
         # 策略选择：根据ADX判断市场状态
         if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情 - 使用MACD策略
-            # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认
+            # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认 + K线收盘确认
             if golden_cross and is_bullish:
-                signal = {
-                    'symbol': symbol,
-                    'side': 'long',
-                    'price': current_price,
-                    'signal_strength': 'strong',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'macd_value': current_macd,
-                    'signal_value': current_signal,
-                    'is_bullish': is_bullish,
-                    'confirmation_type': 'MACD金叉+阳线确认+ADX趋势',
-                    'strategy_type': 'trend'
-                }
-                log_message("DEBUG", f"{symbol} 趋势策略做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
+                if kline_completed:
+                    signal = {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'is_bullish': is_bullish,
+                        'confirmation_type': 'MACD金叉+阳线确认+ADX趋势+K线收盘',
+                        'strategy_type': 'trend'
+                    }
+                    log_message("DEBUG", f"{symbol} 趋势策略做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
                 
             elif death_cross and is_bearish:
-                signal = {
-                    'symbol': symbol,
-                    'side': 'short',
-                    'price': current_price,
-                    'signal_strength': 'strong',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'macd_value': current_macd,
-                    'signal_value': current_signal,
-                    'is_bearish': is_bearish,
-                    'confirmation_type': 'MACD死叉+阴线确认+ADX趋势',
-                    'strategy_type': 'trend'
-                }
-                log_message("DEBUG", f"{symbol} 趋势策略做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
+                if kline_completed:
+                    signal = {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'is_bearish': is_bearish,
+                        'confirmation_type': 'MACD死叉+阴线确认+ADX趋势+K线收盘',
+                        'strategy_type': 'trend'
+                    }
+                    log_message("DEBUG", f"{symbol} 趋势策略做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
+            
+            # 如果没有符合条件的信号，返回None
+            if signal is None:
+                return None
         
         elif current_adx < ADX_SIDEWAYS_THRESHOLD:  # 震荡行情 - 使用布林带策略
             # 布林带震荡策略信号
@@ -444,88 +466,112 @@ def generate_signal(symbol):
             stoch_oversold = current_stoch_k < 20 and current_stoch_d < 20  # 随机指标超卖
             stoch_overbought = current_stoch_k > 80 and current_stoch_d > 80  # 随机指标超买
             
-            # 震荡策略做多信号：价格接近下轨 + RSI超卖 + 随机指标超卖 + 阳线确认
+            # 震荡策略做多信号：价格接近下轨 + RSI超卖 + 随机指标超卖 + 阳线确认 + K线收盘确认
             if price_near_bb_lower and rsi_oversold and stoch_oversold and is_bullish:
-                bb_signal = {
-                    'symbol': symbol,
-                    'side': 'long',
-                    'price': current_price,
-                    'signal_strength': 'medium',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'bb_upper': current_bb_upper,
-                    'bb_lower': current_bb_lower,
-                    'bb_middle': current_bb_middle,
-                    'rsi_value': current_rsi,
-                    'stoch_k': current_stoch_k,
-                    'stoch_d': current_stoch_d,
-                    'is_bullish': is_bullish,
-                    'confirmation_type': '布林带下轨+RSI超卖+随机超卖+阳线确认',
-                    'strategy_type': 'oscillation'
-                }
-                log_message("DEBUG", f"{symbol} 震荡策略做多信号: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近下轨")
+                if kline_completed:
+                    bb_signal = {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'medium',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'bb_upper': current_bb_upper,
+                        'bb_lower': current_bb_lower,
+                        'bb_middle': current_bb_middle,
+                        'rsi_value': current_rsi,
+                        'stoch_k': current_stoch_k,
+                        'stoch_d': current_stoch_d,
+                        'is_bullish': is_bullish,
+                        'confirmation_type': '布林带下轨+RSI超卖+随机超卖+阳线确认+K线收盘',
+                        'strategy_type': 'oscillation'
+                    }
+                    log_message("DEBUG", f"{symbol} 震荡策略做多信号确认: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近下轨, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 震荡做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
             
-            # 震荡策略做空信号：价格接近上轨 + RSI超买 + 随机指标超买 + 阴线确认
+            # 震荡策略做空信号：价格接近上轨 + RSI超买 + 随机指标超买 + 阴线确认 + K线收盘确认
             elif price_near_bb_upper and rsi_overbought and stoch_overbought and is_bearish:
-                bb_signal = {
-                    'symbol': symbol,
-                    'side': 'short',
-                    'price': current_price,
-                    'signal_strength': 'medium',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'bb_upper': current_bb_upper,
-                    'bb_lower': current_bb_lower,
-                    'bb_middle': current_bb_middle,
-                    'rsi_value': current_rsi,
-                    'stoch_k': current_stoch_k,
-                    'stoch_d': current_stoch_d,
-                    'is_bearish': is_bearish,
-                    'confirmation_type': '布林带上轨+RSI超买+随机超买+阴线确认',
-                    'strategy_type': 'oscillation'
-                }
-                log_message("DEBUG", f"{symbol} 震荡策略做空信号: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近上轨")
+                if kline_completed:
+                    bb_signal = {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'medium',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'bb_upper': current_bb_upper,
+                        'bb_lower': current_bb_lower,
+                        'bb_middle': current_bb_middle,
+                        'rsi_value': current_rsi,
+                        'stoch_k': current_stoch_k,
+                        'stoch_d': current_stoch_d,
+                        'is_bearish': is_bearish,
+                        'confirmation_type': '布林带上轨+RSI超买+随机超买+阴线确认+K线收盘',
+                        'strategy_type': 'oscillation'
+                    }
+                    log_message("DEBUG", f"{symbol} 震荡策略做空信号确认: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近上轨, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 震荡做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
             
-            # 中等强度信号：缺少一个指标确认但其他条件满足
+            # 中等强度信号：缺少一个指标确认但其他条件满足 + K线收盘确认
             elif price_near_bb_lower and (rsi_oversold or stoch_oversold) and is_bullish:
-                bb_signal = {
-                    'symbol': symbol,
-                    'side': 'long',
-                    'price': current_price,
-                    'signal_strength': 'weak',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'bb_upper': current_bb_upper,
-                    'bb_lower': current_bb_lower,
-                    'bb_middle': current_bb_middle,
-                    'rsi_value': current_rsi,
-                    'stoch_k': current_stoch_k,
-                    'stoch_d': current_stoch_d,
-                    'is_bullish': is_bullish,
-                    'confirmation_type': '布林带下轨+部分指标确认+阳线确认',
-                    'strategy_type': 'oscillation'
-                }
-                log_message("DEBUG", f"{symbol} 震荡策略弱做多信号: ADX={current_adx:.2f}, 价格接近下轨")
+                if kline_completed:
+                    bb_signal = {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'weak',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'bb_upper': current_bb_upper,
+                        'bb_lower': current_bb_lower,
+                        'bb_middle': current_bb_middle,
+                        'rsi_value': current_rsi,
+                        'stoch_k': current_stoch_k,
+                        'stoch_d': current_stoch_d,
+                        'is_bullish': is_bullish,
+                        'confirmation_type': '布林带下轨+部分指标确认+阳线确认+K线收盘',
+                        'strategy_type': 'oscillation'
+                    }
+                    log_message("DEBUG", f"{symbol} 震荡策略弱做多信号确认: ADX={current_adx:.2f}, 价格接近下轨, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 震荡弱做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
             
             elif price_near_bb_upper and (rsi_overbought or stoch_overbought) and is_bearish:
-                bb_signal = {
-                    'symbol': symbol,
-                    'side': 'short',
-                    'price': current_price,
-                    'signal_strength': 'weak',
-                    'atr_value': atr_value,
-                    'adx_value': current_adx,
-                    'bb_upper': current_bb_upper,
-                    'bb_lower': current_bb_lower,
-                    'bb_middle': current_bb_middle,
-                    'rsi_value': current_rsi,
-                    'stoch_k': current_stoch_k,
-                    'stoch_d': current_stoch_d,
-                    'is_bearish': is_bearish,
-                    'confirmation_type': '布林带上轨+部分指标确认+阴线确认',
-                    'strategy_type': 'oscillation'
-                }
-                log_message("DEBUG", f"{symbol} 震荡策略弱做空信号: ADX={current_adx:.2f}, 价格接近上轨")
+                if kline_completed:
+                    bb_signal = {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'weak',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'bb_upper': current_bb_upper,
+                        'bb_lower': current_bb_lower,
+                        'bb_middle': current_bb_middle,
+                        'rsi_value': current_rsi,
+                        'stoch_k': current_stoch_k,
+                        'stoch_d': current_stoch_d,
+                        'is_bearish': is_bearish,
+                        'confirmation_type': '布林带上轨+部分指标确认+阴线确认+K线收盘',
+                        'strategy_type': 'oscillation'
+                    }
+                    log_message("DEBUG", f"{symbol} 震荡策略弱做空信号确认: ADX={current_adx:.2f}, 价格接近上轨, K线已收盘")
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 震荡弱做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
+                    return None  # 等待K线收盘，不返回信号
+            
+            # 如果没有符合条件的信号，返回None
+            if bb_signal is None:
+                return None
             
             signal = bb_signal
         
@@ -793,30 +839,43 @@ def check_positions():
             if df is None or len(df) < 2:
                 continue
             
-            # 获取当前和前一周期数据
+            # 获取当前时间戳
+            import time
+            current_timestamp = int(time.time() * 1000)
+            
+            # 获取当前K线数据（MACD交叉的这根K线）
+            current_kline = ohlcv[-1]
+            current_kline_start = current_kline[0]
+            current_kline_end = current_kline_start + 30 * 60 * 1000  # 30分钟K线结束时间
+            
+            # 获取当前K线的技术指标
             current_macd = df['MACD'].iloc[-1]
             current_signal = df['MACD_SIGNAL'].iloc[-1]
-            prev_macd = df['MACD'].iloc[-2]
-            prev_signal = df['MACD_SIGNAL'].iloc[-2]
             current_adx = df['ADX'].iloc[-1]
-            current_price = df['close'].iloc[-1]
             current_open = df['open'].iloc[-1]
             current_close = df['close'].iloc[-1]
             
+            # 获取前一K线数据（用于判断交叉）
+            prev_macd = df['MACD'].iloc[-2]
+            prev_signal = df['MACD_SIGNAL'].iloc[-2]
+            prev_adx = df['ADX'].iloc[-2]
+            prev_open = df['open'].iloc[-2]
+            prev_close = df['close'].iloc[-2]
+            
             position = position_tracker['positions'][symbol]
             
-            # 检查MACD金叉死叉
+            # 检查MACD金叉死叉（使用当前K线和前一K线判断交叉）
             golden_cross = prev_macd <= prev_signal and current_macd > current_signal
             death_cross = prev_macd >= prev_signal and current_macd < current_signal
             
-            # 检查K线阴阳线
+            # 检查当前K线的阴阳线（收盘价确认）
             is_bullish = current_close > current_open  # 阳线：收盘价大于开盘价
             is_bearish = current_close < current_open  # 阴线：收盘价小于开盘价
             
             should_close = False
             close_reason = ""
             
-            # 平仓条件：MACD反向信号 + K线确认 + ADX趋势确认
+            # 平仓条件：使用MACD交叉的这根K线收盘时确认
             if position['side'] == 'long' and death_cross and is_bearish and current_adx > ADX_TREND_THRESHOLD:
                 should_close = True
                 close_reason = f"MACD死叉+阴线确认平仓 (ADX={current_adx:.2f})"
@@ -827,8 +886,26 @@ def check_positions():
                 close_reason = f"MACD金叉+阳线确认平仓 (ADX={current_adx:.2f})"
                 log_message("DEBUG", f"{symbol} 空头平仓条件满足: 金叉确认, 阳线确认, ADX趋势")
             
+            # 检查当前K线是否已收盘
+            kline_completed = current_timestamp >= current_kline_end
+            
             if should_close:
-                close_position(symbol, close_reason)
+                log_message("DEBUG", f"{symbol} 平仓检查: 当前K线开始时间={current_kline_start}, 结束时间={current_kline_end}, 当前时间={current_timestamp}, K线完成={kline_completed}")
+                
+                if kline_completed:
+                    # 当前K线已收盘，执行平仓
+                    close_position(symbol, close_reason)
+                    log_message("INFO", f"{symbol} MACD交叉K线已收盘，执行平仓: {close_reason}")
+                else:
+                    # 当前K线未收盘，等待收盘
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    log_message("DEBUG", f"{symbol} 平仓条件满足但等待当前K线收盘 (还需等待{time_remaining:.0f}秒)")
+            else:
+                # 记录为什么没有满足平仓条件
+                if position['side'] == 'long':
+                    log_message("DEBUG", f"{symbol} 多头持仓未满足平仓条件: 死叉={death_cross}, 阴线={is_bearish}, ADX={current_adx:.2f}>{ADX_TREND_THRESHOLD}")
+                elif position['side'] == 'short':
+                    log_message("DEBUG", f"{symbol} 空头持仓未满足平仓条件: 金叉={golden_cross}, 阳线={is_bullish}, ADX={current_adx:.2f}>{ADX_TREND_THRESHOLD}")
                 
     except Exception as e:
         log_message("ERROR", f"检查持仓状态失败: {str(e)}")
@@ -1246,19 +1323,36 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
 # =================================
 
 def check_trailing_stop(symbol, position_info):
-    """检查并更新动态止损（修复：区分趋势和震荡策略）"""
+    """检查并更新动态止损（修复：区分趋势和震荡策略，添加K线收盘确认）"""
     try:
         if not position_info or position_info['size'] == 0:
             return False
         
-        current_price = float(exchange.fetch_ticker(symbol)['last'])
+        # 获取K线数据，检查当前K线是否已收盘
+        ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=2)
+        if len(ohlcv) < 2:
+            return False
+            
+        current_kline = ohlcv[-1]
+        prev_kline = ohlcv[-2]
+        
+        # 检查当前K线是否已收盘（当前时间是否超过K线结束时间）
+        current_time = exchange.milliseconds()
+        kline_end_time = current_kline[0] + 30 * 60 * 1000  # 30分钟K线结束时间
+        
+        # 如果当前K线还未收盘，使用前一K线的收盘价作为参考
+        if current_time < kline_end_time:
+            current_price = prev_kline[4]  # 使用前一K线的收盘价
+            log_message("DEBUG", f"{symbol} 当前K线未收盘，使用前一K线收盘价: {current_price}")
+        else:
+            current_price = float(exchange.fetch_ticker(symbol)['last'])
+        
         entry_price = float(position_info['entry_price'])
         side = position_info['side']
         size = float(position_info['size'])
         strategy_type = position_info.get('strategy_type', 'trend')  # 默认为趋势策略
         
         # 获取ATR值
-        ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=50)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
         
@@ -1273,6 +1367,13 @@ def check_trailing_stop(symbol, position_info):
                     # 计算动态止损价格（保护60%利润，更紧）
                     profit_protection = unrealized_pnl * 0.4
                     new_stop_loss = entry_price * (1 + profit_protection)
+            else:  # short position for oscillation strategy
+                unrealized_pnl = (entry_price - current_price) / entry_price
+                profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
+                
+                if unrealized_pnl > profit_threshold:
+                    profit_protection = unrealized_pnl * 0.4  # 保护60%利润，更紧
+                    new_stop_loss = entry_price * (1 - profit_protection)
         else:
             # 趋势策略：原有参数
             if side == 'long':
@@ -1283,72 +1384,31 @@ def check_trailing_stop(symbol, position_info):
                     # 计算动态止损价格（保护50%利润）
                     profit_protection = unrealized_pnl * 0.5
                     new_stop_loss = entry_price * (1 + profit_protection)
-                
-                # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
-                current_orders = exchange.fetch_open_orders(symbol)
-                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
-                
-                should_update = True
-                for order in stop_orders:
-                    if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
-                        should_update = False
-                        break
-                
-                if should_update:
-                    # 取消旧的止损单
-                    for order in stop_orders:
-                        try:
-                            exchange.cancel_order(order['id'], symbol)
-                        except:
-                            pass
-                    
-                    # 下新的止损单（修复：使用条件单）
-                    exchange.create_order(
-                        symbol=symbol,
-                        type='conditional',
-                        side='sell',
-                        amount=abs(size),
-                        price=new_stop_loss,
-                        params={
-                            'slTriggerPx': new_stop_loss,
-                            'slOrdPx': new_stop_loss,
-                            'tdMode': 'cross',
-                            'posSide': 'long',
-                            'reduceOnly': True
-                        }
-                    )
-                    
-                    log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
-                    return True
-        
-        else:  # short position
-            unrealized_pnl = (entry_price - current_price) / entry_price
-            
-            # 根据策略类型设置不同的动态止损参数
-            if strategy_type == 'oscillation':
-                profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
-                
-                if unrealized_pnl > profit_threshold:
-                    profit_protection = unrealized_pnl * 0.4  # 保护60%利润，更紧
-                    new_stop_loss = entry_price * (1 - profit_protection)
-            else:
+            else:  # short position for trend strategy
+                unrealized_pnl = (entry_price - current_price) / entry_price
                 profit_threshold = atr * 1.5 / entry_price
                 
                 if unrealized_pnl > profit_threshold:
                     profit_protection = unrealized_pnl * 0.5
                     new_stop_loss = entry_price * (1 - profit_protection)
-            
-            # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
-            current_orders = exchange.fetch_open_orders(symbol)
-            stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
-            
-            should_update = True
+        
+        # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
+        current_orders = exchange.fetch_open_orders(symbol)
+        stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
+        
+        should_update = True
+        # 只有在有新的止损价格时才更新
+        if 'new_stop_loss' in locals():
             for order in stop_orders:
                 if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
                     should_update = False
                     break
-            
-            if should_update:
+        else:
+            should_update = False
+        
+        if should_update and 'new_stop_loss' in locals():
+            # 只有在K线已收盘时才更新止损单
+            if current_time >= kline_end_time:
                 # 取消旧的止损单
                 for order in stop_orders:
                     try:
@@ -1357,23 +1417,29 @@ def check_trailing_stop(symbol, position_info):
                         pass
                 
                 # 下新的止损单（修复：使用条件单）
+                side_action = 'sell' if side == 'long' else 'buy'
+                pos_side = 'long' if side == 'long' else 'short'
+                
                 exchange.create_order(
                     symbol=symbol,
                     type='conditional',
-                    side='buy',
+                    side=side_action,
                     amount=abs(size),
                     price=new_stop_loss,
                     params={
                         'slTriggerPx': new_stop_loss,
                         'slOrdPx': new_stop_loss,
                         'tdMode': 'cross',
-                        'posSide': 'short',
+                        'posSide': pos_side,
                         'reduceOnly': True
                     }
                 )
                 
                 log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
                 return True
+            else:
+                log_message("DEBUG", f"{symbol} 当前K线未收盘，跳过止损更新")
+                return False
         
         return False
         
