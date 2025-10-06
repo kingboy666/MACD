@@ -12,7 +12,7 @@ import os
 load_dotenv()
 
 # 自定义技术指标计算函数
-def calculate_macd(close, fast=6, slow=32, signal=9):
+def calculate_macd(close, fast=6, slow=16, signal=9):
     """计算MACD指标"""
     exp1 = close.ewm(span=fast).mean()
     exp2 = close.ewm(span=slow).mean()
@@ -106,7 +106,7 @@ MAJOR_COINS = ['BNB', 'XRP', 'ADA', 'SOL', 'DOT', 'AVAX', 'DOGE']
 
 # MACD指标配置
 MACD_FAST = 6                             # MACD快线周期
-MACD_SLOW = 32                            # MACD慢线周期
+MACD_SLOW = 16                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
 # ATR动态止盈止损配置
@@ -670,7 +670,7 @@ def start_trading_system():
             return
         
         # 显示启动信息
-        log_message("SUCCESS", "MACD(6,32,9)策略交易系统启动成功")
+        log_message("SUCCESS", "MACD(6,16,9)策略交易系统启动成功")
         log_message("INFO", f"智能杠杆系统: BTC最大{MAX_LEVERAGE_BTC}x, ETH最大{MAX_LEVERAGE_ETH}x")
         log_message("INFO", f"交易对数量: {len(SYMBOLS)}")
         log_message("INFO", f"最大持仓数: {MAX_OPEN_POSITIONS}")
@@ -1253,7 +1253,7 @@ if __name__ == "__main__":
             exit(1)
         
         # 显示启动信息
-        log_message("SUCCESS", "MACD(6,32,9)策略交易系统启动成功")
+        log_message("SUCCESS", "MACD(6,16,9)策略交易系统启动成功")
         log_message("INFO", f"智能杠杆系统: BTC最大{MAX_LEVERAGE_BTC}x, ETH最大{MAX_LEVERAGE_ETH}x")
         log_message("INFO", f"交易对数量: {len(SYMBOLS)}")
         log_message("INFO", f"最大持仓数: {MAX_OPEN_POSITIONS}")
