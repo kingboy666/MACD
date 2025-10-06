@@ -167,11 +167,11 @@ position_tracker = {
         'date': datetime.now().strftime('%Y-%m-%d'),
         'trades_count': 0,
         'total_pnl': 0
+    }
+}
 
 # 全局订单跟踪字典，防止重复设置止盈止损
 order_tracking = {}
-    }
-}
 
 # ============================================
 # 交易统计
