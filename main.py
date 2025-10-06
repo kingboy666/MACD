@@ -395,7 +395,17 @@ def execute_trade(symbol, signal, signal_strength):
             return False
         
         # 执行市价单
-        order = exchange.create_market_order(symbol, side, position_size)
+        order = exchange.createOrder(
+            symbol,
+            'market',
+            side,
+            position_size,
+            None,
+            {
+                'tdMode': 'cross',
+                'posSide': 'long' if signal['side'] == 'long' else 'short'
+            }
+        )
         
         if order:
             log_message("SUCCESS", f"{symbol} 交易成功: {side} {position_size} @ {price}")
@@ -566,9 +576,18 @@ def close_position(symbol, reason="手动平仓"):
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
         
-        order = exchange.create_market_order(symbol, side, size, None, None, {
-            'reduceOnly': True
-        })
+        order = exchange.createOrder(
+            symbol,
+            'market',
+            side,
+            abs(size),
+            None,
+            {
+                'tdMode': 'cross',
+                'posSide': 'long' if position['side'] == 'long' else 'short',
+                'reduceOnly': True
+            }
+        )
         
         if order:
             log_message("SUCCESS", f"平仓成功: {symbol} {reason}")
@@ -861,7 +880,12 @@ def check_trailing_stop(symbol, position_info):
                         side='sell',
                         amount=abs(size),
                         price=current_price * 0.95,  # 市价单
-                        params={'stopPrice': new_stop_loss, 'triggerPrice': new_stop_loss}
+                        params={
+                            'stopPrice': new_stop_loss,
+                            'triggerPrice': new_stop_loss,
+                            'tdMode': 'cross',
+                            'posSide': 'long'
+                        }
                     )
                     
                     log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
@@ -897,7 +921,12 @@ def check_trailing_stop(symbol, position_info):
                         side='buy',
                         amount=abs(size),
                         price=current_price * 1.05,
-                        params={'stopPrice': new_stop_loss, 'triggerPrice': new_stop_loss}
+                        params={
+                            'stopPrice': new_stop_loss,
+                            'triggerPrice': new_stop_loss,
+                            'tdMode': 'cross',
+                            'posSide': 'short'
+                        }
                     )
                     
                     log_message("INFO", f"更新动态止损 {symbol}: {new_stop_loss:.4f}")
@@ -944,7 +973,12 @@ def setup_missing_stop_orders(position):
                     side='sell',
                     amount=abs(size),
                     price=stop_loss * 0.95,
-                    params={'stopPrice': stop_loss, 'triggerPrice': stop_loss}
+                    params={
+                        'stopPrice': stop_loss,
+                        'triggerPrice': stop_loss,
+                        'tdMode': 'cross',
+                        'posSide': 'long'
+                    }
                 )
             else:
                 exchange.create_order(
@@ -953,7 +987,12 @@ def setup_missing_stop_orders(position):
                     side='buy',
                     amount=abs(size),
                     price=stop_loss * 1.05,
-                    params={'stopPrice': stop_loss, 'triggerPrice': stop_loss}
+                    params={
+                        'stopPrice': stop_loss,
+                        'triggerPrice': stop_loss,
+                        'tdMode': 'cross',
+                        'posSide': 'short'
+                    }
                 )
             
             log_message("INFO", f"设置止损单 {symbol}: {stop_loss:.4f}")
@@ -966,7 +1005,11 @@ def setup_missing_stop_orders(position):
                     type='limit',
                     side='sell',
                     amount=abs(size),
-                    price=take_profit
+                    price=take_profit,
+                    params={
+                        'tdMode': 'cross',
+                        'posSide': 'long'
+                    }
                 )
             else:
                 exchange.create_order(
@@ -974,7 +1017,11 @@ def setup_missing_stop_orders(position):
                     type='limit',
                     side='buy',
                     amount=abs(size),
-                    price=take_profit
+                    price=take_profit,
+                    params={
+                        'tdMode': 'cross',
+                        'posSide': 'short'
+                    }
                 )
             
             log_message("INFO", f"设置止盈单 {symbol}: {take_profit:.4f}")
