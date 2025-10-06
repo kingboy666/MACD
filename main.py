@@ -1760,6 +1760,9 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
         # 计算 EMA5/EMA10
         df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
         df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
+        # 计算 BB(20,2) 中轨（仅用于过滤）
+        df['bb_mid'] = df['close'].rolling(window=20, min_periods=20).mean()
+        bb_threshold = 0.005  # 0.5%
 
         position = None  # 'long' | 'short' | None
         entry_price = 0.0
@@ -1828,21 +1831,30 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
                     entry_size = 0.0
                     entry_time = None
 
-            # 入场（仅在无持仓时，根据交叉开仓）
+            # 入场（仅在无持仓时，根据交叉开仓 + BB(20,2)过滤）
             if position is None:
                 if cross_up:
-                    position = 'long'
-                    entry_price = float(cur['close'])
-                    entry_time = cur['timestamp']
-                    # 50x杠杆的合约数量（资金按80%参与）
-                    entry_size = (balance * 0.8 * 50) / entry_price
-                    trades.append({'type': 'open_long', 'price': entry_price, 'timestamp': entry_time})
+                    # 做多过滤：close 在 [bb_mid, bb_mid*(1+0.5%)]
+                    if pd.notna(cur['bb_mid']):
+                        mid = float(cur['bb_mid'])
+                        upper_near = mid * (1.0 + bb_threshold)
+                        if (cur['close'] >= mid) and (cur['close'] <= upper_near):
+                            position = 'long'
+                            entry_price = float(cur['close'])
+                            entry_time = cur['timestamp']
+                            entry_size = (balance * 0.8 * 50) / entry_price
+                            trades.append({'type': 'open_long', 'price': entry_price, 'timestamp': entry_time})
                 elif cross_dn:
-                    position = 'short'
-                    entry_price = float(cur['close'])
-                    entry_time = cur['timestamp']
-                    entry_size = (balance * 0.8 * 50) / entry_price
-                    trades.append({'type': 'open_short', 'price': entry_price, 'timestamp': entry_time})
+                    # 做空过滤：close 在 [bb_mid*(1-0.5%), bb_mid]
+                    if pd.notna(cur['bb_mid']):
+                        mid = float(cur['bb_mid'])
+                        lower_near = mid * (1.0 - bb_threshold)
+                        if (cur['close'] <= mid) and (cur['close'] >= lower_near):
+                            position = 'short'
+                            entry_price = float(cur['close'])
+                            entry_time = cur['timestamp']
+                            entry_size = (balance * 0.8 * 50) / entry_price
+                            trades.append({'type': 'open_short', 'price': entry_price, 'timestamp': entry_time})
 
         # 结算
         closed = [t for t in trades if 'pnl' in t]
@@ -2668,6 +2680,96 @@ def enhanced_trading_loop():
     except Exception as e:
         log_message("ERROR", f"增强版交易循环启动失败: {str(e)}")
         traceback.print_exc()
+
+# =================================
+# 单策略回测入口（EMA5/EMA10 + BB(20,2)过滤，0.5%阈值）
+# =================================
+def run_ema_bb_backtest(symbols=None, days_list=[7, 14, 30], initial_balance=10000):
+    """
+    运行单策略综合回测（EMA5/EMA10 + BB(20,2)入场过滤，0.5%阈值），并输出汇总报告。
+    - symbols=None: 自动抓取交易所USDT合约热度前10，并追加 FIL/ZRO/WIF/WLD
+    - days_list: 回测天数列表
+    - initial_balance: 初始资金
+    """
+    try:
+        # 自动获取热门标的（与综合回测一致）
+        if symbols is None:
+            try:
+                hot = []
+                if 'exchange' in globals() and exchange:
+                    tickers = exchange.fetch_tickers()
+                    for sym, tk in tickers.items():
+                        if (sym.endswith('-USDT-SWAP') or sym.endswith(':USDT')) and ('SWAP' in sym or ':' in sym):
+                            vol = tk.get('quoteVolume') or tk.get('baseVolume')
+                            if vol is None and isinstance(tk.get('info'), dict):
+                                info = tk['info']
+                                vol = float(info.get('volCcy24h')) if info.get('volCcy24h') else None
+                            if vol:
+                                hot.append((sym, float(vol)))
+                    hot.sort(key=lambda x: x[1], reverse=True)
+                    top10 = [s for s, _ in hot[:10]]
+                else:
+                    top10 = SYMBOLS[:10]
+                def norm_sym(s):
+                    return s.replace(':USDT', '-USDT-SWAP') if ':USDT' in s else (s if s.endswith('-USDT-SWAP') else s + '-USDT-SWAP')
+                base = [norm_sym(s) for s in top10]
+                extras = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
+                seen, symbols = set(), []
+                for s in base + extras:
+                    if s not in seen:
+                        symbols.append(s); seen.add(s)
+                log_message("INFO", f"[EMA/BB] 自动获取回测标的: {symbols[:10]} + extras")
+            except Exception as e:
+                log_message("WARNING", f"[EMA/BB] 自动获取热门标的失败，使用默认: {str(e)}")
+                symbols = SYMBOLS[:10] + ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
+
+        report_lines = ["=== EMA5/EMA10 + BB(20,2) 入场过滤（0.5%）回测报告 ===", f"标的数量: {len(symbols)}", ""]
+        total_trades_all = 0
+        sum_win_rate_all = 0.0
+        sum_return_all = 0.0
+        results_summary = []
+
+        for days in days_list:
+            log_message("INFO", f"[EMA/BB] 开始 {days} 天回测分析...")
+            day_results = []
+            for sym in symbols:
+                try:
+                    res = backtest_strategy(sym, days=days, initial_balance=initial_balance)
+                    if res:
+                        day_results.append(res)
+                        total_trades_all += res.get('total_trades', 0)
+                        sum_win_rate_all += res.get('win_rate', 0.0)
+                        sum_return_all += res.get('total_return', 0.0)
+                        log_message("INFO", f"[EMA/BB] {sym} {days}天: 胜率{res['win_rate']:.1f}% 收益率{res['total_return']:.2f}% 交易{res['total_trades']}")
+                except Exception as e:
+                    log_message("ERROR", f"[EMA/BB] 回测 {sym} 失败: {e}")
+                    continue
+
+            if day_results:
+                avg_win = sum(r['win_rate'] for r in day_results) / len(day_results)
+                avg_ret = sum(r['total_return'] for r in day_results) / len(day_results)
+                report_lines.extend([
+                    f"=== {days}天回测结果 ===",
+                    f"标的: {len(day_results)}",
+                    f"总交易: {sum(r['total_trades'] for r in day_results)}",
+                    f"平均胜率: {avg_win:.1f}%",
+                    f"平均收益率: {avg_ret:.2f}%",
+                    ""
+                ])
+                results_summary.append({'days': days, 'avg_win': avg_win, 'avg_ret': avg_ret})
+
+        # 汇总与保存
+        timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+        out_file = f"backtest_results_ema_bb_{timestamp}.txt"
+        with open(out_file, 'w', encoding='utf-8') as f:
+            f.write("
+".join(report_lines))
+        log_message("SUCCESS", f"[EMA/BB] 回测结果已保存到: {out_file}")
+        return results_summary
+
+    except Exception as e:
+        log_message("ERROR", f"[EMA/BB] 运行单策略回测失败: {e}")
+        return None
 
 # =================================
 # 主程序入口 - 增强版
