@@ -163,6 +163,7 @@ position_tracker = {
     'positions': {},
     'trailing_stops': {},
     'last_trade_time': {},
+    'pending_signals': {},  # 跟踪等待K线收盘的信号
     'daily_stats': {
         'date': datetime.now().strftime('%Y-%m-%d'),
         'trades_count': 0,
@@ -423,7 +424,22 @@ def generate_signal(symbol):
                 else:
                     time_remaining = (current_kline_end - current_timestamp) / 1000
                     log_message("DEBUG", f"{symbol} 做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
+                    # 不返回None，而是记录信号状态，等待K线收盘后重新检查
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'is_bullish': is_bullish,
+                        'confirmation_type': 'MACD金叉+阳线确认+ADX趋势+等待K线收盘',
+                        'strategy_type': 'trend',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining
+                    }
                 
             elif death_cross and is_bearish:
                 if kline_completed:
@@ -444,7 +460,22 @@ def generate_signal(symbol):
                 else:
                     time_remaining = (current_kline_end - current_timestamp) / 1000
                     log_message("DEBUG", f"{symbol} 做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
+                    # 不返回None，而是记录信号状态，等待K线收盘后重新检查
+                    return {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'adx_value': current_adx,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'is_bearish': is_bearish,
+                        'confirmation_type': 'MACD死叉+阴线确认+ADX趋势+等待K线收盘',
+                        'strategy_type': 'trend',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining
+                    }
             
             # 如果没有符合条件的信号，返回None
             if signal is None:
@@ -649,6 +680,11 @@ def calculate_position_size(symbol, price, total_balance):
 def execute_trade(symbol, signal, signal_strength):
     """执行交易"""
     try:
+        # 检查信号状态，如果是pending状态则不执行交易
+        if signal_strength == 'pending':
+            log_message("DEBUG", f"{symbol} 信号处于pending状态，等待K线收盘确认，不执行交易")
+            return False
+        
         account_info = get_account_info()
         if not account_info:
             return False
@@ -999,6 +1035,16 @@ def trading_loop():
                     log_message("INFO", f"当前交易统计 - 总交易: {trade_stats['total_trades']}, "
                               f"胜率: {trade_stats['win_rate']:.2f}%, "
                               f"总盈亏: {trade_stats['total_pnl']:.2f} USDT")
+                
+                # 检查pending信号是否已经可以确认
+                confirmed_signals = check_pending_signals()
+                for symbol, signal in confirmed_signals:
+                    log_message("INFO", f"执行pending信号确认的交易: {symbol} {signal['side']} @ {signal['price']:.4f}")
+                    if execute_trade(symbol, signal, signal['signal_strength']):
+                        position_tracker['daily_stats']['trades_count'] += 1
+                        time.sleep(2)
+                        if symbol in position_tracker['positions']:
+                            setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
                 
                 # 检查每个交易对
                 for symbol in SYMBOLS:
@@ -1446,6 +1492,36 @@ def check_trailing_stop(symbol, position_info):
     except Exception as e:
         log_message("ERROR", f"检查动态止损失败 {symbol}: {e}")
         return False
+
+def check_pending_signals():
+    """检查pending信号是否已经可以确认"""
+    current_time = datetime.now().timestamp()
+    confirmed_signals = []
+    
+    for symbol, pending_info in list(position_tracker['pending_signals'].items()):
+        signal = pending_info['signal']
+        kline_end_time = pending_info.get('kline_end_time', 0)
+        
+        # 检查K线是否已经收盘
+        if current_time >= kline_end_time:
+            # K线已经收盘，重新检查信号
+            log_message("DEBUG", f"{symbol} K线已收盘，重新检查信号")
+            
+            # 重新生成信号
+            new_signal = generate_signal(symbol)
+            
+            if new_signal and new_signal.get('signal_strength') in ['strong', 'medium', 'weak']:
+                # 信号确认，添加到确认列表
+                confirmed_signals.append((symbol, new_signal))
+                log_message("INFO", f"{symbol} pending信号确认: {new_signal['side']} @ {new_signal['price']:.4f}")
+            else:
+                # 信号不再有效，清除pending信号
+                log_message("DEBUG", f"{symbol} pending信号失效，已清除")
+            
+            # 无论是否确认，都清除pending信号
+            del position_tracker['pending_signals'][symbol]
+    
+    return confirmed_signals
 
 def setup_missing_stop_orders(position, symbol):
     """为现有持仓设置止盈止损（修复：防止重复设置，区分趋势和震荡策略）"""
@@ -1906,17 +1982,35 @@ def enhanced_trading_loop():
                         # 生成交易信号
                         signal = generate_signal(symbol)
                         if signal:
-                            log_message("INFO", f"{symbol} 发现信号: {signal['side']} @ {signal['price']:.4f}")
-                            
-                            # 执行交易
-                            if execute_trade(symbol, signal, signal['signal_strength']):
-                                # 更新每日统计
-                                position_tracker['daily_stats']['trades_count'] += 1
+                            # 检查信号状态
+                            if signal.get('signal_strength') == 'pending':
+                                # 信号处于pending状态，等待K线收盘
+                                log_message("DEBUG", f"{symbol} 信号等待K线收盘: {signal['side']} @ {signal['price']:.4f}, 剩余时间: {signal.get('time_remaining', 0):.0f}秒")
                                 
-                                # 设置止盈止损
-                                time.sleep(2)  # 等待订单确认
-                                if symbol in position_tracker['positions']:
-                                    setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                                # 记录pending信号
+                                position_tracker['pending_signals'][symbol] = {
+                                    'signal': signal,
+                                    'timestamp': datetime.now(),
+                                    'kline_end_time': signal.get('kline_end_time', 0)
+                                }
+                                
+                            elif signal.get('signal_strength') in ['strong', 'medium', 'weak']:
+                                # 确认信号，执行交易
+                                log_message("INFO", f"{symbol} 发现确认信号: {signal['side']} @ {signal['price']:.4f}")
+                                
+                                # 如果之前有pending信号，清除它
+                                if symbol in position_tracker['pending_signals']:
+                                    del position_tracker['pending_signals'][symbol]
+                                
+                                # 执行交易
+                                if execute_trade(symbol, signal, signal['signal_strength']):
+                                    # 更新每日统计
+                                    position_tracker['daily_stats']['trades_count'] += 1
+                                    
+                                    # 设置止盈止损
+                                    time.sleep(2)  # 等待订单确认
+                                    if symbol in position_tracker['positions']:
+                                        setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
                         
                         time.sleep(1)  # 短暂延迟避免API限制
                         
