@@ -1382,7 +1382,7 @@ def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_bala
         log_message("WARNING", f"保存多策略回测报告失败: {e}")
 
     # 控制台打印汇总
-    log_message("INFO", "\n"".join(report_lines))
+    
     return all_reports
 
 # 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
