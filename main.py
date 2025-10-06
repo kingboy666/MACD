@@ -1376,15 +1376,13 @@ def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_bala
         timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
         out = f"backtest_results_multi_{timestamp}.txt"
         with open(out, "w", encoding="utf-8") as f:
-            f.write("
-".join(report_lines))
+            f.write("\n".join(report_lines))
         log_message("SUCCESS", f"多策略回测结果已保存到: {out}")
     except Exception as e:
         log_message("WARNING", f"保存多策略回测报告失败: {e}")
 
     # 控制台打印汇总
-    log_message("INFO", "
-".join(report_lines))
+    log_message("INFO", "\n"".join(report_lines))
     return all_reports
 
 # 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
