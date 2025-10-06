@@ -1041,7 +1041,7 @@ def get_performance_report():
     """生成性能报告"""
     try:
         if trade_stats['total_trades'] == 0:
-            return "暂无交易数据"
+            return "\n".join(report_lines)\n".join(report_lines)暂无交易数据"
         
         win_rate = trade_stats['win_rate']
         profit_factor = (trade_stats['total_profit'] / trade_stats['total_loss']) if trade_stats['total_loss'] > 0 else float('inf')
@@ -1073,7 +1073,7 @@ def get_performance_report():
                 report_lines.append(trade_line)
         
         return "
-".join(report_lines)
+
         
     except Exception as e:
         log_message("ERROR", f"生成性能报告失败: {e}")
@@ -1214,8 +1214,8 @@ def enhanced_trading_loop():
                 current_time = datetime.now()
                 if current_time.minute == 0:  # 整点时
                     report = get_performance_report()
-                    log_message("INFO", f"性能报告:
-{report}")
+                    log_message("INFO", f"性能报告:\n{report}")
+
                 
                 # 主循环延迟
                 log_message("INFO", f"交易循环完成，等待{MAIN_LOOP_DELAY}秒...")
@@ -1229,8 +1229,8 @@ def enhanced_trading_loop():
         log_message("INFO", "收到退出信号，正在安全关闭...")
         # 生成最终报告
         final_report = get_performance_report()
-        log_message("INFO", f"最终交易报告:
-{final_report}")
+        log_message("INFO", f"最终交易报告:\n{final_report}")
+
     except Exception as e:
         log_message("ERROR", f"增强版交易循环启动失败: {str(e)}")
         traceback.print_exc()
