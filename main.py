@@ -74,7 +74,37 @@ def calculate_adx(high, low, close, period=14):
     
     return adx
 
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+=======
+            # 主循环延迟
+            log_message("INFO", f"交易循环完成，等待{MAIN_LOOP_DELAY}秒...")
+            time.sleep(MAIN_LOOP_DELAY)
+            
+        except KeyboardInterrupt:
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
 # ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
 # API配置 - 从环境变量获取
 # ============================================
 def get_okx_config():
@@ -1831,12 +1861,500 @@ def start_trading_system():
         traceback.print_exc()
 
 # ============================================
-# 为已存在持仓补充止盈止损条件单
+# 胜率统计和回测模块
 # ============================================
 
+def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
+    """更新交易统计数据"""
+    global trade_stats
+    
+    try:
+        trade_stats['total_trades'] += 1
+        trade_stats['total_pnl'] += pnl
+        
+        if pnl > 0:
+            trade_stats['winning_trades'] += 1
+            trade_stats['total_profit'] += pnl
+        else:
+            trade_stats['losing_trades'] += 1
+            trade_stats['total_loss'] += abs(pnl)
+        
+        # 计算胜率
+        if trade_stats['total_trades'] > 0:
+            trade_stats['win_rate'] = (trade_stats['winning_trades'] / trade_stats['total_trades']) * 100
+        
+        # 记录交易历史
+        trade_record = {
+            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'symbol': symbol,
+            'side': side,
+            'entry_price': entry_price,
+            'exit_price': exit_price,
+            'pnl': pnl,
+            'pnl_percentage': (pnl / abs(entry_price * 0.01)) * 100 if entry_price > 0 else 0
+        }
+        
+        trade_stats['trade_history'].append(trade_record)
+        
+        # 保持最近100笔交易记录
+        if len(trade_stats['trade_history']) > 100:
+            trade_stats['trade_history'] = trade_stats['trade_history'][-100:]
+        
+        log_message("INFO", f"交易统计更新:")
+        log_message("INFO", f"  总交易次数: {trade_stats['total_trades']}")
+        log_message("INFO", f"  胜率: {trade_stats['win_rate']:.2f}%")
+        log_message("INFO", f"  总盈亏: {trade_stats['total_pnl']:.2f} USDT")
+        
+    except Exception as e:
+        log_message("ERROR", f"更新交易统计失败: {str(e)}")
+
+def get_performance_metrics():
+    """获取详细的性能指标"""
+    try:
+        if trade_stats['total_trades'] == 0:
+            return {
+                'total_trades': 0,
+                'win_rate': 0,
+                'profit_factor': 0,
+                'average_win': 0,
+                'average_loss': 0,
+                'max_consecutive_wins': 0,
+                'max_consecutive_losses': 0
+            }
+        
+        # 计算盈利因子
+        profit_factor = 0
+        if trade_stats['total_loss'] > 0:
+            profit_factor = trade_stats['total_profit'] / trade_stats['total_loss']
+        
+        # 计算平均盈利和亏损
+        avg_win = trade_stats['total_profit'] / trade_stats['winning_trades'] if trade_stats['winning_trades'] > 0 else 0
+        avg_loss = trade_stats['total_loss'] / trade_stats['losing_trades'] if trade_stats['losing_trades'] > 0 else 0
+        
+        # 计算最大连续盈利和亏损
+        max_consecutive_wins = 0
+        max_consecutive_losses = 0
+        current_wins = 0
+        current_losses = 0
+        
+        for trade in trade_stats['trade_history']:
+            if trade['pnl'] > 0:
+                current_wins += 1
+                current_losses = 0
+                max_consecutive_wins = max(max_consecutive_wins, current_wins)
+            else:
+                current_losses += 1
+                current_wins = 0
+                max_consecutive_losses = max(max_consecutive_losses, current_losses)
+        
+        return {
+            'total_trades': trade_stats['total_trades'],
+            'win_rate': trade_stats['win_rate'],
+            'profit_factor': profit_factor,
+            'average_win': avg_win,
+            'average_loss': avg_loss,
+            'max_consecutive_wins': max_consecutive_wins,
+            'max_consecutive_losses': max_consecutive_losses,
+            'total_pnl': trade_stats['total_pnl']
+        }
+        
+    except Exception as e:
+        log_message("ERROR", f"获取性能指标失败: {str(e)}")
+        return {}
+
+def historical_backtest(symbol, days=30):
+    """简单的历史回测功能"""
+    try:
+        log_message("INFO", f"开始{symbol}历史回测 (过去{days}天)")
+        
+        # 获取历史数据
+        since = int((datetime.now() - timedelta(days=days)).timestamp() * 1000)
+        ohlcv = exchange.fetch_ohlcv(symbol, '30m', since=since, limit=1000)
+        
+        if not ohlcv or len(ohlcv) < 50:
+            log_message("WARNING", f"{symbol} 历史数据不足，跳过回测")
+            return None
+        
+        # 处理数据并计算指标
+        df = process_klines(ohlcv)
+        if df is None:
+            log_message("WARNING", f"{symbol} 数据处理失败，跳过回测")
+            return None
+        
+        # 模拟交易
+        backtest_results = {
+            'symbol': symbol,
+            'total_signals': 0,
+            'profitable_signals': 0,
+            'total_return': 0,
+            'max_drawdown': 0,
+            'win_rate': 0,
+            'trades': []
+        }
+        
+        position = None
+        equity_curve = [10000]  # 假设起始资金10000 USDT
+        peak_equity = 10000
+        
+        for i in range(50, len(df)):  # 从第50根K线开始，确保指标计算完整
+            current_price = df.iloc[i]['close']
+            current_macd = df.iloc[i]['MACD']
+            current_signal = df.iloc[i]['MACD_SIGNAL']
+            prev_macd = df.iloc[i-1]['MACD']
+            prev_signal = df.iloc[i-1]['MACD_SIGNAL']
+            current_adx = df.iloc[i]['ADX']
+            
+            # 检查信号
+            golden_cross = prev_macd <= prev_signal and current_macd > current_signal
+            death_cross = prev_macd >= prev_signal and current_macd < current_signal
+            
+            # 开仓逻辑
+            if position is None and current_adx > 25:
+                if golden_cross:
+                    position = {
+                        'side': 'long',
+                        'entry_price': current_price,
+                        'entry_time': i
+                    }
+                    backtest_results['total_signals'] += 1
+                elif death_cross:
+                    position = {
+                        'side': 'short', 
+                        'entry_price': current_price,
+                        'entry_time': i
+                    }
+                    backtest_results['total_signals'] += 1
+            
+            # 平仓逻辑
+            elif position is not None:
+                should_close = False
+                
+                if position['side'] == 'long' and death_cross:
+                    should_close = True
+                elif position['side'] == 'short' and golden_cross:
+                    should_close = True
+                
+                if should_close:
+                    # 计算收益
+                    if position['side'] == 'long':
+                        pnl_pct = (current_price - position['entry_price']) / position['entry_price']
+                    else:
+                        pnl_pct = (position['entry_price'] - current_price) / position['entry_price']
+                    
+                    pnl_amount = equity_curve[-1] * pnl_pct * 0.8  # 假设使用80%资金
+                    new_equity = equity_curve[-1] + pnl_amount
+                    
+                    equity_curve.append(new_equity)
+                    peak_equity = max(peak_equity, new_equity)
+                    
+                    # 记录交易
+                    trade_record = {
+                        'side': position['side'],
+                        'entry_price': position['entry_price'],
+                        'exit_price': current_price,
+                        'pnl_pct': pnl_pct * 100,
+                        'pnl_amount': pnl_amount,
+                        'duration': i - position['entry_time']
+                    }
+                    
+                    backtest_results['trades'].append(trade_record)
+                    backtest_results['total_return'] += pnl_pct * 100
+                    
+                    if pnl_pct > 0:
+                        backtest_results['profitable_signals'] += 1
+                    
+                    position = None
+        
+        # 计算最终指标
+        if backtest_results['total_signals'] > 0:
+            backtest_results['win_rate'] = (backtest_results['profitable_signals'] / backtest_results['total_signals']) * 100
+        
+        # 计算最大回撤
+        for equity in equity_curve:
+            drawdown = (peak_equity - equity) / peak_equity * 100
+            backtest_results['max_drawdown'] = max(backtest_results['max_drawdown'], drawdown)
+            if equity > peak_equity:
+                peak_equity = equity
+        
+        log_message("INFO", f"{symbol} 回测结果:")
+        log_message("INFO", f"  信号总数: {backtest_results['total_signals']}")
+        log_message("INFO", f"  胜率: {backtest_results['win_rate']:.2f}%")
+        log_message("INFO", f"  总收益率: {backtest_results['total_return']:.2f}%")
+        log_message("INFO", f"  最大回撤: {backtest_results['max_drawdown']:.2f}%")
+        
+        return backtest_results
+        
+    except Exception as e:
+        log_message("ERROR", f"历史回测失败: {str(e)}")
+        return None
+
+# ============================================
+# 更新持仓信息
+# ============================================
+
+def update_positions():
+    """更新所有持仓信息"""
+    try:
+        positions = exchange.fetch_positions()
+        active_positions = [pos for pos in positions if float(pos['contracts']) != 0]
+        
+        for position in active_positions:
+            symbol = position['symbol']
+            size = float(position['contracts'])
+            side = position['side']
+            entry_price = float(position['entryPrice']) if position['entryPrice'] else 0
+            mark_price = float(position['markPrice']) if position['markPrice'] else 0
+            pnl = float(position['unrealizedPnl']) if position['unrealizedPnl'] else 0
+            
+            # 更新持仓跟踪器
+            position_tracker['positions'][symbol] = {
+                'size': size,
+                'side': side,
+                'entry_price': entry_price,
+                'current_price': mark_price,
+                'unrealized_pnl': pnl,
+                'last_update': datetime.now()
+            }
+            
+            # 检查移动止盈
+            check_trailing_stop(symbol, mark_price)
+        
+        # 清理已平仓的持仓记录
+        current_symbols = {pos['symbol'] for pos in active_positions}
+        symbols_to_remove = []
+        
+        for symbol in position_tracker['positions']:
+            if symbol not in current_symbols:
+                symbols_to_remove.append(symbol)
+        
+        for symbol in symbols_to_remove:
+            log_message("INFO", f"清理已平仓持仓记录: {symbol}")
+            if symbol in position_tracker['positions']:
+                del position_tracker['positions'][symbol]
+            if symbol in position_tracker['trailing_stops']:
+                del position_tracker['trailing_stops'][symbol]
+        
+        log_message("INFO", f"持仓更新完成，当前活跃持仓: {len(active_positions)}")
+        
+    except Exception as e:
+        log_message("ERROR", f"更新持仓信息失败: {str(e)}")
+
+# ============================================
+# 平仓函数
+# ============================================
+
+def close_position(symbol, reason="手动平仓"):
+    """平仓指定交易对"""
+    try:
+        if symbol not in position_tracker['positions']:
+            log_message("WARNING", f"{symbol} 无持仓记录")
+            return False
+        
+        position_info = position_tracker['positions'][symbol]
+        side = position_info['side']
+        size = abs(position_info['size'])
+        entry_price = position_info.get('entry_price', 0)
+        
+        # 获取当前价格
+        ticker = exchange.fetch_ticker(symbol)
+        current_price = ticker['last']
+        
+        # 执行平仓
+        close_side = 'sell' if side == 'long' else 'buy'
+        
+        log_message("INFO", f"执行平仓: {symbol} {close_side} {size} @ {current_price}")
+        
+        order = exchange.create_market_order(symbol, close_side, size, None, None, {
+            'reduceOnly': True
+        })
+        
+        if order:
+            log_message("SUCCESS", f"平仓成功: {symbol} {reason}")
+            
+            # 计算盈亏
+            if side == 'long':
+                pnl = (current_price - entry_price) * size
+            else:
+                pnl = (entry_price - current_price) * size
+            
+            # 更新交易统计
+            update_trade_stats(symbol, side, pnl, entry_price, current_price)
+            
+            # 清理持仓记录
+            if symbol in position_tracker['positions']:
+                del position_tracker['positions'][symbol]
+            if symbol in position_tracker['trailing_stops']:
+                del position_tracker['trailing_stops'][symbol]
+            
+            return True
+        else:
+            log_message("ERROR", f"平仓失败: {symbol}")
+            return False
+            
+    except Exception as e:
+        log_message("ERROR", f"平仓 {symbol} 失败: {str(e)}")
+        return False
+
+# ============================================
+                    
+=======
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+=======
+            # 主循环延迟
+            log_message("INFO", f"交易循环完成，等待{MAIN_LOOP_DELAY}秒...")
+            time.sleep(MAIN_LOOP_DELAY)
+            
+        except KeyboardInterrupt:
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
 
 # ============================================
 # 主程序入口
 # ============================================
 if __name__ == "__main__":
     start_trading_system()
+=======
+=======
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+=======
+            # 主循环延迟
+            log_message("INFO", f"交易循环完成，等待{MAIN_LOOP_DELAY}秒...")
+            time.sleep(MAIN_LOOP_DELAY)
+            
+        except KeyboardInterrupt:
+            log_message("INFO", "收到退出信号，正在安全关闭...")
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+=======
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+=======
+        except KeyboardInterrupt:
+            log_message("INFO", "收到退出信号，正在安全关闭...")
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+=======
+            break
+        except Exception as e:
+            log_message("ERROR", f"交易循环异常: {str(e)}")
+            traceback.print_exc()
+            time.sleep(60)  # 异常后等待1分钟再继续
+
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+=======
+def main_loop():
+    """主循环入口（兼容性函数）"""
+    trading_loop()
+
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
+# ============================================
+# 主程序入口
+# ============================================
+if __name__ == "__main__":
+    start_trading_system()
+=======
