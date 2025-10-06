@@ -1085,6 +1085,320 @@ def trading_loop():
         log_message("ERROR", f"交易循环启动失败: {str(e)}")
         traceback.print_exc()
 
+# =================================
+# 附加：6个策略函数 + 可选 SYMBOLS 覆盖（不改动现有逻辑）
+# 使用说明：
+# - 这些函数供你的回测/外部加载器使用；当前 main.py 的回测仍按既有流程运行。
+# - 若需用下面的 SYMBOLS 覆盖现有 SYMBOLS，请在环境变量设置 USE_APPENDED_SYMBOLS=1。
+# =================================
+
+from typing import Dict, Any, Optional
+
+def _bool_series(s):
+    # 将任意布尔条件安全地转换为布尔Series并与索引对齐
+    return pd.Series(s, index=s.index).fillna(False).astype(bool)
+
+def generate_signals_trend_ema_adx_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    ema_fast = int(cfg.get("ema_fast", 20))
+    ema_slow = int(cfg.get("ema_slow", 50))
+    adx_thr = float(cfg.get("adx_thr", 25))
+    rsi_len = int(cfg.get("rsi_len", 14))
+    rsi_os = float(cfg.get("rsi_os", 35))
+    rsi_ob = float(cfg.get("rsi_ob", 65))
+
+    ema_f = df["close"].ewm(span=ema_fast, adjust=False).mean()
+    ema_s = df["close"].ewm(span=ema_slow, adjust=False).mean()
+    adx_series = calculate_adx(df["high"], df["low"], df["close"], period=cfg.get("adx_period", 14))
+    rsi_series = calculate_rsi(df["close"], period=rsi_len)
+
+    long_entry = (ema_f > ema_s) & (adx_series > adx_thr) & (rsi_series > rsi_os)
+    long_exit  = (ema_f < ema_s) | (rsi_series > rsi_ob)
+    short_entry = (ema_f < ema_s) & (adx_series > adx_thr) & (rsi_series < (100 - rsi_os))
+    short_exit  = (ema_f > ema_s) | (rsi_series < (100 - rsi_ob))
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    fast = int(cfg.get("fast", 12)); slow = int(cfg.get("slow", 26)); signal = int(cfg.get("signal", 9))
+    rsi_len = int(cfg.get("rsi_len", 14))
+    rsi_os = float(cfg.get("rsi_os", 35)); rsi_ob = float(cfg.get("rsi_ob", 65))
+    macd_line, signal_line, _ = calculate_macd(df["close"], fast=fast, slow=slow, signal=signal)
+    rsi_series = calculate_rsi(df["close"], period=rsi_len)
+
+    cross_up = (macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1))
+    cross_dn = (macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1))
+
+    long_entry = cross_up & (rsi_series > rsi_os)
+    long_exit  = cross_dn | (rsi_series > rsi_ob)
+    short_entry = cross_dn & (rsi_series < (100 - rsi_os))
+    short_exit  = cross_up | (rsi_series < (100 - rsi_ob))
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    period = int(cfg.get("period", 20)); std_k = float(cfg.get("std_k", 2.0))
+    rsi_len = int(cfg.get("rsi_len", 14))
+    rsi_os = float(cfg.get("rsi_os", 30)); rsi_ob = float(cfg.get("rsi_ob", 70))
+    upper, mid, lower = calculate_bollinger_bands(df["close"], period=period, std_dev=std_k)
+    rsi_series = calculate_rsi(df["close"], period=rsi_len)
+
+    long_entry = (df["close"] <= lower) & (rsi_series <= rsi_os)
+    long_exit  = (df["close"] >= mid) | (rsi_series >= rsi_ob)
+    short_entry = (df["close"] >= upper) & (rsi_series >= rsi_ob)
+    short_exit  = (df["close"] <= mid) | (rsi_series <= rsi_os)
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    k_period = int(cfg.get("k_period", 9)); d_period = int(cfg.get("d_period", 3))
+    ma_fast = int(cfg.get("ma_fast", 10)); ma_slow = int(cfg.get("ma_slow", 30))
+    vol_len = int(cfg.get("vol_len", 20)); vol_k = float(cfg.get("vol_k", 1.2))
+    k, d = calculate_stochastic(df["high"], df["low"], df["close"], k_period=k_period, d_period=d_period)
+    ma_f = df["close"].rolling(ma_fast).mean()
+    ma_s = df["close"].rolling(ma_slow).mean()
+    vol_ma = df["volume"].rolling(vol_len).mean()
+
+    cross_up = (k > d) & (k.shift(1) <= d.shift(1))
+    cross_dn = (k < d) & (k.shift(1) >= d.shift(1))
+
+    long_entry = cross_up & (ma_f > ma_s) & (df["volume"] > vol_ma * vol_k)
+    long_exit  = cross_dn | (ma_f < ma_s)
+    short_entry = cross_dn & (ma_f < ma_s) & (df["volume"] > vol_ma * vol_k)
+    short_exit  = cross_up | (ma_f > ma_s)
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    atr_p = int(cfg.get("atr_p", 14)); sma_p = int(cfg.get("sma_p", 20)); k = float(cfg.get("k", 1.5))
+    atr_series = calculate_atr(df["high"], df["low"], df["close"], period=atr_p)
+    sma = df["close"].rolling(sma_p).mean()
+
+    long_entry = df["close"] > (sma + k * atr_series)
+    long_exit  = df["close"] < sma
+    short_entry = df["close"] < (sma - k * atr_series)
+    short_exit  = df["close"] > sma
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_pullback_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    cfg = cfg or {}
+    ema_fast = int(cfg.get("ema_fast", 20)); ema_slow = int(cfg.get("ema_slow", 50))
+    bb_p = int(cfg.get("bb_p", 20)); bb_k = float(cfg.get("bb_k", 2.0))
+    rsi_len = int(cfg.get("rsi_len", 14)); rsi_pullback = float(cfg.get("rsi_pullback", 45)); rsi_rebound = float(cfg.get("rsi_rebound", 55))
+    ema_f = df["close"].ewm(span=ema_fast, adjust=False).mean()
+    ema_s = df["close"].ewm(span=ema_slow, adjust=False).mean()
+    upper, mid, lower = calculate_bollinger_bands(df["close"], period=bb_p, std_dev=bb_k)
+    rsi_series = calculate_rsi(df["close"], period=rsi_len)
+
+    long_entry = (ema_f > ema_s) & (df["close"] <= mid) & (rsi_series <= rsi_pullback)
+    long_exit  = (rsi_series >= rsi_rebound) | (df["close"] >= upper)
+    short_entry = (ema_f < ema_s) & (df["close"] >= mid) & (rsi_series >= (100 - rsi_pullback))
+    short_exit  = (rsi_series <= (100 - rsi_rebound)) | (df["close"] <= lower)
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+# 可选：覆盖 SYMBOLS（仅当设置 USE_APPENDED_SYMBOLS=1 时生效）
+if os.getenv("USE_APPENDED_SYMBOLS", "0") == "1":
+    SYMBOLS = [
+        'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'BNB-USDT-SWAP',
+        'XRP-USDT-SWAP', 'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'AVAX-USDT-SWAP',
+        'SHIB-USDT-SWAP', 'DOT-USDT-SWAP', 'FIL-USDT-SWAP', 'ZRO-USDT-SWAP',
+        'WIF-USDT-SWAP', 'WLD-USDT-SWAP'
+    ]
+
+# =================================
+# 多策略回测模块（追加，不改动原有逻辑）
+# - 依赖上面已追加的6个 generate_signals_xxx 函数
+# - 在启动流程中自动执行：打印每个策略名的结果并保存独立报告
+# =================================
+from typing import Callable, Tuple
+
+def _strategy_registry() -> list[Tuple[str, Callable]]:
+    return [
+        ("trend_ema_adx_rsi", generate_signals_trend_ema_adx_rsi),
+        ("macd_rsi", generate_signals_macd_rsi),
+        ("bb_rsi", generate_signals_bb_rsi),
+        ("kdj_ma_volume", generate_signals_kdj_ma_volume),
+        ("atr_breakout", generate_signals_atr_breakout),
+        ("trend_pullback_bb_rsi", generate_signals_trend_pullback_bb_rsi),
+    ]
+
+def backtest_with_signals(symbol: str, days: int, initial_balance: float, signals: dict) -> dict:
+    """
+    基于给定信号字典 {long_entry,long_exit,short_entry,short_exit} 的简单持仓回测。
+    单仓位、双向可切换，资金按 initial_balance*0.8 参与，收益以点对点价差近似。
+    """
+    df = get_historical_data(symbol, days)
+    if df is None or len(df) < 100:
+        return None
+
+    # 对齐信号索引
+    le = signals.get("long_entry", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
+    lx = signals.get("long_exit", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
+    se = signals.get("short_entry", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
+    sx = signals.get("short_exit", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
+
+    position = None  # 'long' | 'short' | None
+    entry_price = 0.0
+    entry_time = None
+    balance = initial_balance
+    trades = []
+    peak = balance
+    max_dd = 0.0
+
+    for i in range(1, len(df)):
+        price = float(df["close"].iloc[i])
+        ts = df["timestamp"].iloc[i]
+
+        # 更新回撤
+        if balance > peak:
+            peak = balance
+        dd = (peak - balance) / peak * 100 if peak > 0 else 0
+        if dd > max_dd:
+            max_dd = dd
+
+        # 平仓逻辑优先
+        if position == 'long' and (lx.iloc[i] or se.iloc[i]):
+            pnl = (price - entry_price) / entry_price * balance * 0.8
+            balance += pnl
+            trades.append({"type":"close_long","price":price,"pnl":pnl,"timestamp":ts})
+            position = None
+
+        elif position == 'short' and (sx.iloc[i] or le.iloc[i]):
+            pnl = (entry_price - price) / entry_price * balance * 0.8
+            balance += pnl
+            trades.append({"type":"close_short","price":price,"pnl":pnl,"timestamp":ts})
+            position = None
+
+        # 开仓
+        if position is None:
+            if le.iloc[i]:
+                position = 'long'
+                entry_price = price
+                entry_time = ts
+                trades.append({"type":"open_long","price":price,"timestamp":ts})
+            elif se.iloc[i]:
+                position = 'short'
+                entry_price = price
+                entry_time = ts
+                trades.append({"type":"open_short","price":price,"timestamp":ts})
+
+    closed = [t for t in trades if 'pnl' in t]
+    total_trades = len(closed)
+    win = len([t for t in closed if t['pnl'] > 0])
+    loss = len([t for t in closed if t['pnl'] < 0])
+    total_pnl = sum(t['pnl'] for t in closed)
+    win_rate = (win / total_trades * 100) if total_trades > 0 else 0.0
+    pf = abs(sum(t['pnl'] for t in closed if t['pnl'] > 0) / sum(t['pnl'] for t in closed if t['pnl'] < 0)) if loss > 0 else float('inf')
+
+    return {
+        "symbol": symbol,
+        "days": days,
+        "initial_balance": initial_balance,
+        "final_balance": balance,
+        "total_return": (balance - initial_balance) / initial_balance * 100,
+        "total_trades": total_trades,
+        "winning_trades": win,
+        "losing_trades": loss,
+        "win_rate": win_rate,
+        "total_pnl": total_pnl,
+        "profit_factor": pf,
+        "max_drawdown": max_dd,
+    }
+
+def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_balance=10000):
+    if symbols is None:
+        symbols = SYMBOLS[:5]
+    all_reports = []
+    report_lines = ["=== 多策略回测报告（按策略名分组） ===", ""]
+
+    for strat_name, strat_fn in _strategy_registry():
+        report_lines.append(f"--- 策略: {strat_name} ---")
+        for days in days_list:
+            day_results = []
+            for sym in symbols:
+                try:
+                    # 准备 DataFrame 后生成策略信号
+                    df = get_historical_data(sym, days)
+                    if df is None or len(df) < 100:
+                        log_message("WARNING", f"[{strat_name}] {sym} 历史数据不足，跳过")
+                        continue
+                    signals = strat_fn(df, {})
+                    result = backtest_with_signals(sym, days, initial_balance, signals)
+                    if result:
+                        day_results.append(result)
+                        log_message("INFO", f"[{strat_name}] {sym} {days}天: 胜率{result['win_rate']:.1f}% 收益{result['total_return']:.2f}% 交易{result['total_trades']}")
+                except Exception as e:
+                    log_message("ERROR", f"[{strat_name}] 回测 {sym} 失败: {e}")
+                    continue
+
+            if day_results:
+                avg_win_rate = sum(r['win_rate'] for r in day_results)/len(day_results)
+                avg_return = sum(r['total_return'] for r in day_results)/len(day_results)
+                total_trades = sum(r['total_trades'] for r in day_results)
+                report_lines.extend([
+                    f"{days}天汇总: 标的数={len(day_results)} 平均胜率={avg_win_rate:.1f}% 平均收益={avg_return:.2f}% 总交易={total_trades}",
+                    ""
+                ])
+                all_reports.extend([dict(r, strategy=strat_name) for r in day_results])
+
+    # 保存报告
+    try:
+        timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+        out = f"backtest_results_multi_{timestamp}.txt"
+        with open(out, "w", encoding="utf-8") as f:
+            f.write("
+".join(report_lines))
+        log_message("SUCCESS", f"多策略回测结果已保存到: {out}")
+    except Exception as e:
+        log_message("WARNING", f"保存多策略回测报告失败: {e}")
+
+    # 控制台打印汇总
+    log_message("INFO", "
+".join(report_lines))
+    return all_reports
+
+# 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
+_orig_enhanced_trading_loop = enhanced_trading_loop
+
+def enhanced_trading_loop():
+    log_message("INFO", "正在运行多策略回测（6个指标策略）...")
+    try:
+        run_multi_strategy_backtests(SYMBOLS[:5], days_list=[7,14,30])
+    except Exception as e:
+        log_message("WARNING", f"多策略回测阶段出错: {e}")
+    # 继续原有流程
+    _orig_enhanced_trading_loop()
+
 def start_trading_system():
     """启动交易系统"""
     global exchange
