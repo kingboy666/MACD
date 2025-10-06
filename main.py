@@ -480,7 +480,25 @@ def sync_exchange_positions():
         
         for position in active_positions:
             symbol = position['symbol']
-            size = float(position['contracts'])...([SYSTEM: truncated])
+            size = float(position['contracts'])
+            side = 'long' if size > 0 else 'short'
+            # entry price fallback: use entryPrice or avgPrice or last ticker
+            entry_price = float(position.get('entryPrice') or position.get('avgPrice') or exchange.fetch_ticker(symbol)['last'])
+
+            # 写入本地持仓跟踪
+            position_tracker['positions'][symbol] = {
+                'symbol': symbol,
+                'side': side,
+                'size': size,
+                'entry_price': entry_price,
+                'timestamp': datetime.now()
+            }
+
+            # 同步后立即设置止盈止损
+            try:
+                setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+            except Exception as e:
+                log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {e}")
 
 def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
     """更新交易统计数据"""
