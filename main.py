@@ -412,6 +412,7 @@ def execute_trade(symbol, signal, signal_strength):
             
             # 记录持仓
             position_tracker['positions'][symbol] = {
+                'symbol': symbol,
                 'side': signal['side'],
                 'size': position_size,
                 'entry_price': price,
@@ -488,6 +489,7 @@ def sync_exchange_positions():
                 
                 # 添加到持仓跟踪器
                 position_tracker['positions'][symbol] = {
+                    'symbol': symbol,
                     'side': side,
                     'size': size,
                     'entry_price': entry_price,
