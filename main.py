@@ -482,6 +482,22 @@ def sync_exchange_positions():
             symbol = position['symbol']
             size = float(position['contracts'])
             side = 'long' if size > 0 else 'short'
+            entry_price = float(position.get('entryPrice') or position.get('avgPrice') or exchange.fetch_ticker(symbol)['last'])
+
+            position_tracker['positions'][symbol] = {
+                'symbol': symbol,
+                'side': side,
+                'size': size,
+                'entry_price': entry_price,
+                'timestamp': datetime.now()
+            }
+
+            try:
+                setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+            except Exception as e:
+                log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {e}")
+            size = float(position['contracts'])
+            side = 'long' if size > 0 else 'short'
             # entry price fallback: use entryPrice or avgPrice or last ticker
             entry_price = float(position.get('entryPrice') or position.get('avgPrice') or exchange.fetch_ticker(symbol)['last'])
 
