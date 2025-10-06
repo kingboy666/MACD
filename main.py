@@ -2762,8 +2762,7 @@ def run_ema_bb_backtest(symbols=None, days_list=[7, 14, 30], initial_balance=100
         timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
         out_file = f"backtest_results_ema_bb_{timestamp}.txt"
         with open(out_file, 'w', encoding='utf-8') as f:
-            f.write("
-".join(report_lines))
+            f.writelines(report_lines)
         log_message("SUCCESS", f"[EMA/BB] 回测结果已保存到: {out_file}")
         return results_summary
 
