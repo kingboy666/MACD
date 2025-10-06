@@ -268,6 +268,10 @@ def process_klines(ohlcv):
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
+        # 计算K线阴阳线
+        df['is_bullish'] = df['close'] > df['open']  # 阳线: 收盘价大于开盘价
+        df['is_bearish'] = df['close'] < df['open']  # 阴线: 收盘价小于开盘价
+        
         # 计算MACD指标
         try:
             macd_line, signal_line, histogram = calculate_macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
@@ -299,7 +303,7 @@ def process_klines(ohlcv):
         return None
 
 def generate_signal(symbol):
-    """基于MACD金叉/死叉生成交易信号"""
+    """基于MACD金叉/死叉和K线阴阳线生成交易信号"""
     try:
         ohlcv = get_klines(symbol, '30m', limit=100)
         if not ohlcv:
@@ -316,6 +320,8 @@ def generate_signal(symbol):
         current_adx = df['ADX'].iloc[-1]
         current_price = df['close'].iloc[-1]
         atr_value = df['ATR_14'].iloc[-1]
+        is_current_bullish = df['is_bullish'].iloc[-1]
+        is_current_bearish = df['is_bearish'].iloc[-1]
         
         # 检查MACD金叉死叉
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
@@ -323,9 +329,9 @@ def generate_signal(symbol):
         
         signal = None
         
-        # 趋势确认：ADX > 25
+        # 趋势确认：ADX > 25 且 K线阴阳线确认
         if current_adx > ADX_TREND_THRESHOLD:
-            if golden_cross:
+            if golden_cross and is_current_bullish:
                 signal = {
                     'symbol': symbol,
                     'side': 'long',
@@ -334,9 +340,11 @@ def generate_signal(symbol):
                     'atr_value': atr_value,
                     'adx_value': current_adx,
                     'macd_value': current_macd,
-                    'signal_value': current_signal
+                    'signal_value': current_signal,
+                    'is_bullish': is_current_bullish,
+                    'confirmation_type': 'MACD金叉+阳线确认'
                 }
-            elif death_cross:
+            elif death_cross and is_current_bearish:
                 signal = {
                     'symbol': symbol,
                     'side': 'short',
@@ -345,7 +353,9 @@ def generate_signal(symbol):
                     'atr_value': atr_value,
                     'adx_value': current_adx,
                     'macd_value': current_macd,
-                    'signal_value': current_signal
+                    'signal_value': current_signal,
+                    'is_bearish': is_current_bearish,
+                    'confirmation_type': 'MACD死叉+阴线确认'
                 }
         
         return signal
@@ -953,14 +963,12 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
             if day_results:
                 # 生成该时间周期的回测报告
                 report = generate_backtest_report(day_results)
-                log_message("INFO", f"{days}天回测结果:
-{report}")
+                log_message("INFO", f"{days}天回测结果:\n{report}")
                 all_results.extend(day_results)
         
         # 生成综合报告
         final_report = generate_backtest_report(all_results)
-        log_message("INFO", f"综合回测报告:
-{final_report}")
+        log_message("INFO", f"综合回测报告:\n{final_report}")
         
         return all_results
         
