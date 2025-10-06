@@ -2814,6 +2814,183 @@ def enhanced_trading_loop():
         log_message("WARNING", f"单策略综合回测阶段出错: {e}")
         return _orig_enhanced_trading_loop()
 
+def backtest_ma50_sar(df, initial_balance=10000.0):
+    """MA50 + SAR 轻量策略回测核心：MA50上方 SAR<close 做多，SAR翻到上方立即平仓；MA50下方 SAR>close 做空，SAR翻到下方立即平仓"""
+    try:
+        if df is None or len(df) < 60:
+            return {'error': '数据不足'}
+
+        # 计算MA50
+        df['ma50'] = df['close'].rolling(window=50, min_periods=50).mean()
+
+        # 计算SAR（优先使用 pandas_ta，如果不可用则使用近似兜底）
+        try:
+            import pandas_ta as ta
+            psar = ta.psar(df['high'], df['low'], df['close'], af=0.02, max_af=0.2)
+            # 兼容不同列名
+            if hasattr(psar, 'columns') and len(psar.columns) > 0:
+                sar_series = psar.iloc[:, 0]
+            else:
+                # 某些版本返回 Series
+                sar_series = psar
+            df['sar'] = sar_series
+        except Exception:
+            # 兜底：用近似方法（非标准SAR，仅为在无库时也可运行）
+            prev_min = df['low'].rolling(window=5, min_periods=1).min()
+            prev_max = df['high'].rolling(window=5, min_periods=1).max()
+            df['sar'] = (prev_min + prev_max) / 2.0
+
+        position = None  # 'long' | 'short'
+        entry_price = 0.0
+        entry_time = None
+        size = 0.0
+        balance = initial_balance
+        trades = []
+
+        for i in range(len(df)):
+            row = df.iloc[i]
+            price = float(row['close'])
+            ma50 = row['ma50']
+            sar = row['sar']
+
+            # 平仓：SAR反转
+            if position == 'long' and sar >= price:
+                exit_price = price
+                pnl = (exit_price - entry_price) * size
+                balance += pnl
+                trades.append({'side': 'close_long', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl,
+                               'entry_time': entry_time, 'exit_time': row['timestamp']})
+                position = None; size = 0.0; entry_price = 0.0; entry_time = None
+            elif position == 'short' and sar <= price:
+                exit_price = price
+                pnl = (entry_price - exit_price) * size
+                balance += pnl
+                trades.append({'side': 'close_short', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl,
+                               'entry_time': entry_time, 'exit_time': row['timestamp']})
+                position = None; size = 0.0; entry_price = 0.0; entry_time = None
+
+            # 开仓（无持仓时）
+            if position is None and pd.notna(ma50):
+                if price > ma50 and sar < price:
+                    position = 'long'
+                    entry_price = price
+                    entry_time = row['timestamp']
+                    size = (balance * 0.8) / price
+                    trades.append({'side': 'open_long', 'price': entry_price, 'timestamp': entry_time})
+                elif price < ma50 and sar > price:
+                    position = 'short'
+                    entry_price = price
+                    entry_time = row['timestamp']
+                    size = (balance * 0.8) / price
+                    trades.append({'side': 'open_short', 'price': entry_price, 'timestamp': entry_time})
+
+        # 收尾强平
+        if position == 'long':
+            last_price = float(df['close'].iloc[-1])
+            pnl = (last_price - entry_price) * size
+            balance += pnl
+            trades.append({'side': 'close_long', 'entry': entry_price, 'exit': last_price, 'pnl': pnl,
+                           'entry_time': entry_time, 'exit_time': df['timestamp'].iloc[-1]})
+        elif position == 'short':
+            last_price = float(df['close'].iloc[-1])
+            pnl = (entry_price - last_price) * size
+            balance += pnl
+            trades.append({'side': 'close_short', 'entry': entry_price, 'exit': last_price, 'pnl': pnl,
+                           'entry_time': entry_time, 'exit_time': df['timestamp'].iloc[-1]})
+
+        closed = [t for t in trades if t.get('pnl') is not None]
+        total_trades = len(closed)
+        wins = len([t for t in closed if t['pnl'] > 0])
+        win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
+        total_return = ((balance - initial_balance) / initial_balance * 100.0) if initial_balance > 0 else 0.0
+
+        return {
+            'total_trades': total_trades,
+            'win_rate': win_rate,
+            'total_return': total_return,
+            'final_balance': balance,
+            'trades': closed
+        }
+    except Exception as e:
+        log_message("ERROR", f"[MA50/SAR] 回测计算失败: {e}")
+        return {'error': str(e)}
+
+def run_ma50_sar_backtest(symbols=None, days=7, timeframe='30m', initial_balance=10000.0):
+    """运行 MA50+SAR 轻量策略回测（公共行情，无需API密钥）"""
+    import ccxt
+    try:
+        if symbols is None:
+            symbols = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
+
+        # 选择公共行情交易所（优先OKX，失败回退Binance）
+        try:
+            ex = ccxt.okx()
+        except Exception:
+            ex = ccxt.binance()
+
+        # 符号归一化
+        def normalize_symbol(sym):
+            s = sym
+            if isinstance(ex, ccxt.binance):
+                if '-USDT-SWAP' in s: s = s.replace('-USDT-SWAP', '/USDT')
+                if ':' in s: s = s.replace(':USDT', '/USDT')
+                if '/USDT' not in s and '-' in s and s.endswith('-USDT'):
+                    s = s.split('-')[0] + '/USDT'
+            elif isinstance(ex, ccxt.okx):
+                if ':USDT' in s: s = s.replace(':USDT', '-USDT-SWAP')
+                if '/USDT' in s: s = s.split('/USDT')[0] + '-USDT-SWAP'
+                if not s.endswith('-USDT-SWAP'): s = s + '-USDT-SWAP'
+            return s
+
+        results = []
+        for sym in symbols:
+            try:
+                norm = normalize_symbol(sym)
+                limit = days * (48 if timeframe == '30m' else 24)
+                ohlcv = ex.fetch_ohlcv(norm, timeframe=timeframe, limit=limit)
+                if not ohlcv or len(ohlcv) == 0:
+                    raise Exception("公共行情返回为空")
+                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+
+                r = backtest_ma50_sar(df, initial_balance)
+                r['symbol'] = sym
+                r['days'] = days
+            except Exception as e:
+                r = {'symbol': sym, 'days': days, 'error': str(e)}
+            results.append(r)
+
+        # 写报告（固定文件名与时间戳文件）
+        ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
+        out_ts = f"backtest_results_ma50_sar_{ts}.txt"
+        lines = [
+            "=== MA50 + SAR 轻量策略回测报告 ===",
+            f"标的数量: {len(symbols)}",
+            f"周期: {days}天（{timeframe}）",
+            ""
+        ]
+        for r in results:
+            if 'error' in r:
+                lines.append(f"{r['symbol']}: 错误: {r['error']}")
+            else:
+                lines.append(f"{r['symbol']}: 交易 {r['total_trades']}, 胜率 {r['win_rate']:.1f}%, 收益率 {r['total_return']:.2f}%")
+
+        try:
+            with open(out_ts, "w", encoding="utf-8") as f:
+                f.write("
+".join(lines))
+            with open("backtest_results_ma50_sar_latest.txt", "w", encoding="utf-8") as f2:
+                f2.write("
+".join(lines))
+            log_message("SUCCESS", f"[MA50/SAR] 回测结果已保存到: {out_ts}")
+        except Exception as e:
+            log_message("ERROR", f"[MA50/SAR] 生成回测报告失败: {e}")
+
+        return results
+    except Exception as e:
+        log_message("ERROR", f"[MA50/SAR] 回测入口执行失败: {e}")
+        return None
+
 if __name__ == "__main__":
     # 使用增强版交易循环替代原版本
     try:
