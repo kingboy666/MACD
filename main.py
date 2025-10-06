@@ -480,7 +480,7 @@ def sync_exchange_positions():
         
         for position in active_positions:
             symbol = position['symbol']
-            size = float(posi...([SYSTEM: truncated])
+            size = float(position['contracts'])...([SYSTEM: truncated])
 
 def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
     """更新交易统计数据"""
