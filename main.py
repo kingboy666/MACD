@@ -417,6 +417,82 @@ def execute_trade(symbol, signal, signal_strength):
         log_message("ERROR", f"{symbol} 执行交易失败: {str(e)}")
         return False
 
+def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
+    """计算止损止盈价格"""
+    try:
+        if USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0:
+            # 使用ATR动态计算
+            atr_sl_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_STOP_LOSS_MULTIPLIER))
+            atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER))
+            
+            if signal == 'long':
+                stop_loss = price - (atr_value * atr_sl_multiplier)
+                take_profit = price + (atr_value * atr_tp_multiplier)
+            else:  # short
+                stop_loss = price + (atr_value * atr_sl_multiplier)
+                take_profit = price - (atr_value * atr_tp_multiplier)
+        else:
+            # 固定百分比止损止盈
+            if signal == 'long':
+                stop_loss = price * 0.98  # 2%止损
+                take_profit = price * 1.06  # 6%止盈
+            else:  # short
+                stop_loss = price * 1.02  # 2%止损
+                take_profit = price * 0.94  # 6%止盈
+        
+        return {
+            'stop_loss': stop_loss,
+            'take_profit': take_profit
+        }
+        
+    except Exception as e:
+        log_message("ERROR", f"计算止损止盈失败: {str(e)}")
+        return None
+
+def sync_exchange_positions():
+    """同步交易所持仓，统一按MACD策略管理"""
+    try:
+        log_message("INFO", "正在同步交易所持仓...")
+        
+        # 获取当前持仓
+        positions = exchange.fetch_positions()
+        active_positions = [pos for pos in positions if float(pos['contracts']) != 0]
+        
+        for position in active_positions:
+            symbol = position['symbol']
+            size = float(position['contracts'])
+            side = position['side']
+            entry_price = float(position['entryPrice']) if position['entryPrice'] else 0
+            
+            if symbol in SYMBOLS:  # 只处理我们交易的币种
+                # 获取当前ATR值
+                atr_value = 0
+                try:
+                    ohlcv = get_klines(symbol, '30m', limit=50)
+                    if ohlcv:
+                        df = process_klines(ohlcv)
+                        if df is not None and 'ATR_14' in df.columns:
+                            atr_value = df['ATR_14'].iloc[-1]
+                except Exception as e:
+                    log_message("WARNING", f"获取{symbol} ATR值失败: {str(e)}")
+                
+                # 添加到持仓跟踪器
+                position_tracker['positions'][symbol] = {
+                    'side': side,
+                    'size': size,
+                    'entry_price': entry_price,
+                    'timestamp': datetime.now(),
+                    'atr_value': atr_value,
+                    'synced': True  # 标记为同步的持仓
+                }
+                
+                log_message("INFO", f"同步持仓: {symbol} {side} {size} @ {entry_price}")
+        
+        log_message("SUCCESS", f"持仓同步完成，共同步 {len(active_positions)} 个持仓")
+        
+    except Exception as e:
+        log_message("ERROR", f"同步交易所持仓时出错: {str(e)}")
+
 def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
     """更新交易统计数据"""
     try:
@@ -598,6 +674,9 @@ def start_trading_system():
         log_message("INFO", f"智能杠杆系统: BTC最大{MAX_LEVERAGE_BTC}x, ETH最大{MAX_LEVERAGE_ETH}x")
         log_message("INFO", f"交易对数量: {len(SYMBOLS)}")
         log_message("INFO", f"最大持仓数: {MAX_OPEN_POSITIONS}")
+        
+        # 同步交易所现有持仓
+        sync_exchange_positions()
         
         # 启动交易循环
         trading_loop()
