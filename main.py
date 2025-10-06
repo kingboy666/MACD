@@ -424,6 +424,12 @@ def execute_trade(symbol, signal, signal_strength):
                 'atr_value': signal.get('atr_value', 0)
             }
             
+            # 开仓后立即设置止盈止损
+            try:
+                setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+            except Exception as e:
+                log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {e}")
+            
             return True
         
         return False
@@ -469,45 +475,12 @@ def sync_exchange_positions():
     try:
         log_message("INFO", "正在同步交易所持仓...")
         
-        # 获取当前持仓
         positions = exchange.fetch_positions()
         active_positions = [pos for pos in positions if float(pos['contracts']) != 0]
         
         for position in active_positions:
             symbol = position['symbol']
-            size = float(position['contracts'])
-            side = position['side']
-            entry_price = float(position['entryPrice']) if position['entryPrice'] else 0
-            
-            if symbol in SYMBOLS:  # 只处理我们交易的币种
-                # 获取当前ATR值
-                atr_value = 0
-                try:
-                    ohlcv = get_klines(symbol, '30m', limit=50)
-                    if ohlcv:
-                        df = process_klines(ohlcv)
-                        if df is not None and 'ATR_14' in df.columns:
-                            atr_value = df['ATR_14'].iloc[-1]
-                except Exception as e:
-                    log_message("WARNING", f"获取{symbol} ATR值失败: {str(e)}")
-                
-                # 添加到持仓跟踪器
-                position_tracker['positions'][symbol] = {
-                    'symbol': symbol,
-                    'side': side,
-                    'size': size,
-                    'entry_price': entry_price,
-                    'timestamp': datetime.now(),
-                    'atr_value': atr_value,
-                    'synced': True  # 标记为同步的持仓
-                }
-                
-                log_message("INFO", f"同步持仓: {symbol} {side} {size} @ {entry_price}")
-        
-        log_message("SUCCESS", f"持仓同步完成，共同步 {len(active_positions)} 个持仓")
-        
-    except Exception as e:
-        log_message("ERROR", f"同步交易所持仓时出错: {str(e)}")
+            size = float(posi...([SYSTEM: truncated])
 
 def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
     """更新交易统计数据"""
@@ -992,7 +965,8 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=stop_loss * 0.95,
                     params={
-                        'stopLossPrice': stop_loss,
+                        'slTriggerPx': stop_loss,
+                        'slOrdPx': stop_loss,
                         'tdMode': 'cross',
                         'posSide': 'long',
                         'reduceOnly': True
@@ -1006,7 +980,8 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=stop_loss * 1.05,
                     params={
-                        'stopLossPrice': stop_loss,
+                        'slTriggerPx': stop_loss,
+                        'slOrdPx': stop_loss,
                         'tdMode': 'cross',
                         'posSide': 'short',
                         'reduceOnly': True
@@ -1025,7 +1000,8 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=take_profit,
                     params={
-                        'takeProfitPrice': take_profit,
+                        'tpTriggerPx': take_profit,
+                        'tpOrdPx': take_profit,
                         'tdMode': 'cross',
                         'posSide': 'long',
                         'reduceOnly': True
@@ -1039,7 +1015,8 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=take_profit,
                     params={
-                        'takeProfitPrice': take_profit,
+                        'tpTriggerPx': take_profit,
+                        'tpOrdPx': take_profit,
                         'tdMode': 'cross',
                         'posSide': 'short',
                         'reduceOnly': True
@@ -1161,12 +1138,8 @@ def manage_conditional_orders():
             # 检查动态止损
             check_trailing_stop(symbol, position)
             
-            # 检查是否需要设置缺失的止盈止损单
-            current_orders = exchange.fetch_open_orders(symbol)
-            has_stop_loss = any(o['type'] == 'stop' for o in current_orders)
-            
-            if not has_stop_loss:
-                setup_missing_stop_orders(position, symbol)
+            # 设置或补齐止盈止损单（不依赖 open_orders 类型判断）
+            setup_missing_stop_orders(position, symbol)
         
     except Exception as e:
         log_message("ERROR", f"管理条件单失败: {e}")
