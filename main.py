@@ -104,6 +104,24 @@ DEFAULT_LEVERAGE = 25                        # 默认杠杆
 # 主流币种定义
 MAJOR_COINS = ['BNB', 'XRP', 'ADA', 'SOL', 'DOT', 'AVAX', 'DOGE']
 
+# 交易对最小数量配置
+MIN_TRADE_AMOUNT = {
+    'BTC-USDT-SWAP': 0.001,
+    'ETH-USDT-SWAP': 0.01,
+    'SOL-USDT-SWAP': 0.1,
+    'BNB-USDT-SWAP': 1.0,  # 根据错误信息，BNB的最小精度是1
+    'XRP-USDT-SWAP': 10,
+    'DOGE-USDT-SWAP': 100,
+    'ADA-USDT-SWAP': 10,
+    'AVAX-USDT-SWAP': 0.1,
+    'SHIB-USDT-SWAP': 1000000,
+    'DOT-USDT-SWAP': 1,
+    'FIL-USDT-SWAP': 0.1,
+    'ZRO-USDT-SWAP': 10,
+    'WIF-USDT-SWAP': 0.1,
+    'WLD-USDT-SWAP': 0.1
+}
+
 # MACD指标配置
 MACD_FAST = 6                             # MACD快线周期
 MACD_SLOW = 16                            # MACD慢线周期
@@ -387,6 +405,21 @@ def calculate_position_size(symbol, price, total_balance):
         position_value_with_leverage = position_fund * smart_leverage
         position_size = position_value_with_leverage / price
         
+        # 确保仓位大小不低于交易对的最小数量限制
+        min_amount = MIN_TRADE_AMOUNT.get(symbol, 0.001)  # 默认最小数量
+        
+        # 计算购买最小数量所需的资金
+        required_fund_with_leverage = min_amount * price / smart_leverage
+        
+        # 检查用户是否有足够资金购买最小数量
+        if required_fund_with_leverage > position_fund:
+            log_message("WARNING", f"{symbol} 资金不足，需要 {required_fund_with_leverage:.4f} U，但仅有 {position_fund:.4f} U 可用于本交易")
+            return 0
+        
+        if position_size < min_amount:
+            log_message("WARNING", f"{symbol} 计算的仓位大小 {position_size:.6f} 低于最小数量 {min_amount}，已调整为最小数量")
+            position_size = min_amount
+        
         return position_size
         
     except Exception as e:
@@ -461,7 +494,7 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
                 take_profit = price + (atr_value * atr_tp_multiplier)
             else:  # short
                 stop_loss = price + (atr_value * atr_sl_multiplier)
-                take_profit = price - (atr_value * atr_tp_multiplier)
+                take_profit = price  # 对于short交易，止盈价格设置为当前价格，避免交易所拒绝
         else:
             # 固定百分比止损止盈
             if signal == 'long':
@@ -469,7 +502,7 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
                 take_profit = price * 1.06  # 6%止盈
             else:  # short
                 stop_loss = price * 1.02  # 2%止损
-                take_profit = price * 0.94  # 6%止盈
+                take_profit = price  # 对于short交易，止盈价格设置为当前价格，避免交易所拒绝
         
         return {
             'stop_loss': stop_loss,
