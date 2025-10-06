@@ -1242,14 +1242,324 @@ if os.getenv("USE_APPENDED_SYMBOLS", "0") == "1":
 # =================================
 from typing import Callable, Tuple
 
-def _strategy_registry() -> list[Tuple[str, Callable]]:
+def generate_signals_combined_high_winrate_profit(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI（高胜率）+ 趋势EMA_ADX_RSI（高盈利率）"""
+    cfg = cfg or {}
+    
+    # 获取两个策略的信号
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    
+    # 信号叠加：两个策略同时满足条件才开仓
+    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"]
+    
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+# 高胜率指标（趋势回调_布林带_RSI）的搭配组合
+def generate_signals_pullback_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + MACD_RSI"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_macd = generate_signals_macd_rsi(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_macd["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_macd["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_macd["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_macd["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + 布林带_RSI"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_bb = generate_signals_bb_rsi(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_bb["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_bb["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_bb["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_bb["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + KDJ_MA_成交量"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_kdj["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_kdj["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_kdj["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_kdj["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + ATR突破"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_atr = generate_signals_atr_breakout(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_atr["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_atr["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_atr["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_atr["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_trend_macd(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + MACD_RSI"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_macd = generate_signals_macd_rsi(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_macd["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_macd["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_macd["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_macd["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_trend_bb(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + 布林带_RSI"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_bb = generate_signals_bb_rsi(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_bb["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_bb["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_bb["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_bb["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_trend_kdj(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + KDJ_MA_成交量"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_kdj["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_kdj["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_kdj["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_kdj["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_pullback_trend_atr(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + ATR突破"""
+    cfg = cfg or {}
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_atr = generate_signals_atr_breakout(df, cfg)
+    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_atr["long_entry"]
+    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_atr["long_exit"]
+    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_atr["short_entry"]
+    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_atr["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+# 高盈利指标（趋势EMA_ADX_RSI）的搭配组合
+def generate_signals_trend_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + MACD_RSI"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_macd = generate_signals_macd_rsi(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_macd["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_macd["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_macd["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_macd["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + 布林带_RSI"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_bb = generate_signals_bb_rsi(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_bb["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_bb["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_bb["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_bb["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + KDJ_MA_成交量"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_kdj["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_kdj["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_kdj["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_kdj["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + ATR突破"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_atr = generate_signals_atr_breakout(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_atr["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_atr["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_atr["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_atr["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_pullback_macd(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + MACD_RSI"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_macd = generate_signals_macd_rsi(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_macd["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_macd["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_macd["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_macd["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_pullback_bb(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + 布林带_RSI"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_bb = generate_signals_bb_rsi(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_bb["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_bb["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_bb["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_bb["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_pullback_kdj(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + KDJ_MA_成交量"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_kdj["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_kdj["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_kdj["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_kdj["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def generate_signals_trend_pullback_atr(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
+    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + ATR突破"""
+    cfg = cfg or {}
+    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
+    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
+    signals_atr = generate_signals_atr_breakout(df, cfg)
+    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_atr["long_entry"]
+    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_atr["long_exit"]
+    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_atr["short_entry"]
+    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_atr["short_exit"]
+    return {
+        "long_entry": _bool_series(long_entry),
+        "long_exit": _bool_series(long_exit),
+        "short_entry": _bool_series(short_entry),
+        "short_exit": _bool_series(short_exit),
+    }
+
+def _strategy_registry() -> list[Tuple[str, str, Callable]]:
+    """返回策略名称、指标描述和策略函数"""
     return [
-        ("trend_ema_adx_rsi", generate_signals_trend_ema_adx_rsi),
-        ("macd_rsi", generate_signals_macd_rsi),
-        ("bb_rsi", generate_signals_bb_rsi),
-        ("kdj_ma_volume", generate_signals_kdj_ma_volume),
-        ("atr_breakout", generate_signals_atr_breakout),
-        ("trend_pullback_bb_rsi", generate_signals_trend_pullback_bb_rsi),
+        # 原始单指标策略
+        ("趋势EMA_ADX_RSI", "EMA+ADX+RSI趋势跟踪", generate_signals_trend_ema_adx_rsi),
+        ("MACD_RSI", "MACD+RSI动量反转", generate_signals_macd_rsi),
+        ("布林带_RSI", "布林带+RSI超买超卖", generate_signals_bb_rsi),
+        ("KDJ_MA_成交量", "KDJ+MA+成交量突破", generate_signals_kdj_ma_volume),
+        ("ATR突破", "ATR+威廉指标+动量", generate_signals_atr_breakout),
+        ("趋势回调_布林带_RSI", "趋势回调+布林带+RSI", generate_signals_trend_pullback_bb_rsi),
+        
+        # 高胜率指标（趋势回调_布林带_RSI）的搭配组合
+        ("高胜率+高盈利率组合", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI", generate_signals_combined_high_winrate_profit),
+        ("高胜率+MACD_RSI", "趋势回调_布林带_RSI+MACD_RSI", generate_signals_pullback_macd_rsi),
+        ("高胜率+布林带_RSI", "趋势回调_布林带_RSI+布林带_RSI", generate_signals_pullback_bb_rsi),
+        ("高胜率+KDJ_MA_成交量", "趋势回调_布林带_RSI+KDJ_MA_成交量", generate_signals_pullback_kdj_ma_volume),
+        ("高胜率+ATR突破", "趋势回调_布林带_RSI+ATR突破", generate_signals_pullback_atr_breakout),
+        ("高胜率+趋势+MACD", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+MACD_RSI", generate_signals_pullback_trend_macd),
+        ("高胜率+趋势+布林带", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+布林带_RSI", generate_signals_pullback_trend_bb),
+        ("高胜率+趋势+KDJ", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+KDJ_MA_成交量", generate_signals_pullback_trend_kdj),
+        ("高胜率+趋势+ATR", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+ATR突破", generate_signals_pullback_trend_atr),
+        
+        # 高盈利指标（趋势EMA_ADX_RSI）的搭配组合
+        ("高盈利+MACD_RSI", "趋势EMA_ADX_RSI+MACD_RSI", generate_signals_trend_macd_rsi),
+        ("高盈利+布林带_RSI", "趋势EMA_ADX_RSI+布林带_RSI", generate_signals_trend_bb_rsi),
+        ("高盈利+KDJ_MA_成交量", "趋势EMA_ADX_RSI+KDJ_MA_成交量", generate_signals_trend_kdj_ma_volume),
+        ("高盈利+ATR突破", "趋势EMA_ADX_RSI+ATR突破", generate_signals_trend_atr_breakout),
+        ("高盈利+高胜率+MACD", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+MACD_RSI", generate_signals_trend_pullback_macd),
+        ("高盈利+高胜率+布林带", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+布林带_RSI", generate_signals_trend_pullback_bb),
+        ("高盈利+高胜率+KDJ", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+KDJ_MA_成交量", generate_signals_trend_pullback_kdj),
+        ("高盈利+高胜率+ATR", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+ATR突破", generate_signals_trend_pullback_atr),
     ]
 
 def backtest_with_signals(symbol: str, days: int, initial_balance: float, signals: dict) -> dict:
@@ -1339,10 +1649,11 @@ def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_bala
     if symbols is None:
         symbols = SYMBOLS[:5]
     all_reports = []
-    report_lines = ["=== 多策略回测报告（按策略名分组） ===", ""]
+    report_lines = ["=== 多策略回测报告（按指标组合分组） ===", ""]
 
-    for strat_name, strat_fn in _strategy_registry():
+    for strat_name, indicator_desc, strat_fn in _strategy_registry():
         report_lines.append(f"--- 策略: {strat_name} ---")
+        report_lines.append(f"指标组合: {indicator_desc}")
         for days in days_list:
             day_results = []
             for sym in symbols:
@@ -1369,7 +1680,7 @@ def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_bala
                     f"{days}天汇总: 标的数={len(day_results)} 平均胜率={avg_win_rate:.1f}% 平均收益={avg_return:.2f}% 总交易={total_trades}",
                     ""
                 ])
-                all_reports.extend([dict(r, strategy=strat_name) for r in day_results])
+                all_reports.extend([dict(r, strategy=strat_name, indicator_desc=indicator_desc) for r in day_results])
 
     # 保存报告
     try:
