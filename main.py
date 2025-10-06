@@ -2,7 +2,7 @@ import ccxt
 import pandas as pd
 import traceback
 import numpy as np
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 import time
 import json
 from dotenv import load_dotenv
@@ -165,7 +165,7 @@ position_tracker = {
     'last_trade_time': {},
     'pending_signals': {},  # 跟踪等待K线收盘的信号
     'daily_stats': {
-        'date': datetime.now().strftime('%Y-%m-%d'),
+        'date': datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d'),
         'trades_count': 0,
         'total_pnl': 0
     }
@@ -192,7 +192,9 @@ trade_stats = {
 
 def log_message(level, message):
     """日志记录函数"""
-    timestamp = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+    # 使用UTC+8时区
+    utc8_timezone = timezone(timedelta(hours=8))
+    timestamp = datetime.now(utc8_timezone).strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {level}: {message}")
 
 def test_api_connection():
@@ -719,7 +721,7 @@ def execute_trade(symbol, signal, signal_strength):
                 'side': signal['side'],
                 'size': position_size,
                 'entry_price': price,
-                'timestamp': datetime.now(),
+                'timestamp': datetime.now(timezone(timedelta(hours=8))),
                 'atr_value': signal.get('atr_value', 0)
             }
             
@@ -815,7 +817,7 @@ def sync_exchange_positions():
                 'side': side,
                 'size': size,
                 'entry_price': entry_price,
-                'timestamp': datetime.now()
+                'timestamp': datetime.now(timezone(timedelta(hours=8)))
             }
 
             # 同步后立即设置止盈止损
@@ -844,7 +846,7 @@ def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
             trade_stats['win_rate'] = (trade_stats['winning_trades'] / trade_stats['total_trades']) * 100
         
         trade_record = {
-            'timestamp': datetime.now().strftime('%Y-%m-%d %H:%M:%S'),
+            'timestamp': datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d %H:%M:%S'),
             'symbol': symbol,
             'side': side,
             'entry_price': entry_price,
@@ -1495,7 +1497,7 @@ def check_trailing_stop(symbol, position_info):
 
 def check_pending_signals():
     """检查pending信号是否已经可以确认"""
-    current_time = datetime.now().timestamp()
+    current_time = datetime.now(timezone(timedelta(hours=8))).timestamp()
     confirmed_signals = []
     
     for symbol, pending_info in list(position_tracker['pending_signals'].items()):
@@ -1540,7 +1542,7 @@ def setup_missing_stop_orders(position, symbol):
                 return False
         
         # 检查是否最近已经设置过止盈止损（避免重复设置）
-        current_time = datetime.now()
+        current_time = datetime.now(timezone(timedelta(hours=8)))
         last_setup_time = position_tracker.get('last_stop_setup', {}).get(symbol)
         
         if last_setup_time and (current_time - last_setup_time).total_seconds() < 600:  # 10分钟内不重复设置
@@ -1803,7 +1805,7 @@ def update_detailed_trade_stats(symbol, side, pnl, entry_price, exit_price, entr
             'entry_time': entry_time,
             'exit_time': exit_time,
             'hold_duration': (exit_time - entry_time).total_seconds() / 3600,  # 持仓小时数
-            'timestamp': datetime.now()
+            'timestamp': datetime.now(timezone(timedelta(hours=8)))
         }
         
         # 保存交易历史（最多100笔）
@@ -1898,7 +1900,7 @@ def check_risk_limits():
             return False
         
         # 检查每日交易次数
-        today = datetime.now().strftime('%Y-%m-%d')
+        today = datetime.now(timezone(timedelta(hours=8))).strftime('%Y-%m-%d')
         if position_tracker['daily_stats']['date'] != today:
             # 重置每日统计
             position_tracker['daily_stats'] = {
@@ -1933,7 +1935,7 @@ def enhanced_trading_loop():
         if backtest_results:
             # 保存回测结果到文件
             try:
-                timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
                 backtest_file = f"backtest_results_{timestamp}.txt"
                 with open(backtest_file, 'w', encoding='utf-8') as f:
                     f.write(generate_backtest_report(backtest_results))
@@ -1990,7 +1992,7 @@ def enhanced_trading_loop():
                                 # 记录pending信号
                                 position_tracker['pending_signals'][symbol] = {
                                     'signal': signal,
-                                    'timestamp': datetime.now(),
+                                    'timestamp': datetime.now(timezone(timedelta(hours=8))),
                                     'kline_end_time': signal.get('kline_end_time', 0)
                                 }
                                 
@@ -2019,7 +2021,7 @@ def enhanced_trading_loop():
                         continue
                 
                 # 每小时生成一次性能报告
-                current_time = datetime.now()
+                current_time = datetime.now(timezone(timedelta(hours=8)))
                 if current_time.minute == 0:  # 整点时
                     report = get_performance_report()
                     log_message("INFO", f"性能报告:\n{report}")
