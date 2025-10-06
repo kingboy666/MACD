@@ -1385,17 +1385,7 @@ def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_bala
     
     return all_reports
 
-# 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
-_orig_enhanced_trading_loop = enhanced_trading_loop
 
-def enhanced_trading_loop():
-    log_message("INFO", "正在运行多策略回测（6个指标策略）...")
-    try:
-        run_multi_strategy_backtests(SYMBOLS[:5], days_list=[7,14,30])
-    except Exception as e:
-        log_message("WARNING", f"多策略回测阶段出错: {e}")
-    # 继续原有流程
-    _orig_enhanced_trading_loop()
 
 def start_trading_system():
     """启动交易系统"""
@@ -2360,6 +2350,18 @@ def enhanced_trading_loop():
 # =================================
 # 主程序入口 - 增强版
 # =================================
+# 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
+_orig_enhanced_trading_loop = enhanced_trading_loop
+
+def enhanced_trading_loop():
+    log_message("INFO", "正在运行多策略回测（6个指标策略）...")
+    try:
+        run_multi_strategy_backtests(SYMBOLS[:5], days_list=[7,14,30])
+    except Exception as e:
+        log_message("WARNING", f"多策略回测阶段出错: {e}")
+    # 继续原有流程
+    return _orig_enhanced_trading_loop()
+
 if __name__ == "__main__":
     # 使用增强版交易循环替代原版本
     try:
