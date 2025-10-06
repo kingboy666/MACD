@@ -927,8 +927,7 @@ def generate_backtest_report(backtest_results):
                     ""
                 ])
         
-        return "
-".join(report_lines)
+        return "\n".join(report_lines)
         
     except Exception as e:
         log_message("ERROR", f"生成回测报告失败: {e}")
