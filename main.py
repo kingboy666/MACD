@@ -133,6 +133,10 @@ MAX_DAILY_TRADES = 20                        # 每日最大交易次数
 # 主循环配置
 MAIN_LOOP_DELAY = 30                         # 主循环延迟30秒
 
+# 账户与保证金模式（用于 OKX 下单参数）
+ACCOUNT_MODE = 'hedge'                       # 可选 'hedge'（双向持仓）或 'one-way'（单向持仓）
+TD_MODE = 'cross'                            # 保证金模式：'cross' 全仓 或 'isolated' 逐仓
+
 # ============================================
 # 全局变量
 # ============================================
@@ -577,6 +581,22 @@ def close_position(symbol, reason="手动平仓"):
         
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
+
+        # 取消该交易对的所有未成交订单，避免与平仓冲突
+        try:
+            open_orders = exchange.fetch_open_orders(symbol)
+            for o in open_orders:
+                try:
+                    exchange.cancel_order(o['id'], symbol)
+                except:
+                    pass
+        except Exception as e:
+            log_message("WARNING", f"取消未成交订单时出错 {symbol}: {e}")
+
+        # 根据账户持仓模式构建下单参数
+        params = {'tdMode': TD_MODE, 'reduceOnly': True}
+        if ACCOUNT_MODE == 'hedge':
+            params['posSide'] = 'long' if position['side'] == 'long' else 'short'
         
         order = exchange.createOrder(
             symbol,
@@ -584,11 +604,7 @@ def close_position(symbol, reason="手动平仓"):
             side,
             abs(size),
             None,
-            {
-                'tdMode': 'cross',
-                'posSide': 'long' if position['side'] == 'long' else 'short',
-                'reduceOnly': True
-            }
+            params
         )
         
         if order:
