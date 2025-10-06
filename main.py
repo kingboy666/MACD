@@ -1041,7 +1041,7 @@ def get_performance_report():
     """生成性能报告"""
     try:
         if trade_stats['total_trades'] == 0:
-            return "\n".join(report_lines)\n".join(report_lines)暂无交易数据"
+            return "\n".join(report_lines)\n".join(report_lines)\n".join(report_lines)\n".join(report_lines)\n".join(report_lines)暂无交易数据"
         
         win_rate = trade_stats['win_rate']
         profit_factor = (trade_stats['total_profit'] / trade_stats['total_loss']) if trade_stats['total_loss'] > 0 else float('inf')
