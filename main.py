@@ -1,6 +1,15 @@
 import ccxt
 import pandas as pd
+import traceback
+import numpy as np
+from datetime import datetime, timedelta
+import time
+import json
+from dotenv import load_dotenv
 # import pandas_ta as ta  # 暂时注释掉，使用自定义指标计算
+
+# 加载环境变量
+load_dotenv()
 
 # === 环境变量诊断（开头添加） ===
 print("=== 启动时环境变量诊断 ===")
@@ -64,16 +73,6 @@ def calculate_adx(high, low, close, period=14):
     adx = dx.rolling(window=period).mean()
     
     return adx
-import traceback
-import numpy as np
-from datetime import datetime, timedelta
-import time
-import json
-import os
-from dotenv import load_dotenv
-
-# 加载环境变量
-load_dotenv()
 
 # ============================================
 # API配置 - 从环境变量获取
@@ -152,18 +151,21 @@ def initialize_exchange():
 # 初始化缺失的全局变量
 klines_cache = {}
 cooldown_symbols = {}
-timeframe_1h = '1h'
+timeframe_30m = '30m'
 exchange = None  # 延迟初始化，在启动时设置
 
 # ============================================
 # 全局配置常量
 # ============================================
-MAX_LEVERAGE_BTC = 100        # BTC最大杠杆100倍
-MAX_LEVERAGE_ETH = 50         # ETH最大杠杆50倍
-MAX_LEVERAGE_OTHERS = 30      # 其他币种最大杠杆30倍
-DEFAULT_LEVERAGE_BTC = 50     # BTC默认杠杆50倍
-DEFAULT_LEVERAGE_ETH = 30     # ETH默认杠杆30倍
-DEFAULT_LEVERAGE_OTHERS = 20  # 其他币种默认杠杆20倍
+# 智能杠杆配置
+MAX_LEVERAGE_BTC = 100                       # BTC最大杠杆
+MAX_LEVERAGE_ETH = 50                        # ETH最大杠杆
+MAX_LEVERAGE_MAJOR = 30                      # 主流币最大杠杆
+MAX_LEVERAGE_OTHERS = 20                     # 其他币种最大杠杆
+DEFAULT_LEVERAGE = 20                        # 默认杠杆（备用）
+
+# 主流币种列表（享受较高杠杆）
+MAJOR_COINS = ['SOL', 'BNB', 'XRP', 'ADA', 'AVAX', 'DOT', 'MATIC', 'LINK', 'UNI', 'LTC']
 RISK_PER_TRADE = 0.1
 MIN_TRADE_AMOUNT_USD = 1
 MAX_OPEN_POSITIONS = 5
@@ -184,18 +186,21 @@ FIXED_SL_PERCENTAGE = 0.02
 FIXED_TP_PERCENTAGE = 0.04
 MAX_SL_PERCENTAGE = 0.03
 
-# 移动止盈止损配置 - 基于ATR
-TRAILING_STOP_ACTIVATION_ATR_MULTIPLIER = 1.5   # ATR的1.5倍后激活移动止损
-TRAILING_STOP_CALLBACK_ATR_MULTIPLIER = 0.8     # ATR的0.8倍作为回调触发
-TRAILING_TP_ACTIVATION_ATR_MULTIPLIER = 1.0     # ATR的1倍后激活移动止盈
-TRAILING_TP_STEP_ATR_MULTIPLIER = 0.5           # ATR的0.5倍作为止盈步长
-TRAILING_CHECK_INTERVAL = 30                    # 每30秒检查一次移动止盈止损条件
+# 移动止盈止损配置 - 基于ATR的动态调整
+TRAILING_STOP_ACTIVATION_PERCENTAGE = 0.015  # 价格移动1.5%后激活移动止损
+TRAILING_STOP_CALLBACK_PERCENTAGE = 0.008   # 回调0.8%触发止损
+TRAILING_TAKE_PROFIT_ACTIVATION_PERCENTAGE = 0.01  # 价格移动1%后激活移动止盈
+TRAILING_TAKE_PROFIT_STEP_PERCENTAGE = 0.005  # 每次移动止盈步长0.5%
+TRAILING_CHECK_INTERVAL = 30                # 每30秒检查一次移动止盈止损条件
 
 # ATR动态止盈止损配置
-ATR_STOP_LOSS_MULTIPLIER = 2.0                  # 止损距离 = ATR * 2.0
-ATR_TAKE_PROFIT_MULTIPLIER = 3.0                # 初始止盈距离 = ATR * 3.0
-ATR_MIN_MULTIPLIER = 1.0                        # ATR最小倍数限制
-ATR_MAX_MULTIPLIER = 5.0                        # ATR最大倍数限制
+ATR_STOP_LOSS_MULTIPLIER = 2.0              # ATR止损倍数
+ATR_TAKE_PROFIT_MULTIPLIER = 3.0            # ATR止盈倍数
+ATR_TRAILING_ACTIVATION_MULTIPLIER = 1.5    # ATR移动止盈激活倍数
+ATR_TRAILING_CALLBACK_MULTIPLIER = 1.0      # ATR移动止盈回调倍数
+USE_ATR_DYNAMIC_STOPS = True                 # 启用ATR动态止盈止损
+ATR_MIN_MULTIPLIER = 1.0                    # ATR最小倍数
+ATR_MAX_MULTIPLIER = 5.0                    # ATR最大倍数
 
 # 服务器状态检测配置
 SERVER_CHECK_INTERVAL = 300                 # 每5分钟检查一次服务器状态
@@ -288,7 +293,7 @@ def get_klines(symbol, timeframe, limit=100):
         cache_key = f"{symbol}_{timeframe}"
         if cache_key in klines_cache:
             cached_data, fetch_time = klines_cache[cache_key]
-            cache_duration = 60 if timeframe == '1m' else 3600 if timeframe == '1h' else 300
+            cache_duration = 60 if timeframe == '1m' else 1800 if timeframe == '30m' else 3600 if timeframe == '1h' else 300
             if (time.time() - fetch_time) < cache_duration:
                 return cached_data
 
@@ -316,41 +321,73 @@ def get_klines(symbol, timeframe, limit=100):
         return None
 
 # ============================================
-# 动态杠杆选择
+# 智能杠杆计算
 # ============================================
-def get_leverage_for_symbol(symbol):
-    """根据交易对选择合适的杠杆倍数"""
+def get_smart_leverage(symbol, account_balance, atr_percentage=None):
+    """根据币种和账户大小智能计算杠杆倍数"""
     try:
-        # 提取基础货币名称
-        base_currency = symbol.split('-')[0].upper()
+        # 提取币种名称
+        base_symbol = symbol.split('-')[0].upper()
         
-        if base_currency == 'BTC':
-            return DEFAULT_LEVERAGE_BTC
-        elif base_currency == 'ETH':
-            return DEFAULT_LEVERAGE_ETH
+        # 根据币种确定基础杠杆
+        if base_symbol == 'BTC':
+            max_leverage = MAX_LEVERAGE_BTC
+            base_leverage = 60  # BTC基础杠杆（确保最低20倍）
+        elif base_symbol == 'ETH':
+            max_leverage = MAX_LEVERAGE_ETH
+            base_leverage = 30  # ETH基础杠杆
+        elif base_symbol in MAJOR_COINS:
+            max_leverage = MAX_LEVERAGE_MAJOR
+            base_leverage = 25  # 主流币基础杠杆（确保最低20倍）
         else:
-            return DEFAULT_LEVERAGE_OTHERS
-            
-    except Exception as e:
-        log_message("WARNING", f"获取{symbol}杠杆失败，使用默认值: {str(e)}")
-        return DEFAULT_LEVERAGE_OTHERS
-
-def get_max_leverage_for_symbol(symbol):
-    """根据交易对获取最大杠杆倍数"""
-    try:
-        # 提取基础货币名称
-        base_currency = symbol.split('-')[0].upper()
+            max_leverage = MAX_LEVERAGE_OTHERS
+            base_leverage = 25  # 其他币种基础杠杆（确保最低20倍）
         
-        if base_currency == 'BTC':
-            return MAX_LEVERAGE_BTC
-        elif base_currency == 'ETH':
-            return MAX_LEVERAGE_ETH
-        else:
-            return MAX_LEVERAGE_OTHERS
-            
+        # 根据账户大小调整杠杆
+        if account_balance >= 10000:  # 大账户（1万USDT以上）
+            leverage_multiplier = 1.0  # 可以使用较高杠杆
+        elif account_balance >= 1000:  # 中等账户（1千-1万USDT）
+            leverage_multiplier = 0.8  # 适中杠杆
+        elif account_balance >= 100:   # 小账户（100-1000USDT）
+            leverage_multiplier = 0.6  # 较低杠杆
+        else:  # 微型账户（100USDT以下）
+            leverage_multiplier = 0.4  # 最低杠杆
+        
+        # 根据ATR波动性调整杠杆（如果提供）
+        volatility_multiplier = 1.0
+        if atr_percentage:
+            if atr_percentage > 0.05:      # 高波动性（>5%）
+                volatility_multiplier = 0.6
+            elif atr_percentage > 0.03:    # 中等波动性（3-5%）
+                volatility_multiplier = 0.8
+            elif atr_percentage > 0.015:   # 低波动性（1.5-3%）
+                volatility_multiplier = 1.0
+            else:                          # 极低波动性（<1.5%）
+                volatility_multiplier = 1.2
+        
+        # 计算最终杠杆
+        calculated_leverage = int(base_leverage * leverage_multiplier * volatility_multiplier)
+        
+        # 确保不超过最大杠杆限制
+        final_leverage = min(calculated_leverage, max_leverage)
+        
+        # 确保最小杠杆（所有币种最低20倍）
+        final_leverage = max(final_leverage, 20)  # 所有币种最低20倍杠杆
+        
+        log_message("INFO", f"{symbol} 智能杠杆计算:")
+        log_message("INFO", f"  币种: {base_symbol}, 最大杠杆: {max_leverage}x")
+        log_message("INFO", f"  账户余额: {account_balance:.2f} USDT")
+        log_message("INFO", f"  基础杠杆: {base_leverage}x")
+        log_message("INFO", f"  账户调整: {leverage_multiplier:.1f}x")
+        if atr_percentage:
+            log_message("INFO", f"  波动性调整: {volatility_multiplier:.1f}x (ATR: {atr_percentage:.3f})")
+        log_message("INFO", f"  最终杠杆: {final_leverage}x")
+        
+        return final_leverage
+        
     except Exception as e:
-        log_message("WARNING", f"获取{symbol}最大杠杆失败，使用默认值: {str(e)}")
-        return MAX_LEVERAGE_OTHERS
+        log_message("ERROR", f"智能杠杆计算失败: {str(e)}")
+        return DEFAULT_LEVERAGE
 
 # ============================================
 # 获取账户信息
@@ -391,95 +428,33 @@ def get_account_info():
 # ============================================
 # 计算仓位大小
 # ============================================
-def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
-    """智能仓位计算 - 考虑多仓位资金分配"""
+def calculate_position_size(symbol, price, total_balance):
+    """计算仓位大小"""
     try:
-        # 获取账户信息
-        total_balance = account_info.get('total_balance', 0)
-        available_balance = account_info.get('available_balance', 0)
+        # 使用智能杠杆计算
+        smart_leverage = get_smart_leverage(symbol, total_balance)
         
-        if total_balance <= 0:
-            log_message("ERROR", f"账户总额为0，无法计算仓位大小")
-            return 0
-        
-        # 计算当前持仓占用的资金
-        current_positions_value = 0
-        active_positions_count = len(position_tracker['positions'])
-        
-        for pos_symbol, pos_data in position_tracker['positions'].items():
-            if 'entry_price' in pos_data and 'size' in pos_data:
-                # 使用该币种的动态杠杆
-                pos_leverage = get_leverage_for_symbol(pos_symbol)
-                pos_value = pos_data['entry_price'] * pos_data['size'] / pos_leverage
-                current_positions_value += pos_value
-        
-        # 计算总可用交易资金（账户总额的80%）
+        # 计算本次交易分配的资金
         total_trading_fund = total_balance * 0.8
         
-        # 计算剩余可用资金
-        remaining_fund = total_trading_fund - current_positions_value
-        
-        log_message("INFO", f"账户总额: {total_balance:.2f} USDT")
-        log_message("INFO", f"总交易资金(80%): {total_trading_fund:.2f} USDT")
-        log_message("INFO", f"当前持仓占用: {current_positions_value:.2f} USDT")
-        log_message("INFO", f"剩余可用资金: {remaining_fund:.2f} USDT")
-        log_message("INFO", f"当前持仓数量: {active_positions_count}")
-        
-        # 检查是否还有足够资金开新仓
-        if remaining_fund <= 0:
-            log_message("WARNING", f"剩余资金不足，无法开新仓位")
-            return 0
-        
-        # 智能资金分配策略 - 适应各种账户大小
-        if active_positions_count == 0:
-            # 第一个仓位：使用较大比例的资金
-            if total_trading_fund >= 100:  # 大账户
-                position_fund = min(remaining_fund * 0.6, total_trading_fund * 0.3)
-            else:  # 小账户，使用更大比例
-                position_fund = remaining_fund * 0.8
-        elif active_positions_count < 3:
-            # 前3个仓位：根据账户大小调整分配
-            if total_trading_fund >= 100:
-                max_new_positions = min(3 - active_positions_count, 2)
-                position_fund = remaining_fund / (max_new_positions + 1)
-            else:
-                # 小账户，平均分配剩余资金
-                position_fund = remaining_fund * 0.5
+        # 智能分配仓位资金
+        open_positions = len(position_tracker['positions'])
+        if open_positions == 0:
+            position_fund = total_trading_fund * 0.5  # 第一个仓位使用50%
+        elif open_positions == 1:
+            position_fund = total_trading_fund * 0.3  # 第二个仓位使用30%
         else:
-            # 超过3个仓位：使用较小资金
-            if total_trading_fund >= 100:
-                position_fund = min(remaining_fund * 0.2, total_trading_fund * 0.1)
-            else:
-                position_fund = remaining_fund * 0.3
-        
-        # 对于大账户，限制单个仓位不超过总资金的25%
-        if total_trading_fund >= 100:
-            max_single_position = total_trading_fund * 0.25
-            position_fund = min(position_fund, max_single_position)
-        
-        # 确保不超过剩余资金
-        position_fund = min(position_fund, remaining_fund)
-        
-        # 对于极小账户的特殊处理
-        if position_fund < 1 and remaining_fund >= 1:
-            position_fund = min(remaining_fund, 1)
-        
-        # 最终检查
-        if position_fund <= 0:
-            log_message("WARNING", f"计算的交易资金为0，无法开仓")
-            return 0
+            remaining_fund = total_trading_fund * 0.2  # 剩余20%平分给其他仓位
+            max_additional_positions = MAX_OPEN_POSITIONS - 2
+            position_fund = remaining_fund / max_additional_positions if max_additional_positions > 0 else remaining_fund
         
         log_message("INFO", f"本次交易分配资金: {position_fund:.2f} USDT")
         
-        # 获取该币种的动态杠杆
-        leverage = get_leverage_for_symbol(symbol)
-        max_leverage = get_max_leverage_for_symbol(symbol)
-        
-        # 计算仓位大小（考虑动态杠杆）
-        position_value_with_leverage = position_fund * leverage
+        # 计算仓位大小（考虑智能杠杆）
+        position_value_with_leverage = position_fund * smart_leverage
         position_size = position_value_with_leverage / price
         
-        log_message("INFO", f"使用杠杆: {leverage}x (最大{max_leverage}x)")
+        log_message("INFO", f"智能杠杆: {smart_leverage}x")
         log_message("INFO", f"杠杆后仓位价值: {position_value_with_leverage:.2f} USDT")
         log_message("INFO", f"计算仓位大小: {position_size:.6f}")
         
@@ -493,53 +468,15 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
                 log_message("INFO", f"{symbol} 最小交易量: {min_amount}")
                 
                 if position_size < min_amount:
-                    log_message("WARNING", f"计算仓位{position_size:.6f}小于最小交易量{min_amount}")
-                    
-                    # 动态计算所需杠杆以满足最小交易量
-                    min_position_value = min_amount * price
-                    required_leverage = min_position_value / position_fund
-                    
-                    log_message("INFO", f"最小仓位价值: {min_position_value:.2f} USDT")
-                    log_message("INFO", f"当前分配资金: {position_fund:.2f} USDT")
-                    log_message("INFO", f"需要杠杆倍数: {required_leverage:.1f}x")
-                    
-                    # 检查是否在合理杠杆范围内（最大100倍）
-                    if required_leverage <= 100:
-                        # 使用最小交易量
-                        position_size = min_amount
-                        actual_leverage = required_leverage
-                        actual_fund_used = min_position_value / actual_leverage
-                        
-                        log_message("INFO", f"调整为最小交易量: {position_size}")
-                        log_message("INFO", f"实际使用杠杆: {actual_leverage:.1f}x")
-                        log_message("INFO", f"实际使用资金: {actual_fund_used:.2f} USDT")
-                    else:
-                        # 即使100倍杠杆也不够，检查是否可以用更多资金
-                        max_affordable_fund = min_position_value / 100  # 100倍杠杆下的最小资金
-                        
-                        if total_trading_fund >= max_affordable_fund:
-                            # 使用更多资金来满足最小交易量
-                            position_size = min_amount
-                            actual_fund_used = max_affordable_fund
-                            log_message("INFO", f"使用100倍杠杆，调整资金为: {actual_fund_used:.2f} USDT")
-                            log_message("INFO", f"调整为最小交易量: {position_size}")
-                        else:
-                            # 真的资金不足
-                            log_message("ERROR", f"即使100倍杠杆也需要{max_affordable_fund:.2f} USDT，但总资金只有{total_trading_fund:.2f} USDT")
-                            return 0
+                    log_message("INFO", f"计算仓位{position_size:.6f}小于交易所最小量{min_amount}")
+                    log_message("INFO", f"系统允许小额交易，继续使用计算仓位")
+                    # 移除最小交易量强制要求，允许任何金额下单
         except Exception as e:
             log_message("WARNING", f"获取市场信息失败: {e}")
-            # 使用保守的默认最小值
-            if position_size < 0.01:  # 提高默认最小值到0.01
-                if (0.01 * price) / leverage <= total_trading_fund:
-                    position_size = 0.01
-                    log_message("INFO", f"使用默认最小交易量: {position_size}")
-                else:
-                    log_message("ERROR", f"资金不足以满足默认最小交易量要求")
-                    return 0
+            log_message("INFO", f"使用计算仓位: {position_size:.6f}")
         
         # 最终验证
-        final_trade_value = (position_size * price) / leverage
+        final_trade_value = (position_size * price) / smart_leverage
         log_message("INFO", f"最终交易价值: {final_trade_value:.2f} USDT")
         log_message("INFO", f"最终仓位大小: {position_size:.6f}")
         
@@ -548,6 +485,74 @@ def calculate_position_size(account_info, symbol, price, stop_loss, risk_ratio):
     except Exception as e:
         log_message("ERROR", f"仓位计算失败: {e}")
         return 0
+
+def get_smart_leverage(symbol, account_balance, atr_percentage=None):
+    """根据币种和账户大小智能计算杠杆倍数"""
+    try:
+        # 提取币种名称
+        base_symbol = symbol.split('-')[0].upper()
+        
+        # 根据币种确定基础杠杆
+        if base_symbol == 'BTC':
+            max_leverage = MAX_LEVERAGE_BTC
+            base_leverage = 60  # BTC基础杠杆
+        elif base_symbol == 'ETH':
+            max_leverage = MAX_LEVERAGE_ETH
+            base_leverage = 30  # ETH基础杠杆
+        elif base_symbol in MAJOR_COINS:
+            max_leverage = MAX_LEVERAGE_MAJOR
+            base_leverage = 25  # 主流币基础杠杆
+        else:
+            max_leverage = MAX_LEVERAGE_OTHERS
+            base_leverage = 25  # 其他币种基础杠杆
+        
+        # 根据账户大小调整杠杆
+        if account_balance >= 10000:  # 大账户（1万USDT以上）
+            leverage_multiplier = 1.0  # 可以使用较高杠杆
+        elif account_balance >= 1000:  # 中等账户（1千-1万USDT）
+            leverage_multiplier = 0.8  # 适中杠杆
+        elif account_balance >= 100:   # 小账户（100-1000USDT）
+            leverage_multiplier = 0.6  # 较低杠杆
+        else:  # 微型账户（100USDT以下）
+            leverage_multiplier = 0.4  # 最低杠杆
+        
+        # 根据ATR波动性调整杠杆（如果提供）
+        volatility_multiplier = 1.0
+        if atr_percentage:
+            if atr_percentage > 0.05:      # 高波动性（>5%）
+                volatility_multiplier = 0.6
+            elif atr_percentage > 0.03:    # 中等波动性（3-5%）
+                volatility_multiplier = 0.8
+            elif atr_percentage > 0.015:   # 低波动性（1.5-3%）
+                volatility_multiplier = 1.0
+            else:                          # 极低波动性（<1.5%）
+                volatility_multiplier = 1.2
+        
+        # 计算最终杠杆
+        calculated_leverage = int(base_leverage * leverage_multiplier * volatility_multiplier)
+        
+        # 确保不超过最大杠杆限制
+        final_leverage = min(calculated_leverage, max_leverage)
+        
+        # 确保最小杠杆为5倍
+        final_leverage = max(final_leverage, 5)
+        
+        log_message("INFO", f"{symbol} 智能杠杆计算:")
+        log_message("INFO", f"  币种: {base_symbol}, 最大杠杆: {max_leverage}x")
+        log_message("INFO", f"  账户余额: {account_balance:.2f} USDT")
+        log_message("INFO", f"  基础杠杆: {base_leverage}x")
+        log_message("INFO", f"  账户调整: {leverage_multiplier:.1f}x")
+        if atr_percentage:
+            log_message("INFO", f"  波动性调整: {volatility_multiplier:.1f}x (ATR: {atr_percentage:.3f})")
+        log_message("INFO", f"  最终杠杆: {final_leverage}x")
+        
+        return final_leverage
+        
+    except Exception as e:
+        log_message("ERROR", f"智能杠杆计算失败: {str(e)}")
+        return DEFAULT_LEVERAGE
+
+
 
 # ============================================
 # 处理K线数据并计算指标
@@ -720,55 +725,68 @@ def generate_signal(symbol):
         return None, 0
 
 # ============================================
-# 计算止损止盈 - 基于ATR动态计算
+# 计算止损止盈
 # ============================================
 def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
-    """基于ATR动态计算止损止盈价格"""
+    """计算止损止盈价格 - 支持ATR动态调整"""
     try:
-        # 如果ATR无效，使用固定百分比作为备选
-        if atr_value is None or atr_value <= 0:
-            log_message("WARNING", f"{symbol} ATR值无效，使用固定百分比")
+        if USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0:
+            # 使用ATR动态计算止损止盈
+            log_message("INFO", f"{symbol} 使用ATR动态止损止盈，ATR值: {atr_value:.6f}")
+            
+            # 计算ATR相对于价格的百分比
+            atr_percentage = atr_value / price
+            
+            # 限制ATR倍数在合理范围内
+            atr_sl_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_STOP_LOSS_MULTIPLIER))
+            atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER))
+            
+            # 计算ATR止损止盈距离
+            atr_sl_distance = atr_value * atr_sl_multiplier
+            atr_tp_distance = atr_value * atr_tp_multiplier
+            
             if signal == "做多":
+                # 多头ATR止损止盈
+                stop_loss = price - atr_sl_distance
+                take_profit = price + atr_tp_distance
+                
+                # 确保止损不超过最大止损百分比
+                max_sl_price = price * (1 - MAX_SL_PERCENTAGE)
+                if stop_loss < max_sl_price:
+                    stop_loss = max_sl_price
+                    log_message("WARNING", f"{symbol} ATR止损过大，调整为最大止损: {stop_loss:.6f}")
+                    
+            else:  # 做空
+                # 空头ATR止损止盈
+                stop_loss = price + atr_sl_distance
+                take_profit = price - atr_tp_distance
+                
+                # 确保止损不超过最大止损百分比
+                max_sl_price = price * (1 + MAX_SL_PERCENTAGE)
+                if stop_loss > max_sl_price:
+                    stop_loss = max_sl_price
+                    log_message("WARNING", f"{symbol} ATR止损过大，调整为最大止损: {stop_loss:.6f}")
+            
+            log_message("INFO", f"{symbol} ATR止损止盈 - 止损: {stop_loss:.6f}, 止盈: {take_profit:.6f}")
+            log_message("INFO", f"{symbol} ATR倍数 - 止损: {atr_sl_multiplier}x, 止盈: {atr_tp_multiplier}x")
+            
+        else:
+            # 使用固定百分比计算止损止盈
+            log_message("INFO", f"{symbol} 使用固定百分比止损止盈")
+            
+            if signal == "做多":
+                # 多头止损：入场价 - 固定百分比
                 stop_loss = price * (1 - FIXED_SL_PERCENTAGE)
                 take_profit = price * (1 + FIXED_TP_PERCENTAGE)
             else:  # 做空
+                # 空头止损：入场价 + 固定百分比  
                 stop_loss = price * (1 + FIXED_SL_PERCENTAGE)
                 take_profit = price * (1 - FIXED_TP_PERCENTAGE)
-            return stop_loss, take_profit
-        
-        # 计算ATR距离
-        atr_stop_distance = atr_value * ATR_STOP_LOSS_MULTIPLIER
-        atr_tp_distance = atr_value * ATR_TAKE_PROFIT_MULTIPLIER
-        
-        # 限制ATR距离在合理范围内
-        max_stop_distance = price * MAX_SL_PERCENTAGE
-        min_stop_distance = price * 0.005  # 最小0.5%
-        
-        atr_stop_distance = max(min_stop_distance, min(atr_stop_distance, max_stop_distance))
-        
-        if signal == "做多":
-            # 多头：止损在下方，止盈在上方
-            stop_loss = price - atr_stop_distance
-            take_profit = price + atr_tp_distance
-        else:  # 做空
-            # 空头：止损在上方，止盈在下方
-            stop_loss = price + atr_stop_distance
-            take_profit = price - atr_tp_distance
-        
-        # 计算实际百分比用于日志
-        if signal == "做多":
-            sl_percentage = (price - stop_loss) / price * 100
-            tp_percentage = (take_profit - price) / price * 100
-        else:
-            sl_percentage = (stop_loss - price) / price * 100
-            tp_percentage = (price - take_profit) / price * 100
-        
-        log_message("INFO", f"{symbol} ATR动态计算 - ATR:{atr_value:.6f}, 止损距离:{atr_stop_distance:.6f}({sl_percentage:.2f}%), 止盈距离:{atr_tp_distance:.6f}({tp_percentage:.2f}%)")
         
         return stop_loss, take_profit
         
     except Exception as e:
-        log_message("ERROR", f"计算ATR止损止盈失败: {str(e)}")
+        log_message("ERROR", f"计算止损止盈失败: {str(e)}")
         return None, None
 
 # ============================================
@@ -782,10 +800,7 @@ def check_and_execute_risk_management(symbol, signal, signal_strength):
             log_message("WARNING", f"已达到每日最大交易次数 ({MAX_DAILY_TRADES})")
             return None
         
-        # 检查每日亏损限制
-        if trade_stats['daily_pnl'] < -trade_stats['initial_balance'] * MAX_DAILY_LOSS:
-            log_message("WARNING", f"已达到每日最大亏损限制")
-            return None
+        # 亏损限制已移除，可无限制下单
         
         # 根据信号强度调整风险
         if signal_strength >= 80:
@@ -952,23 +967,19 @@ def execute_trade(symbol, signal, signal_strength):
                 'sl': sl,
                 'tp': tp,
                 'entry_time': datetime.now(),
-                'leverage': leverage,
+                'leverage': smart_leverage,  # 使用智能杠杆
                 'order_id': order['id'],
                 'sl_order_id': sl_order_id,
                 'tp_order_id': tp_order_id
             }
             
-            # 设置移动止盈止损跟踪 - 基于ATR
+            # 设置移动止盈跟踪
             trailing_stops[symbol] = {
-                'active': False,  # 保持兼容性
-                'trailing_stop_active': False,  # 移动止损激活状态
-                'trailing_tp_active': False,    # 移动止盈激活状态
-                'trailing_stop_trigger': None,  # 移动止损触发价
-                'trailing_tp_trigger': None,    # 移动止盈触发价
+                'active': False,
+                'activation_price': tp if signal == "做多" else sl,
+                'current_trigger': None,
                 'side': 'long' if signal == "做多" else 'short',
                 'size': actual_size,
-                'entry_price': actual_price,
-                'entry_atr': atr_value,  # 记录开仓时的ATR值
                 'last_check': time.time()
             }
             
@@ -990,10 +1001,10 @@ def execute_trade(symbol, signal, signal_strength):
         return False
 
 # ============================================
-# 移动止盈止损功能 - 基于ATR动态调整
+# 移动止盈止损功能
 # ============================================
 def check_trailing_stop(symbol, current_price):
-    """基于ATR检查并更新移动止盈止损"""
+    """检查并更新移动止盈"""
     if symbol not in trailing_stops or symbol not in position_tracker['positions']:
         return
     
@@ -1001,158 +1012,192 @@ def check_trailing_stop(symbol, current_price):
     position = position_tracker['positions'][symbol]
     
     # 检查是否需要更新
-    if time.time() - ts.get('last_check', 0) < TRAILING_CHECK_INTERVAL:
+    if time.time() - ts.get('last_check', 0) < TRAILING_STOP_CHECK_INTERVAL:
         return
     
     ts['last_check'] = time.time()
     
     try:
-        # 获取当前ATR值
-        ohlcv = get_klines(symbol, '1h', limit=50)
-        if ohlcv:
-            df = process_klines(ohlcv)
-            if df is not None and not df['ATR_14'].isna().all():
-                current_atr = df['ATR_14'].iloc[-1]
-            else:
-                current_atr = None
-        else:
-            current_atr = None
-        
-        # 如果无法获取ATR，使用固定百分比
-        if current_atr is None or current_atr <= 0:
-            current_atr = current_price * 0.02  # 使用2%作为默认ATR
-            log_message("WARNING", f"{symbol} 无法获取ATR，使用默认值: {current_atr:.6f}")
-        
         # 确保键名一致性
         if 'activated' in ts and 'active' not in ts:
             ts['active'] = ts['activated']
         elif 'active' not in ts:
             ts['active'] = False
         
-        # 初始化移动止损和移动止盈状态
-        if 'trailing_stop_active' not in ts:
-            ts['trailing_stop_active'] = False
-        if 'trailing_tp_active' not in ts:
-            ts['trailing_tp_active'] = False
-            
-        entry_price = position['entry_price']
+        # 获取当前ATR值用于动态调整
+        atr_value = None
+        if USE_ATR_DYNAMIC_STOPS:
+            try:
+                ohlcv = get_klines(symbol, '30m', limit=50)
+                if ohlcv:
+                    df = process_klines(ohlcv)
+                    if df is not None and 'ATR_14' in df.columns and not df['ATR_14'].isna().all():
+                        atr_value = df['ATR_14'].iloc[-1]
+                        log_message("DEBUG", f"{symbol} 移动止盈ATR值: {atr_value:.6f}")
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 获取移动止盈ATR值失败: {str(e)}")
         
+        # 计算激活和回调距离
+        if USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0:
+            # 使用ATR动态计算
+            activation_distance = atr_value * ATR_TRAILING_ACTIVATION_MULTIPLIER
+            callback_distance = atr_value * ATR_TRAILING_CALLBACK_MULTIPLIER
+            
+            # 转换为百分比
+            activation_percentage = activation_distance / position['entry_price']
+            callback_percentage = callback_distance / current_price
+            
+            log_message("DEBUG", f"{symbol} ATR移动止盈 - 激活: {activation_percentage:.4f}%, 回调: {callback_percentage:.4f}%")
+        else:
+            # 使用固定百分比
+            activation_percentage = TRAILING_STOP_ACTIVATION_PERCENTAGE
+            callback_percentage = TRAILING_STOP_CALLBACK_PERCENTAGE
+            log_message("DEBUG", f"{symbol} 固定移动止盈 - 激活: {activation_percentage:.4f}%, 回调: {callback_percentage:.4f}%")
+            
         # 多头持仓
         if ts['side'] == 'long':
-            # === 移动止损逻辑 ===
-            # 检查是否达到移动止损激活条件
-            activation_distance = current_atr * TRAILING_STOP_ACTIVATION_ATR_MULTIPLIER
-            if not ts['trailing_stop_active'] and current_price >= entry_price + activation_distance:
-                ts['trailing_stop_active'] = True
-                callback_distance = current_atr * TRAILING_STOP_CALLBACK_ATR_MULTIPLIER
-                ts['trailing_stop_trigger'] = current_price - callback_distance
-                log_message("INFO", f"{symbol} 多头移动止损已激活，触发价: {ts['trailing_stop_trigger']:.6f} (ATR:{current_atr:.6f})")
+            # 计算当前盈利百分比
+            profit_percentage = (current_price - position['entry_price']) / position['entry_price']
             
-            # 如果移动止损已激活，检查是否需要更新
-            elif ts['trailing_stop_active']:
-                callback_distance = current_atr * TRAILING_STOP_CALLBACK_ATR_MULTIPLIER
-                new_stop_trigger = current_price - callback_distance
+            # 检查是否达到激活条件（确保至少有足够盈利）
+            if not ts['active']:
+                # 确保至少有2%盈利或ATR激活距离，取较大者
+                min_profit_required = 0.02  # 最少2%盈利
+                required_activation = max(activation_percentage, min_profit_required)
                 
-                # 只有当新的止损价格更高时才更新（保护更多利润）
-                if new_stop_trigger > ts.get('trailing_stop_trigger', 0):
-                    old_trigger = ts.get('trailing_stop_trigger', 0)
-                    ts['trailing_stop_trigger'] = new_stop_trigger
-                    log_message("INFO", f"{symbol} 多头移动止损更新: {old_trigger:.6f} -> {new_stop_trigger:.6f}")
+                if current_price >= position['entry_price'] * (1 + required_activation):
+                    ts['active'] = True
+                    ts['atr_based'] = USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0
                     
-                    # 更新交易所止损订单
-                    update_stop_loss_order(symbol, position, new_stop_trigger)
-                
-                # 检查是否触发移动止损
-                if current_price <= ts['trailing_stop_trigger']:
-                    log_message("TRADE", f"{symbol} 触发多头移动止损，当前价: {current_price:.6f}, 触发价: {ts['trailing_stop_trigger']:.6f}")
-                    close_position(symbol, "移动止损触发")
-                    return
-            
-            # === 移动止盈逻辑 ===
-            # 检查是否达到移动止盈激活条件
-            tp_activation_distance = current_atr * TRAILING_TP_ACTIVATION_ATR_MULTIPLIER
-            if not ts['trailing_tp_active'] and current_price >= entry_price + tp_activation_distance:
-                ts['trailing_tp_active'] = True
-                tp_step = current_atr * TRAILING_TP_STEP_ATR_MULTIPLIER
-                ts['trailing_tp_trigger'] = current_price + tp_step
-                log_message("INFO", f"{symbol} 多头移动止盈已激活，目标价: {ts['trailing_tp_trigger']:.6f}")
-                
-                # 更新交易所止盈订单
-                update_take_profit_order(symbol, position, ts['trailing_tp_trigger'])
-            
-            # 如果移动止盈已激活，检查是否需要更新
-            elif ts['trailing_tp_active']:
-                tp_step = current_atr * TRAILING_TP_STEP_ATR_MULTIPLIER
-                new_tp_trigger = current_price + tp_step
-                
-                # 只有当新的止盈价格更高时才更新（追求更大利润）
-                if new_tp_trigger > ts.get('trailing_tp_trigger', 0):
-                    old_tp = ts.get('trailing_tp_trigger', 0)
-                    ts['trailing_tp_trigger'] = new_tp_trigger
-                    log_message("INFO", f"{symbol} 多头移动止盈更新: {old_tp:.6f} -> {new_tp_trigger:.6f}")
+                    # 计算初始触发价，确保保护至少50%的当前利润
+                    current_profit = current_price - position['entry_price']
+                    min_protection_price = position['entry_price'] + current_profit * 0.5
+                    
+                    # 使用回调百分比计算触发价
+                    callback_trigger_price = current_price * (1 - callback_percentage)
+                    
+                    # 取两者中较高的价格，确保利润保护
+                    ts['current_trigger'] = max(callback_trigger_price, min_protection_price)
+                    
+                    protected_profit = (ts['current_trigger'] - position['entry_price']) / position['entry_price']
+                    log_message("SUCCESS", f"{symbol} 多头移动止盈已激活!")
+                    log_message("SUCCESS", f"  当前盈利: {profit_percentage:.2%}, 保护利润: {protected_profit:.2%}")
+                    log_message("SUCCESS", f"  触发价: {ts['current_trigger']:.6f} ({'ATR' if ts.get('atr_based') else '固定'}模式)")
                     
                     # 更新交易所止盈订单
-                    update_take_profit_order(symbol, position, new_tp_trigger)
+                    update_take_profit_order(symbol, position, ts['current_trigger'])
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 重新计算回调百分比（如果是ATR模式）
+                if ts.get('atr_based') and atr_value and atr_value > 0:
+                    callback_percentage = (atr_value * ATR_TRAILING_CALLBACK_MULTIPLIER) / current_price
+                
+                # 如果价格创新高，更新触发价
+                expected_trigger_base = ts['current_trigger'] / (1 - callback_percentage)
+                if current_price > expected_trigger_base:
+                    # 计算新的触发价
+                    new_trigger_by_callback = current_price * (1 - callback_percentage)
+                    
+                    # 确保新触发价至少保护30%的总利润
+                    total_profit = current_price - position['entry_price']
+                    min_protection_price = position['entry_price'] + total_profit * 0.3
+                    new_trigger = max(new_trigger_by_callback, min_protection_price)
+                    
+                    # 只有当新触发价更高时才更新（保护利润原则）
+                    if new_trigger > ts['current_trigger']:
+                        old_trigger = ts['current_trigger']
+                        ts['current_trigger'] = new_trigger
+                        
+                        old_protected_profit = (old_trigger - position['entry_price']) / position['entry_price']
+                        new_protected_profit = (new_trigger - position['entry_price']) / position['entry_price']
+                        
+                        log_message("INFO", f"{symbol} 多头移动止盈更新: {old_trigger:.6f} -> {new_trigger:.6f}")
+                        log_message("INFO", f"  保护利润提升: {old_protected_profit:.2%} -> {new_protected_profit:.2%}")
+                        
+                        # 更新交易所止盈订单
+                        update_take_profit_order(symbol, position, new_trigger)
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price <= ts['current_trigger']:
+                    final_profit_pct = (ts['current_trigger'] - position['entry_price']) / position['entry_price'] * 100
+                    log_message("TRADE", f"{symbol} 触发多头移动止盈，保护利润: {final_profit_pct:.2f}%")
+                    log_message("TRADE", f"  当前价: {current_price:.6f}, 触发价: {ts['current_trigger']:.6f}")
+                    close_position(symbol, "移动止盈触发")
         
         # 空头持仓
         else:
-            # === 移动止损逻辑 ===
-            # 检查是否达到移动止损激活条件
-            activation_distance = current_atr * TRAILING_STOP_ACTIVATION_ATR_MULTIPLIER
-            if not ts['trailing_stop_active'] and current_price <= entry_price - activation_distance:
-                ts['trailing_stop_active'] = True
-                callback_distance = current_atr * TRAILING_STOP_CALLBACK_ATR_MULTIPLIER
-                ts['trailing_stop_trigger'] = current_price + callback_distance
-                log_message("INFO", f"{symbol} 空头移动止损已激活，触发价: {ts['trailing_stop_trigger']:.6f} (ATR:{current_atr:.6f})")
+            # 计算当前盈利百分比
+            profit_percentage = (position['entry_price'] - current_price) / position['entry_price']
             
-            # 如果移动止损已激活，检查是否需要更新
-            elif ts['trailing_stop_active']:
-                callback_distance = current_atr * TRAILING_STOP_CALLBACK_ATR_MULTIPLIER
-                new_stop_trigger = current_price + callback_distance
+            # 检查是否达到激活条件（确保至少有足够盈利）
+            if not ts['active']:
+                # 确保至少有2%盈利或ATR激活距离，取较大者
+                min_profit_required = 0.02  # 最少2%盈利
+                required_activation = max(activation_percentage, min_profit_required)
                 
-                # 只有当新的止损价格更低时才更新（保护更多利润）
-                if new_stop_trigger < ts.get('trailing_stop_trigger', float('inf')):
-                    old_trigger = ts.get('trailing_stop_trigger', 0)
-                    ts['trailing_stop_trigger'] = new_stop_trigger
-                    log_message("INFO", f"{symbol} 空头移动止损更新: {old_trigger:.6f} -> {new_stop_trigger:.6f}")
+                if current_price <= position['entry_price'] * (1 - required_activation):
+                    ts['active'] = True
+                    ts['atr_based'] = USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0
                     
-                    # 更新交易所止损订单
-                    update_stop_loss_order(symbol, position, new_stop_trigger)
-                
-                # 检查是否触发移动止损
-                if current_price >= ts['trailing_stop_trigger']:
-                    log_message("TRADE", f"{symbol} 触发空头移动止损，当前价: {current_price:.6f}, 触发价: {ts['trailing_stop_trigger']:.6f}")
-                    close_position(symbol, "移动止损触发")
-                    return
-            
-            # === 移动止盈逻辑 ===
-            # 检查是否达到移动止盈激活条件
-            tp_activation_distance = current_atr * TRAILING_TP_ACTIVATION_ATR_MULTIPLIER
-            if not ts['trailing_tp_active'] and current_price <= entry_price - tp_activation_distance:
-                ts['trailing_tp_active'] = True
-                tp_step = current_atr * TRAILING_TP_STEP_ATR_MULTIPLIER
-                ts['trailing_tp_trigger'] = current_price - tp_step
-                log_message("INFO", f"{symbol} 空头移动止盈已激活，目标价: {ts['trailing_tp_trigger']:.6f}")
-                
-                # 更新交易所止盈订单
-                update_take_profit_order(symbol, position, ts['trailing_tp_trigger'])
-            
-            # 如果移动止盈已激活，检查是否需要更新
-            elif ts['trailing_tp_active']:
-                tp_step = current_atr * TRAILING_TP_STEP_ATR_MULTIPLIER
-                new_tp_trigger = current_price - tp_step
-                
-                # 只有当新的止盈价格更低时才更新（追求更大利润）
-                if new_tp_trigger < ts.get('trailing_tp_trigger', float('inf')):
-                    old_tp = ts.get('trailing_tp_trigger', 0)
-                    ts['trailing_tp_trigger'] = new_tp_trigger
-                    log_message("INFO", f"{symbol} 空头移动止盈更新: {old_tp:.6f} -> {new_tp_trigger:.6f}")
+                    # 计算初始触发价，确保保护至少50%的当前利润
+                    current_profit = position['entry_price'] - current_price
+                    max_protection_price = position['entry_price'] - current_profit * 0.5
+                    
+                    # 使用回调百分比计算触发价
+                    callback_trigger_price = current_price * (1 + callback_percentage)
+                    
+                    # 取两者中较低的价格，确保利润保护
+                    ts['current_trigger'] = min(callback_trigger_price, max_protection_price)
+                    
+                    protected_profit = (position['entry_price'] - ts['current_trigger']) / position['entry_price']
+                    log_message("SUCCESS", f"{symbol} 空头移动止盈已激活!")
+                    log_message("SUCCESS", f"  当前盈利: {profit_percentage:.2%}, 保护利润: {protected_profit:.2%}")
+                    log_message("SUCCESS", f"  触发价: {ts['current_trigger']:.6f} ({'ATR' if ts.get('atr_based') else '固定'}模式)")
                     
                     # 更新交易所止盈订单
-                    update_take_profit_order(symbol, position, new_tp_trigger)
+                    update_take_profit_order(symbol, position, ts['current_trigger'])
+            
+            # 如果已激活，检查是否需要更新触发价
+            elif ts['active']:
+                # 重新计算回调百分比（如果是ATR模式）
+                if ts.get('atr_based') and atr_value and atr_value > 0:
+                    callback_percentage = (atr_value * ATR_TRAILING_CALLBACK_MULTIPLIER) / current_price
+                
+                # 如果价格创新低，更新触发价
+                expected_trigger_base = ts['current_trigger'] / (1 + callback_percentage)
+                if current_price < expected_trigger_base:
+                    # 计算新的触发价
+                    new_trigger_by_callback = current_price * (1 + callback_percentage)
+                    
+                    # 确保新触发价至少保护30%的总利润
+                    total_profit = position['entry_price'] - current_price
+                    max_protection_price = position['entry_price'] - total_profit * 0.3
+                    new_trigger = min(new_trigger_by_callback, max_protection_price)
+                    
+                    # 只有当新触发价更低时才更新（保护利润原则）
+                    if new_trigger < ts['current_trigger']:
+                        old_trigger = ts['current_trigger']
+                        ts['current_trigger'] = new_trigger
+                        
+                        old_protected_profit = (position['entry_price'] - old_trigger) / position['entry_price']
+                        new_protected_profit = (position['entry_price'] - new_trigger) / position['entry_price']
+                        
+                        log_message("INFO", f"{symbol} 空头移动止盈更新: {old_trigger:.6f} -> {new_trigger:.6f}")
+                        log_message("INFO", f"  保护利润提升: {old_protected_profit:.2%} -> {new_protected_profit:.2%}")
+                        
+                        # 更新交易所止盈订单
+                        update_take_profit_order(symbol, position, new_trigger)
+                
+                # 检查是否触发平仓
+                if ts['active'] and current_price >= ts['current_trigger']:
+                    final_profit_pct = (position['entry_price'] - ts['current_trigger']) / position['entry_price'] * 100
+                    log_message("TRADE", f"{symbol} 触发空头移动止盈，保护利润: {final_profit_pct:.2f}%")
+                    log_message("TRADE", f"  当前价: {current_price:.6f}, 触发价: {ts['current_trigger']:.6f}")
+                    close_position(symbol, "移动止盈触发")
     
     except Exception as e:
-        log_message("ERROR", f"{symbol} 检查ATR移动止盈止损失败: {str(e)}")
+        log_message("ERROR", f"{symbol} 检查移动止盈失败: {str(e)}")
 
 def update_take_profit_order(symbol, position, new_tp_price):
     """更新交易所止盈订单"""
@@ -1184,49 +1229,117 @@ def update_take_profit_order(symbol, position, new_tp_price):
         
         # 更新止盈订单ID
         position_tracker['positions'][symbol]['tp_order_id'] = tp_order['id']
-        log_message("SUCCESS", f"{symbol} 移动止盈订单已更新，新价格: {new_tp_price:.6f}，订单ID: {tp_order['id']}")
+        log_message("SUCCESS", f"{symbol} 移动止盈订单已更新，新价格: {new_tp_price:.4f}，订单ID: {tp_order['id']}")
         
     except Exception as e:
         log_message("ERROR", f"{symbol} 更新移动止盈订单失败: {str(e)}")
 
-def update_stop_loss_order(symbol, position, new_sl_price):
-    """更新交易所止损订单"""
-    try:
-        # 取消旧的止损订单
-        if position.get('sl_order_id'):
-            try:
-                exchange.cancel_order(position['sl_order_id'], symbol)
-                log_message("INFO", f"{symbol} 旧止损订单已取消")
-            except Exception as e:
-                log_message("WARNING", f"{symbol} 取消旧止损订单失败: {e}")
-        
-        # 创建新的移动止损订单
-        side = 'sell' if position['side'] == 'long' else 'buy'
-        pos_side = position['side']
-        
-        sl_order = exchange.create_order(
-            symbol=symbol,
-            type='stop',
-            side=side,
-            amount=position['size'],
-            price=new_sl_price,
-            params={
-                'stopLossPrice': new_sl_price,
-                'posSide': pos_side,
-                'reduceOnly': True
-            }
-        )
-        
-        # 更新止损订单ID
-        position_tracker['positions'][symbol]['sl_order_id'] = sl_order['id']
-        log_message("SUCCESS", f"{symbol} 移动止损订单已更新，新价格: {new_sl_price:.6f}，订单ID: {sl_order['id']}")
-        
-    except Exception as e:
-        log_message("ERROR", f"{symbol} 更新移动止损订单失败: {str(e)}")
-
 # ============================================
 # 为已存在的持仓设置止损止盈条件单
 # ============================================
+def sync_exchange_positions():
+    """同步交易所持仓，统一按MACD策略管理"""
+    try:
+        log_message("INFO", "正在同步交易所持仓，统一纳入MACD策略管理...")
+        
+        # 获取交易所当前持仓
+        positions = exchange.fetch_positions()
+        synced_count = 0
+        
+        for position in positions:
+            if float(position['contracts']) > 0:  # 有持仓
+                symbol = position['symbol']
+                size = float(position['contracts'])
+                side = position['side']  # 'long' 或 'short'
+                entry_price = float(position['entryPrice'])
+                unrealized_pnl = float(position.get('unrealizedPnl', 0))
+                
+                log_message("INFO", f"发现交易所持仓 {symbol}: {side} {size} @ {entry_price}")
+                log_message("INFO", f"  当前未实现盈亏: {unrealized_pnl:.2f} USDT")
+                
+                # 检查本地跟踪器中是否有这个持仓的记录
+                if symbol not in position_tracker['positions']:
+                    # 本地没有记录，统一纳入MACD策略管理
+                    log_message("WARNING", f"{symbol} 本地无记录，统一纳入MACD策略管理")
+                    
+                    # 使用统一策略计算止损止盈价格
+                    sl_price, tp_price = calculate_stop_loss_take_profit(symbol, entry_price, side)
+                    
+                    # 获取智能杠杆（估算）
+                    account_info = get_account_info()
+                    if account_info:
+                        smart_leverage = get_smart_leverage(symbol, account_info['total_balance'])
+                    else:
+                        smart_leverage = DEFAULT_LEVERAGE
+                    
+                    # 添加到本地跟踪器，统一按MACD策略管理
+                    position_tracker['positions'][symbol] = {
+                        'entry_price': entry_price,
+                        'size': size,
+                        'side': side,
+                        'pnl': unrealized_pnl,
+                        'sl': sl_price,
+                        'tp': tp_price,
+                        'entry_time': datetime.now(),  # 使用当前时间作为管理开始时间
+                        'leverage': smart_leverage,
+                        'order_id': None,  # 原始开仓订单ID未知
+                        'sl_order_id': None,  # 将在后续补充
+                        'tp_order_id': None,  # 将在后续补充
+                        'strategy_managed': True,  # 标记为策略统一管理
+                        'original_position': True  # 标记为程序启动前的原有持仓
+                    }
+                    
+                    # 初始化移动止盈跟踪
+                    if symbol not in trailing_stops:
+                        trailing_stops[symbol] = {
+                            'side': side,
+                            'active': False,
+                            'current_trigger': None,
+                            'last_check': 0,
+                            'atr_based': False
+                        }
+                    
+                    synced_count += 1
+                    log_message("SUCCESS", f"{symbol} 原有持仓已统一纳入MACD策略管理")
+                    log_message("INFO", f"  策略止损: {sl_price:.6f}")
+                    log_message("INFO", f"  策略止盈: {tp_price:.6f}")
+                    log_message("INFO", f"  智能杠杆: {smart_leverage}x")
+                    log_message("INFO", f"  移动止盈: 已初始化，等待激活条件")
+                    
+                else:
+                    # 本地有记录，确保标记为策略管理
+                    pos_data = position_tracker['positions'][symbol]
+                    if not pos_data.get('strategy_managed', False):
+                        pos_data['strategy_managed'] = True
+                        pos_data['original_position'] = True
+                        log_message("INFO", f"{symbol} 已有持仓纳入统一MACD策略管理")
+                    
+                    # 确保移动止盈跟踪已初始化
+                    if symbol not in trailing_stops:
+                        trailing_stops[symbol] = {
+                            'side': side,
+                            'active': False,
+                            'current_trigger': None,
+                            'last_check': 0,
+                            'atr_based': False
+                        }
+                        log_message("INFO", f"{symbol} 移动止盈跟踪已初始化")
+        
+        if synced_count > 0:
+            log_message("SUCCESS", f"成功同步 {synced_count} 个交易所持仓到MACD策略管理")
+            log_message("INFO", "统一策略特性:")
+            log_message("INFO", "  - 30分钟K线图")
+            log_message("INFO", "  - MACD(6,32,9)金叉死叉信号")
+            log_message("INFO", "  - ADX趋势过滤")
+            log_message("INFO", "  - ATR动态止盈止损")
+            log_message("INFO", "  - 智能移动止盈（利润保护）")
+            log_message("INFO", "  - 智能杠杆分配")
+        else:
+            log_message("INFO", "未发现需要同步的交易所持仓")
+                    
+    except Exception as e:
+        log_message("ERROR", f"同步交易所持仓时出错: {str(e)}")
+
 def setup_missing_stop_orders():
     """为没有止损止盈订单的持仓补充设置条件单"""
     try:
@@ -1331,16 +1444,8 @@ def update_positions():
                 sl_price = position['sl']
                 tp_price = position['tp']
                 
-                # 显示当前监控状态（包括移动止盈止损状态）
-                ts_info = ""
-                if symbol in trailing_stops:
-                    ts = trailing_stops[symbol]
-                    if ts.get('trailing_stop_active'):
-                        ts_info += f", 移动止损:{ts.get('trailing_stop_trigger', 0):.6f}"
-                    if ts.get('trailing_tp_active'):
-                        ts_info += f", 移动止盈:{ts.get('trailing_tp_trigger', 0):.6f}"
-                
-                log_message("DEBUG", f"{symbol} 监控中 - 当前价格:{current_price:.6f}, 固定止损:{sl_price:.6f}, 固定止盈:{tp_price:.6f}, 盈亏:{pnl:.2f}{ts_info}")
+                # 显示当前监控状态
+                log_message("DEBUG", f"{symbol} 监控中 - 当前价格:{current_price:.6f}, 止损:{sl_price:.6f}, 止盈:{tp_price:.6f}, 盈亏:{pnl:.2f}")
                 
                 if position['side'] == 'long':
                     # 做多仓位检查
@@ -1538,112 +1643,6 @@ def check_closed_positions():
 # ============================================
 # 显示交易统计
 # ============================================
-# 保存数据到文件供Web界面使用
-# ============================================
-def save_dashboard_data():
-    """保存交易数据到JSON文件供Web界面读取"""
-    try:
-        # 获取账户信息
-        account_info = get_account_info()
-        if account_info:
-            trade_stats['current_balance'] = account_info['total_balance']
-        
-        # 计算胜率
-        total_trades = trade_stats.get('total_trades', 0)
-        win_trades = trade_stats.get('winning_trades', 0)
-        lose_trades = trade_stats.get('losing_trades', 0)
-        win_rate = (win_trades / total_trades * 100) if total_trades > 0 else 0
-        
-        # 准备持仓数据
-        positions = []
-        for symbol, position in position_tracker['positions'].items():
-            try:
-                # 获取当前价格
-                ticker = exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
-                
-                positions.append({
-                    'symbol': symbol,
-                    'side': position['side'],
-                    'entryPrice': position['entry_price'],
-                    'currentPrice': current_price,
-                    'size': position['size'],
-                    'leverage': position.get('leverage', get_leverage_for_symbol(symbol)),
-                    'stopLoss': position.get('sl', 0),
-                    'takeProfit': position.get('tp', 0),
-                    'pnl': position.get('pnl', 0)
-                })
-            except Exception as e:
-                log_message("WARNING", f"获取{symbol}价格失败: {e}")
-        
-        # 准备信号数据
-        trading_pairs = [
-            'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'BNB-USDT-SWAP',
-            'XRP-USDT-SWAP', 'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'AVAX-USDT-SWAP',
-            'SHIB-USDT-SWAP', 'DOT-USDT-SWAP', 'FIL-USDT-SWAP', 'ZRO-USDT-SWAP',
-            'WIF-USDT-SWAP', 'WLD-USDT-SWAP'
-        ]
-        
-        signals = []
-        for symbol in trading_pairs:
-            try:
-                # 获取当前价格
-                ticker = exchange.fetch_ticker(symbol)
-                current_price = ticker['last']
-                
-                # 获取最新信号
-                signal_info = latest_signals.get(symbol, (None, 0, None))
-                signal, strength, timestamp = signal_info
-                
-                if signal == "做多":
-                    status = 'buy'
-                    status_text = '做多'
-                elif signal == "做空":
-                    status = 'sell'
-                    status_text = '做空'
-                else:
-                    status = 'none'
-                    status_text = '无信号'
-                
-                signals.append({
-                    'symbol': symbol,
-                    'status': status,
-                    'statusText': status_text,
-                    'price': current_price,
-                    'strength': strength or 0
-                })
-            except Exception as e:
-                log_message("WARNING", f"获取{symbol}信号失败: {e}")
-        
-        # 组装完整数据
-        dashboard_data = {
-            'account': {
-                'totalBalance': trade_stats.get('current_balance', 0),
-                'freeBalance': account_info.get('free_balance', 0) if account_info else 0,
-                'dailyPnl': trade_stats.get('daily_pnl', 0),
-                'totalPnl': trade_stats.get('total_profit_loss', 0)
-            },
-            'stats': {
-                'totalTrades': total_trades,
-                'winTrades': win_trades,
-                'loseTrades': lose_trades,
-                'winRate': win_rate
-            },
-            'positions': positions,
-            'signals': signals,
-            'lastUpdate': datetime.now().isoformat()
-        }
-        
-        # 保存到文件
-        with open('dashboard_data.json', 'w', encoding='utf-8') as f:
-            json.dump(dashboard_data, f, ensure_ascii=False, indent=2)
-        
-        log_message("DEBUG", f"仪表板数据已更新: 余额{dashboard_data['account']['totalBalance']:.2f}, 持仓{len(positions)}, 胜率{win_rate:.1f}%")
-        
-    except Exception as e:
-        log_message("ERROR", f"保存仪表板数据失败: {str(e)}")
-
-# ============================================
 def display_trading_stats():
     """显示交易统计信息"""
     try:
@@ -1672,21 +1671,11 @@ def display_trading_stats():
         if position_tracker['positions']:
             print("📈 当前持仓:")
             for symbol, pos in position_tracker['positions'].items():
-                print(f"  {symbol}: {pos['side']} {pos['size']:.4f} @ {pos['entry_price']:.4f} | 盈亏: {pos['pnl']:.2f} USDT")
-        
-        # 保存数据供Web界面使用
-        save_dashboard_data()
+                leverage_info = f"{pos.get('leverage', DEFAULT_LEVERAGE)}x"
+                print(f"  {symbol}: {pos['side']} {pos['size']:.4f} @ {pos['entry_price']:.4f} | 杠杆: {leverage_info} | 盈亏: {pos['pnl']:.2f} USDT")
         
     except Exception as e:
         log_message("ERROR", f"显示统计信息失败: {str(e)}")
-
-# 在主循环中也定期保存数据
-def periodic_save_data():
-    """定期保存数据供Web界面使用"""
-    try:
-        save_dashboard_data()
-    except Exception as e:
-        log_message("ERROR", f"定期保存数据失败: {str(e)}")
 
 # ============================================
 # 交易循环函数
@@ -1727,11 +1716,17 @@ def trading_loop():
                 # 检查每日重置
                 check_daily_reset()
                 
+                # 同步交易所持仓（确保统一管理）
+                sync_exchange_positions()
+                
                 # 更新持仓状态
                 update_positions()
                 
                 # 检查并补充缺失的止损止盈条件单
                 setup_missing_stop_orders()
+                
+                # API调用间隙
+                time.sleep(1)
                 
                 # 检查每个交易对的信号
                 for symbol in trading_pairs:
@@ -1753,8 +1748,8 @@ def trading_loop():
                         else:
                             log_message("INFO", f"{symbol} 无交易信号")
                         
-                        # 避免请求过快
-                        time.sleep(1)
+                        # 避免请求过快，增加API调用间隙
+                        time.sleep(2)  # 增加到2秒间隙
                         
                     except Exception as e:
                         log_message("ERROR", f"{symbol} 处理信号时出错: {str(e)}")
@@ -1780,27 +1775,6 @@ def trading_loop():
         traceback.print_exc()
 
 # ============================================
-# 启动Web仪表板
-# ============================================
-def start_web_dashboard():
-    """启动Web仪表板服务器"""
-    try:
-        from web_server import start_web_server
-        import threading
-        
-        # 在单独线程中启动Web服务器
-        web_thread = threading.Thread(target=start_web_server, kwargs={'port': 8080, 'debug': False}, daemon=True)
-        web_thread.start()
-        
-        log_message("SUCCESS", "🌐 Web仪表板已启动")
-        log_message("INFO", "📱 访问地址: http://localhost:8080")
-        
-        return True
-    except Exception as e:
-        log_message("ERROR", f"启动Web仪表板失败: {str(e)}")
-        return False
-
-# ============================================
 # 启动交易系统
 # ============================================
 def start_trading_system():
@@ -1815,29 +1789,39 @@ def start_trading_system():
             log_message("ERROR", "API连接测试失败，请检查配置")
             return
         
-        # 启动Web仪表板
-        start_web_dashboard()
-        
         # 显示启动信息
         log_message("SUCCESS", "=" * 60)
         log_message("SUCCESS", "MACD(6,32,9)策略实盘交易系统 - OKX版")
         log_message("SUCCESS", "=" * 60)
         log_message("INFO", f"交易所: OKX")
-        log_message("INFO", f"杠杆: BTC {DEFAULT_LEVERAGE_BTC}x, ETH {DEFAULT_LEVERAGE_ETH}x, 其他 {DEFAULT_LEVERAGE_OTHERS}x")
+        log_message("INFO", f"智能杠杆系统: 启用")
+        log_message("INFO", f"  BTC最大杠杆: {MAX_LEVERAGE_BTC}x (最低20x)")
+        log_message("INFO", f"  ETH最大杠杆: {MAX_LEVERAGE_ETH}x (最低20x)")
+        log_message("INFO", f"  主流币最大杠杆: {MAX_LEVERAGE_MAJOR}x (最低20x)")
+        log_message("INFO", f"  其他币种最大杠杆: {MAX_LEVERAGE_OTHERS}x (最低20x)")
+        log_message("INFO", f"  全局最低杠杆: 20x")
         log_message("INFO", f"单次风险: {RISK_PER_TRADE*100}%")
         log_message("INFO", f"最大持仓: {MAX_OPEN_POSITIONS}")
         log_message("INFO", f"冷却期: {COOLDOWN_PERIOD//60}分钟")
         log_message("INFO", f"每日最大交易: {MAX_DAILY_TRADES}")
-        log_message("INFO", f"每日最大亏损: {MAX_DAILY_LOSS*100}%")
+        log_message("INFO", "亏损限制: 已移除，可无限制下单")
         log_message("INFO", "使用30分钟K线图")
         log_message("INFO", "入场信号: MACD快线上穿/下穿慢线(金叉/死叉)")
         log_message("INFO", "震荡过滤: ADX < 20")
         log_message("INFO", "趋势确认: ADX > 25")
         log_message("INFO", "平仓条件: MACD反向交叉")
         log_message("INFO", "MACD平仓规则: 做多时MACD死叉平仓，做空时MACD金叉平仓")
+        log_message("INFO", f"ATR动态止盈止损: {'启用' if USE_ATR_DYNAMIC_STOPS else '禁用'}")
+        if USE_ATR_DYNAMIC_STOPS:
+            log_message("INFO", f"ATR止损倍数: {ATR_STOP_LOSS_MULTIPLIER}x")
+            log_message("INFO", f"ATR止盈倍数: {ATR_TAKE_PROFIT_MULTIPLIER}x")
+            log_message("INFO", f"ATR移动止盈激活倍数: {ATR_TRAILING_ACTIVATION_MULTIPLIER}x")
+            log_message("INFO", f"ATR移动止盈回调倍数: {ATR_TRAILING_CALLBACK_MULTIPLIER}x")
         log_message("INFO", f"交易对: 热度前10 + FIL, ZRO, WIF, WLD (共14个)")
-        log_message("INFO", "🌐 Web仪表板: http://localhost:8080")
         log_message("SUCCESS", "=" * 60)
+        
+        # 同步交易所持仓，统一按MACD策略管理
+        sync_exchange_positions()
         
         # 启动交易循环
         trading_loop()
@@ -1849,134 +1833,7 @@ def start_trading_system():
 # ============================================
 # 为已存在持仓补充止盈止损条件单
 # ============================================
-def setup_missing_stop_orders():
-    """为已存在但缺少止损止盈订单的持仓补充设置条件单"""
-    try:
-        # 获取交易所当前持仓
-        positions = exchange.fetch_positions()
-        
-        for position in positions:
-            if float(position['contracts']) > 0:  # 有持仓
-                symbol = position['symbol']
-                size = float(position['contracts'])
-                side = position['side']  # 'long' 或 'short'
-                entry_price = float(position['entryPrice'])
-                
-                log_message("INFO", f"检查 {symbol} 持仓: {side} {size} @ {entry_price}")
-                
-                # 检查本地跟踪器中是否有这个持仓的条件单记录
-                if symbol not in position_tracker['positions']:
-                    # 本地没有记录，需要补充
-                    log_message("WARNING", f"{symbol} 本地无记录，补充止盈止损条件单")
-                    
-                    # 计算止损止盈价格
-                    if side == 'long':
-                        sl = entry_price * (1 - FIXED_SL_PERCENTAGE)
-                        tp = entry_price * (1 + FIXED_TP_PERCENTAGE)
-                        sl_side = 'sell'
-                        tp_side = 'sell'
-                    else:  # short
-                        sl = entry_price * (1 + FIXED_SL_PERCENTAGE)
-                        tp = entry_price * (1 - FIXED_TP_PERCENTAGE)
-                        sl_side = 'buy'
-                        tp_side = 'buy'
-                    
-                    sl_order_id = None
-                    tp_order_id = None
-                    
-                    try:
-                        # 设置止损条件单
-                        log_message("INFO", f"{symbol} 补充设置止损条件单: {sl:.6f}")
-                        sl_order = exchange.create_order(
-                            symbol=symbol,
-                            type='stop',
-                            side=sl_side,
-                            amount=size,
-                            price=sl,
-                            params={'stopLossPrice': sl, 'posSide': side}
-                        )
-                        sl_order_id = sl_order['id']
-                        log_message("SUCCESS", f"{symbol} 补充止损条件单成功: {sl:.6f}, ID: {sl_order_id}")
-                        
-                        # 设置止盈条件单
-                        log_message("INFO", f"{symbol} 补充设置止盈条件单: {tp:.6f}")
-                        tp_order = exchange.create_order(
-                            symbol=symbol,
-                            type='take_profit',
-                            side=tp_side,
-                            amount=size,
-                            price=tp,
-                            params={'takeProfitPrice': tp, 'posSide': side}
-                        )
-                        tp_order_id = tp_order['id']
-                        log_message("SUCCESS", f"{symbol} 补充止盈条件单成功: {tp:.6f}, ID: {tp_order_id}")
-                        
-                        # 添加到本地跟踪器
-                        position_tracker['positions'][symbol] = {
-                            'entry_price': entry_price,
-                            'size': size,
-                            'side': side,
-                            'pnl': 0.0,
-                            'sl': sl,
-                            'tp': tp,
-                            'entry_time': datetime.now(),
-                            'leverage': get_leverage_for_symbol(symbol),
-                            'order_id': None,  # 原始开仓订单ID未知
-                            'sl_order_id': sl_order_id,
-                            'tp_order_id': tp_order_id
-                        }
-                        
-                        log_message("SUCCESS", f"{symbol} 持仓补充完成，已添加到本地跟踪器")
-                        
-                    except Exception as e:
-                        log_message("ERROR", f"{symbol} 补充条件单失败: {str(e)}")
-                
-                elif position_tracker['positions'][symbol].get('sl_order_id') is None or position_tracker['positions'][symbol].get('tp_order_id') is None:
-                    # 本地有记录但缺少条件单ID，需要补充
-                    log_message("WARNING", f"{symbol} 本地记录缺少条件单ID，尝试补充")
-                    
-                    pos_data = position_tracker['positions'][symbol]
-                    sl = pos_data.get('sl')
-                    tp = pos_data.get('tp')
-                    
-                    if sl and tp:
-                        sl_side = 'sell' if side == 'long' else 'buy'
-                        tp_side = 'sell' if side == 'long' else 'buy'
-                        
-                        try:
-                            if pos_data.get('sl_order_id') is None:
-                                # 补充止损条件单
-                                sl_order = exchange.create_order(
-                                    symbol=symbol,
-                                    type='stop',
-                                    side=sl_side,
-                                    amount=size,
-                                    price=sl,
-                                    params={'stopLossPrice': sl, 'posSide': side}
-                                )
-                                position_tracker['positions'][symbol]['sl_order_id'] = sl_order['id']
-                                log_message("SUCCESS", f"{symbol} 补充止损条件单: {sl:.6f}, ID: {sl_order['id']}")
-                            
-                            if pos_data.get('tp_order_id') is None:
-                                # 补充止盈条件单
-                                tp_order = exchange.create_order(
-                                    symbol=symbol,
-                                    type='take_profit',
-                                    side=tp_side,
-                                    amount=size,
-                                    price=tp,
-                                    params={'takeProfitPrice': tp, 'posSide': side}
-                                )
-                                position_tracker['positions'][symbol]['tp_order_id'] = tp_order['id']
-                                log_message("SUCCESS", f"{symbol} 补充止盈条件单: {tp:.6f}, ID: {tp_order['id']}")
-                                
-                        except Exception as e:
-                            log_message("ERROR", f"{symbol} 补充缺失条件单失败: {str(e)}")
-                else:
-                    log_message("DEBUG", f"{symbol} 条件单完整，无需补充")
-                    
-    except Exception as e:
-        log_message("ERROR", f"补充止盈止损条件单失败: {str(e)}")
+
 
 # ============================================
 # 主程序入口
