@@ -976,10 +976,10 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=stop_loss * 0.95,
                     params={
-                        'stopPrice': stop_loss,
-                        'triggerPrice': stop_loss,
+                        'stopLossPrice': stop_loss,
                         'tdMode': 'cross',
-                        'posSide': 'long'
+                        'posSide': 'long',
+                        'reduceOnly': True
                     }
                 )
             else:
@@ -990,10 +990,10 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=stop_loss * 1.05,
                     params={
-                        'stopPrice': stop_loss,
-                        'triggerPrice': stop_loss,
+                        'stopLossPrice': stop_loss,
                         'tdMode': 'cross',
-                        'posSide': 'short'
+                        'posSide': 'short',
+                        'reduceOnly': True
                     }
                 )
             
@@ -1009,8 +1009,10 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=take_profit,
                     params={
+                        'takeProfitPrice': take_profit,
                         'tdMode': 'cross',
-                        'posSide': 'long'
+                        'posSide': 'long',
+                        'reduceOnly': True
                     }
                 )
             else:
@@ -1021,8 +1023,10 @@ def setup_missing_stop_orders(position, symbol):
                     amount=abs(size),
                     price=take_profit,
                     params={
+                        'takeProfitPrice': take_profit,
                         'tdMode': 'cross',
-                        'posSide': 'short'
+                        'posSide': 'short',
+                        'reduceOnly': True
                     }
                 )
             
