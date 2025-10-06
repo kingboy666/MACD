@@ -1051,29 +1051,29 @@ def get_performance_report():
         avg_win = trade_stats['total_profit'] / trade_stats['winning_trades'] if trade_stats['winning_trades'] > 0 else 0
         avg_loss = trade_stats['total_loss'] / trade_stats['losing_trades'] if trade_stats['losing_trades'] > 0 else 0
         
-        report = f"""
-=== 交易性能报告 ===
-总交易次数: {trade_stats['total_trades']}
-盈利交易: {trade_stats['winning_trades']}
-亏损交易: {trade_stats['losing_trades']}
-胜率: {win_rate:.2f}%
-盈利因子: {profit_factor:.2f}
-净利润: {net_profit:.2f} USDT
-平均盈利: {avg_win:.2f} USDT
-平均亏损: {avg_loss:.2f} USDT
-"""
+        # 构建报告
+        report_lines = [
+            "=== 交易性能报告 ===",
+            f"总交易次数: {trade_stats['total_trades']}",
+            f"盈利交易: {trade_stats['winning_trades']}",
+            f"亏损交易: {trade_stats['losing_trades']}",
+            f"胜率: {win_rate:.2f}%",
+            f"盈利因子: {profit_factor:.2f}",
+            f"净利润: {net_profit:.2f} USDT",
+            f"平均盈利: {avg_win:.2f} USDT",
+            f"平均亏损: {avg_loss:.2f} USDT"
+        ]
         
         # 最近5笔交易
         if trade_stats['trade_history']:
-            report += "
-=== 最近5笔交易 ===
-"
+            report_lines.append("=== 最近5笔交易 ===")
             recent_trades = trade_stats['trade_history'][-5:]
             for trade in recent_trades:
-                report += f"{trade['symbol']} {trade['side']} PnL: {trade['pnl']:.2f} ({trade['pnl_percentage']:.2f}%)
-"
+                trade_line = f"{trade['symbol']} {trade['side']} PnL: {trade['pnl']:.2f} ({trade['pnl_percentage']:.2f}%)"
+                report_lines.append(trade_line)
         
-        return report
+        return "
+".join(report_lines)
         
     except Exception as e:
         log_message("ERROR", f"生成性能报告失败: {e}")
