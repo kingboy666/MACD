@@ -321,7 +321,7 @@ def process_klines(ohlcv):
         return None
 
 def generate_signal(symbol):
-    """基于MACD金叉/死叉和K线阴阳线生成交易信号"""
+    """基于MACD金叉/死叉、K线阴阳线和ADX趋势确认生成交易信号"""
     try:
         ohlcv = get_klines(symbol, '30m', limit=100)
         if not ohlcv:
@@ -331,25 +331,30 @@ def generate_signal(symbol):
         if df is None or len(df) < 2:
             return None
         
+        # 获取当前和前一周期数据
         current_macd = df['MACD'].iloc[-1]
         current_signal = df['MACD_SIGNAL'].iloc[-1]
         prev_macd = df['MACD'].iloc[-2]
         prev_signal = df['MACD_SIGNAL'].iloc[-2]
         current_adx = df['ADX'].iloc[-1]
         current_price = df['close'].iloc[-1]
+        current_open = df['open'].iloc[-1]
+        current_close = df['close'].iloc[-1]
         atr_value = df['ATR_14'].iloc[-1]
-        is_current_bullish = df['is_bullish'].iloc[-1]
-        is_current_bearish = df['is_bearish'].iloc[-1]
         
         # 检查MACD金叉死叉
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
         death_cross = prev_macd >= prev_signal and current_macd < current_signal
         
+        # 检查K线阴阳线
+        is_bullish = current_close > current_open  # 阳线：收盘价大于开盘价
+        is_bearish = current_close < current_open  # 阴线：收盘价小于开盘价
+        
         signal = None
         
-        # 趋势确认：ADX > 25 且 K线阴阳线确认
-        if current_adx > ADX_TREND_THRESHOLD:
-            if golden_cross and is_current_bullish:
+        # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认
+        if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情
+            if golden_cross and is_bullish:
                 signal = {
                     'symbol': symbol,
                     'side': 'long',
@@ -359,10 +364,12 @@ def generate_signal(symbol):
                     'adx_value': current_adx,
                     'macd_value': current_macd,
                     'signal_value': current_signal,
-                    'is_bullish': is_current_bullish,
-                    'confirmation_type': 'MACD金叉+阳线确认'
+                    'is_bullish': is_bullish,
+                    'confirmation_type': 'MACD金叉+阳线确认+ADX趋势'
                 }
-            elif death_cross and is_current_bearish:
+                log_message("DEBUG", f"{symbol} 做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
+                
+            elif death_cross and is_bearish:
                 signal = {
                     'symbol': symbol,
                     'side': 'short',
@@ -372,9 +379,19 @@ def generate_signal(symbol):
                     'adx_value': current_adx,
                     'macd_value': current_macd,
                     'signal_value': current_signal,
-                    'is_bearish': is_current_bearish,
-                    'confirmation_type': 'MACD死叉+阴线确认'
+                    'is_bearish': is_bearish,
+                    'confirmation_type': 'MACD死叉+阴线确认+ADX趋势'
                 }
+                log_message("DEBUG", f"{symbol} 做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
+        
+        elif current_adx < ADX_SIDEWAYS_THRESHOLD:  # 震荡行情
+            log_message("DEBUG", f"{symbol} 震荡行情跳过: ADX={current_adx:.2f} < {ADX_SIDEWAYS_THRESHOLD}")
+        
+        else:  # 中等趋势强度
+            if golden_cross and is_bullish:
+                log_message("DEBUG", f"{symbol} 中等趋势做多信号: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
+            elif death_cross and is_bearish:
+                log_message("DEBUG", f"{symbol} 中等趋势做空信号: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
         
         return signal
         
@@ -420,6 +437,21 @@ def calculate_position_size(symbol, price, total_balance):
             log_message("WARNING", f"{symbol} 计算的仓位大小 {position_size:.6f} 低于最小数量 {min_amount}，已调整为最小数量")
             position_size = min_amount
         
+        # 检查金额精度：确保交易金额大于最小金额精度（1 USDT）
+        trade_value = position_size * price
+        if trade_value < 1.0:
+            log_message("WARNING", f"{symbol} 交易金额 {trade_value:.4f} USDT 低于最小金额精度 1 USDT，已调整")
+            # 调整到最小金额精度
+            position_size = 1.0 / price
+            # 再次检查调整后的数量是否满足最小数量要求
+            if position_size < min_amount:
+                position_size = min_amount
+                # 如果调整后仍然不满足金额精度，则跳过交易
+                trade_value = position_size * price
+                if trade_value < 1.0:
+                    log_message("ERROR", f"{symbol} 调整后交易金额 {trade_value:.4f} USDT 仍低于最小金额精度 1 USDT，跳过交易")
+                    return 0
+        
         return position_size
         
     except Exception as e:
@@ -442,7 +474,7 @@ def execute_trade(symbol, signal, signal_strength):
             return False
         
         # 执行市价单
-        order = exchange.createOrder(
+        order = exchange.create_order(
             symbol,
             'market',
             side,
@@ -484,25 +516,50 @@ def execute_trade(symbol, signal, signal_strength):
 def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
     """计算止损止盈价格"""
     try:
+        # 获取当前价格用于验证
+        current_price = float(exchange.fetch_ticker(symbol)['last'])
+        
         if USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0:
             # 使用ATR动态计算
             atr_sl_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_STOP_LOSS_MULTIPLIER))
             atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER))
             
             if signal == 'long':
-                stop_loss = price - (atr_value * atr_sl_multiplier)
+                stop_loss = max(price * 0.95, price - (atr_value * atr_sl_multiplier))  # 至少5%止损
                 take_profit = price + (atr_value * atr_tp_multiplier)
             else:  # short
-                stop_loss = price + (atr_value * atr_sl_multiplier)
-                take_profit = price  # 对于short交易，止盈价格设置为当前价格，避免交易所拒绝
+                stop_loss = min(price * 1.05, price + (atr_value * atr_sl_multiplier))  # 至少5%止损
+                take_profit = max(price * 0.94, price - (atr_value * atr_tp_multiplier))  # 至少6%止盈
         else:
             # 固定百分比止损止盈
             if signal == 'long':
-                stop_loss = price * 0.98  # 2%止损
+                stop_loss = price * 0.95  # 5%止损
                 take_profit = price * 1.06  # 6%止盈
             else:  # short
-                stop_loss = price * 1.02  # 2%止损
-                take_profit = price  # 对于short交易，止盈价格设置为当前价格，避免交易所拒绝
+                stop_loss = price * 1.05  # 5%止损
+                take_profit = price * 0.94  # 6%止盈
+        
+        # 严格验证止盈止损价格合理性
+        if signal == 'long':
+            # 做多：止盈必须高于入场价，止损必须低于入场价
+            if take_profit <= price:
+                take_profit = price * 1.06  # 确保止盈高于入场价
+            if stop_loss >= price:
+                stop_loss = price * 0.95  # 确保止损低于入场价
+            # 额外验证：止盈必须高于当前价格
+            if take_profit <= current_price:
+                take_profit = current_price * 1.02  # 设置比当前价高2%的止盈
+        else:  # short
+            # 做空：止盈必须低于入场价，止损必须高于入场价
+            if take_profit >= price:
+                take_profit = price * 0.94  # 确保止盈低于入场价
+            if stop_loss <= price:
+                stop_loss = price * 1.05  # 确保止损高于入场价
+            # 额外验证：止盈必须低于当前价格
+            if take_profit >= current_price:
+                take_profit = current_price * 0.98  # 设置比当前价低2%的止盈
+        
+        log_message("DEBUG", f"{symbol} {signal} 止盈止损计算: 入场价={price:.4f}, 当前价={current_price:.4f}, 止损={stop_loss:.4f}, 止盈={take_profit:.4f}")
         
         return {
             'stop_loss': stop_loss,
@@ -583,25 +640,53 @@ def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
         log_message("ERROR", f"更新交易统计失败: {str(e)}")
 
 def check_positions():
-    """检查持仓状态"""
+    """检查持仓状态，基于MACD金叉/死叉和K线阴阳线确认平仓"""
     try:
         for symbol in list(position_tracker['positions'].keys()):
-            signal = generate_signal(symbol)
-            if not signal:
+            ohlcv = get_klines(symbol, '30m', limit=100)
+            if not ohlcv:
                 continue
             
-            position = position_tracker['positions'][symbol]
-            current_price = signal['price']
+            df = process_klines(ohlcv)
+            if df is None or len(df) < 2:
+                continue
             
-            # 检查平仓条件
+            # 获取当前和前一周期数据
+            current_macd = df['MACD'].iloc[-1]
+            current_signal = df['MACD_SIGNAL'].iloc[-1]
+            prev_macd = df['MACD'].iloc[-2]
+            prev_signal = df['MACD_SIGNAL'].iloc[-2]
+            current_adx = df['ADX'].iloc[-1]
+            current_price = df['close'].iloc[-1]
+            current_open = df['open'].iloc[-1]
+            current_close = df['close'].iloc[-1]
+            
+            position = position_tracker['positions'][symbol]
+            
+            # 检查MACD金叉死叉
+            golden_cross = prev_macd <= prev_signal and current_macd > current_signal
+            death_cross = prev_macd >= prev_signal and current_macd < current_signal
+            
+            # 检查K线阴阳线
+            is_bullish = current_close > current_open  # 阳线：收盘价大于开盘价
+            is_bearish = current_close < current_open  # 阴线：收盘价小于开盘价
+            
             should_close = False
-            if position['side'] == 'long' and signal['side'] == 'short':
+            close_reason = ""
+            
+            # 平仓条件：MACD反向信号 + K线确认 + ADX趋势确认
+            if position['side'] == 'long' and death_cross and is_bearish and current_adx > ADX_TREND_THRESHOLD:
                 should_close = True
-            elif position['side'] == 'short' and signal['side'] == 'long':
+                close_reason = f"MACD死叉+阴线确认平仓 (ADX={current_adx:.2f})"
+                log_message("DEBUG", f"{symbol} 多头平仓条件满足: 死叉确认, 阴线确认, ADX趋势")
+                
+            elif position['side'] == 'short' and golden_cross and is_bullish and current_adx > ADX_TREND_THRESHOLD:
                 should_close = True
+                close_reason = f"MACD金叉+阳线确认平仓 (ADX={current_adx:.2f})"
+                log_message("DEBUG", f"{symbol} 空头平仓条件满足: 金叉确认, 阳线确认, ADX趋势")
             
             if should_close:
-                close_position(symbol, "MACD反向信号")
+                close_position(symbol, close_reason)
                 
     except Exception as e:
         log_message("ERROR", f"检查持仓状态失败: {str(e)}")
@@ -1039,9 +1124,9 @@ def check_trailing_stop(symbol, position_info):
                 profit_protection = unrealized_pnl * 0.5
                 new_stop_loss = entry_price * (1 + profit_protection)
                 
-                # 检查是否需要更新止损
+                # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
                 current_orders = exchange.fetch_open_orders(symbol)
-                stop_orders = [o for o in current_orders if o['type'] == 'stop']
+                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
                 
                 should_update = True
                 for order in stop_orders:
@@ -1057,18 +1142,19 @@ def check_trailing_stop(symbol, position_info):
                         except:
                             pass
                     
-                    # 下新的止损单
+                    # 下新的止损单（修复：使用条件单）
                     exchange.create_order(
                         symbol=symbol,
-                        type='stop',
+                        type='conditional',
                         side='sell',
                         amount=abs(size),
-                        price=current_price * 0.95,  # 市价单
+                        price=new_stop_loss,
                         params={
-                            'stopPrice': new_stop_loss,
-                            'triggerPrice': new_stop_loss,
+                            'slTriggerPx': new_stop_loss,
+                            'slOrdPx': new_stop_loss,
                             'tdMode': 'cross',
-                            'posSide': 'long'
+                            'posSide': 'long',
+                            'reduceOnly': True
                         }
                     )
                     
@@ -1084,7 +1170,7 @@ def check_trailing_stop(symbol, position_info):
                 new_stop_loss = entry_price * (1 - profit_protection)
                 
                 current_orders = exchange.fetch_open_orders(symbol)
-                stop_orders = [o for o in current_orders if o['type'] == 'stop']
+                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
                 
                 should_update = True
                 for order in stop_orders:
@@ -1101,15 +1187,16 @@ def check_trailing_stop(symbol, position_info):
                     
                     exchange.create_order(
                         symbol=symbol,
-                        type='stop',
+                        type='conditional',
                         side='buy',
                         amount=abs(size),
-                        price=current_price * 1.05,
+                        price=new_stop_loss,
                         params={
-                            'stopPrice': new_stop_loss,
-                            'triggerPrice': new_stop_loss,
+                            'slTriggerPx': new_stop_loss,
+                            'slOrdPx': new_stop_loss,
                             'tdMode': 'cross',
-                            'posSide': 'short'
+                            'posSide': 'short',
+                            'reduceOnly': True
                         }
                     )
                     
@@ -1123,12 +1210,25 @@ def check_trailing_stop(symbol, position_info):
         return False
 
 def setup_missing_stop_orders(position, symbol):
-    """为现有持仓设置止盈止损"""
+    """为现有持仓设置止盈止损（修复：防止重复设置）"""
     try:
         # symbol 由调用方传入，避免 position 缺少该字段导致的 KeyError
         entry_price = float(position['entry_price'])
         side = position['side']
         size = float(position['size'])
+        
+        # 检查是否最近已经设置过止盈止损（避免重复设置）
+        current_time = datetime.now()
+        last_setup_time = position_tracker.get('last_stop_setup', {}).get(symbol)
+        
+        if last_setup_time and (current_time - last_setup_time).total_seconds() < 300:  # 5分钟内不重复设置
+            log_message("DEBUG", f"{symbol} 最近已设置过止盈止损，跳过重复设置")
+            return False
+        
+        # 更新最后设置时间
+        if 'last_stop_setup' not in position_tracker:
+            position_tracker['last_stop_setup'] = {}
+        position_tracker['last_stop_setup'][symbol] = current_time
         
         # 获取ATR
         ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=50)
@@ -1143,20 +1243,23 @@ def setup_missing_stop_orders(position, symbol):
         stop_loss = stop_loss_tp['stop_loss']
         take_profit = stop_loss_tp['take_profit']
         
-        # 检查是否已有止损单
+        # 检查是否已有止损单（修复：检查条件单而不是stop类型）
         current_orders = exchange.fetch_open_orders(symbol)
-        has_stop_loss = any(o['type'] == 'stop' for o in current_orders)
-        has_take_profit = any(o['type'] == 'limit' and o['side'] != side for o in current_orders)
+        has_stop_loss = any(o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {}) for o in current_orders)
+        has_take_profit = any(o['type'] == 'conditional' and 'tpTriggerPx' in o.get('info', {}).get('params', {}) for o in current_orders)
         
-        # 设置止损单
+        # 添加日志显示当前订单状态
+        log_message("DEBUG", f"{symbol} 当前订单状态 - 止损单: {has_stop_loss}, 止盈单: {has_take_profit}")
+        
+        # 设置止损单（修复：使用条件单而不是stop类型）
         if not has_stop_loss:
             if side == 'long':
                 exchange.create_order(
                     symbol=symbol,
-                    type='stop',
+                    type='conditional',
                     side='sell',
                     amount=abs(size),
-                    price=stop_loss * 0.95,
+                    price=stop_loss,
                     params={
                         'slTriggerPx': stop_loss,
                         'slOrdPx': stop_loss,
@@ -1168,10 +1271,10 @@ def setup_missing_stop_orders(position, symbol):
             else:
                 exchange.create_order(
                     symbol=symbol,
-                    type='stop',
+                    type='conditional',
                     side='buy',
                     amount=abs(size),
-                    price=stop_loss * 1.05,
+                    price=stop_loss,
                     params={
                         'slTriggerPx': stop_loss,
                         'slOrdPx': stop_loss,
@@ -1183,12 +1286,43 @@ def setup_missing_stop_orders(position, symbol):
             
             log_message("INFO", f"设置止损单 {symbol}: {stop_loss:.4f}")
         
-        # 设置止盈单
+        # 设置止盈单（修复：使用条件单而不是限价单，避免"止盈触发价不能低于最新价格"错误）
         if not has_take_profit:
+            # 获取当前价格进行严格验证
+            current_price = float(exchange.fetch_ticker(symbol)['last'])
+            
+            # 严格验证止盈价格合理性，避免"止盈触发价不能低于最新价格"错误
+            if side == 'long':
+                # 做多：止盈必须高于当前价格和入场价
+                if take_profit <= current_price:
+                    log_message("WARNING", f"止盈价{take_profit:.4f}低于当前价{current_price:.4f}，重新计算止盈价")
+                    # 确保止盈价高于当前价至少2%
+                    take_profit = max(current_price * 1.02, entry_price * 1.06)
+                if take_profit <= entry_price:
+                    log_message("WARNING", f"止盈价{take_profit:.4f}低于入场价{entry_price:.4f}，重新计算止盈价")
+                    take_profit = entry_price * 1.06
+            else:  # short
+                # 做空：止盈必须低于当前价格和入场价
+                if take_profit >= current_price:
+                    log_message("WARNING", f"止盈价{take_profit:.4f}高于当前价{current_price:.4f}，重新计算止盈价")
+                    take_profit = min(current_price * 0.98, entry_price * 0.94)
+                if take_profit >= entry_price:
+                    log_message("WARNING", f"止盈价{take_profit:.4f}高于入场价{entry_price:.4f}，重新计算止盈价")
+                    take_profit = entry_price * 0.94
+            
+            # 最终验证：确保止盈价与当前价有足够差距
+            if side == 'long' and take_profit <= current_price * 1.01:
+                take_profit = current_price * 1.03
+                log_message("DEBUG", f"最终调整止盈价: {take_profit:.4f}")
+            elif side == 'short' and take_profit >= current_price * 0.99:
+                take_profit = current_price * 0.97
+                log_message("DEBUG", f"最终调整止盈价: {take_profit:.4f}")
+            
+            # 使用条件单（conditional）而不是限价单，避免"止盈触发价不能低于最新价格"错误
             if side == 'long':
                 exchange.create_order(
                     symbol=symbol,
-                    type='limit',
+                    type='conditional',
                     side='sell',
                     amount=abs(size),
                     price=take_profit,
@@ -1203,7 +1337,7 @@ def setup_missing_stop_orders(position, symbol):
             else:
                 exchange.create_order(
                     symbol=symbol,
-                    type='limit',
+                    type='conditional',
                     side='buy',
                     amount=abs(size),
                     price=take_profit,
@@ -1216,7 +1350,7 @@ def setup_missing_stop_orders(position, symbol):
                     }
                 )
             
-            log_message("INFO", f"设置止盈单 {symbol}: {take_profit:.4f}")
+            log_message("INFO", f"设置止盈单 {symbol}: {take_profit:.4f} (当前价: {current_price:.4f}, 入场价: {entry_price:.4f})")
         
         return True
         
