@@ -1749,156 +1749,131 @@ def get_historical_data(symbol, days=30):
         return None
 
 def backtest_strategy(symbol, days=7, initial_balance=10000):
-    """策略回测 - 增强版"""
+    """策略回测 - EMA5/EMA10 交叉 + 固定止盈0.0058 + 交叉前一根K线止损；统一50x杠杆"""
     try:
         log_message("INFO", f"开始回测 {symbol}，回测天数: {days}，初始资金: {initial_balance}")
-        
-        # 获取历史数据
         df = get_historical_data(symbol, days)
-        if df is None or len(df) < 100:
+        if df is None or len(df) < 50:
             log_message("WARNING", f"历史数据不足，无法回测 {symbol}")
             return None
-        
-        # 计算技术指标
-        df['macd'], df['macd_signal'], df['macd_histogram'] = calculate_macd(df['close'])
-        df['atr'] = calculate_atr(df['high'], df['low'], df['close'])
-        df['adx'] = calculate_adx(df['high'], df['low'], df['close'])
-        
-        # 回测变量
-        position = None
-        entry_price = 0
+
+        # 计算 EMA5/EMA10
+        df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
+        df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
+
+        position = None  # 'long' | 'short' | None
+        entry_price = 0.0
         entry_time = None
+        entry_size = 0.0  # 以50x杠杆计算的合约数量
         trades = []
         balance = initial_balance
-        max_drawdown = 0
         peak_balance = initial_balance
+        max_drawdown = 0.0
         trade_details = []
-        
+
         for i in range(1, len(df)):
-            current = df.iloc[i]
-            prev = df.iloc[i-1]
-            
+            cur = df.iloc[i]
+            prev = df.iloc[i - 1]
+
             # 更新最大回撤
             if balance > peak_balance:
                 peak_balance = balance
-            current_drawdown = (peak_balance - balance) / peak_balance * 100
-            if current_drawdown > max_drawdown:
-                max_drawdown = current_drawdown
-            
-            # 检查信号
-            if pd.notna(current['macd']) and pd.notna(current['adx']):
-                # 做多信号
-                if (prev['macd'] <= prev['macd_signal'] and 
-                    current['macd'] > current['macd_signal'] and 
-                    current['adx'] > 25 and position != 'long'):
-                    
-                    if position == 'short':
-                        # 平空仓
-                        pnl = (entry_price - current['close']) / entry_price * balance * 0.8
-                        trades.append({
-                            'type': 'close_short',
-                            'price': current['close'],
-                            'pnl': pnl,
-                            'timestamp': current['timestamp']
-                        })
-                        trade_details.append({
-                            'symbol': symbol,
-                            'side': 'close_short',
-                            'entry_price': entry_price,
-                            'exit_price': current['close'],
-                            'pnl': pnl,
-                            'pnl_percentage': (pnl / balance * 100),
-                            'entry_time': entry_time,
-                            'exit_time': current['timestamp'],
-                            'duration': (current['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
-                        })
-                        balance += pnl
-                    
-                    # 开多仓
+            dd = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
+            if dd > max_drawdown:
+                max_drawdown = dd
+
+            # 计算交叉
+            cross_up = (prev['ema5'] <= prev['ema10']) and (cur['ema5'] > cur['ema10'])
+            cross_dn = (prev['ema5'] >= prev['ema10']) and (cur['ema5'] < cur['ema10'])
+
+            # 平仓检查（基于止盈/止损）
+            if position == 'long':
+                tp_price = entry_price * (1 + 0.0058)
+                sl_price = float(prev['low'])  # 交叉前一根K线的低点
+                # 触发 TP 或 SL
+                if cur['high'] >= tp_price or cur['low'] <= sl_price:
+                    exit_price = tp_price if cur['high'] >= tp_price else sl_price
+                    pnl = (exit_price - entry_price) * entry_size
+                    balance += pnl
+                    trades.append({'type': 'close_long', 'price': exit_price, 'pnl': pnl, 'timestamp': cur['timestamp']})
+                    trade_details.append({
+                        'symbol': symbol, 'side': 'close_long',
+                        'entry_price': entry_price, 'exit_price': exit_price,
+                        'pnl': pnl, 'pnl_percentage': (pnl / initial_balance * 100) if initial_balance > 0 else 0,
+                        'entry_time': entry_time, 'exit_time': cur['timestamp'],
+                        'duration': (cur['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+                    })
+                    position = None
+                    entry_price = 0.0
+                    entry_size = 0.0
+                    entry_time = None
+
+            elif position == 'short':
+                tp_price = entry_price * (1 - 0.0058)
+                sl_price = float(prev['high'])  # 交叉前一根K线的高点
+                if cur['low'] <= tp_price or cur['high'] >= sl_price:
+                    exit_price = tp_price if cur['low'] <= tp_price else sl_price
+                    pnl = (entry_price - exit_price) * entry_size
+                    balance += pnl
+                    trades.append({'type': 'close_short', 'price': exit_price, 'pnl': pnl, 'timestamp': cur['timestamp']})
+                    trade_details.append({
+                        'symbol': symbol, 'side': 'close_short',
+                        'entry_price': entry_price, 'exit_price': exit_price,
+                        'pnl': pnl, 'pnl_percentage': (pnl / initial_balance * 100) if initial_balance > 0 else 0,
+                        'entry_time': entry_time, 'exit_time': cur['timestamp'],
+                        'duration': (cur['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+                    })
+                    position = None
+                    entry_price = 0.0
+                    entry_size = 0.0
+                    entry_time = None
+
+            # 入场（仅在无持仓时，根据交叉开仓）
+            if position is None:
+                if cross_up:
                     position = 'long'
-                    entry_price = current['close']
-                    entry_time = current['timestamp']
-                    trades.append({
-                        'type': 'open_long',
-                        'price': entry_price,
-                        'timestamp': current['timestamp']
-                    })
-                
-                # 做空信号
-                elif (prev['macd'] >= prev['macd_signal'] and 
-                      current['macd'] < current['macd_signal'] and 
-                      current['adx'] > 25 and position != 'short'):
-                    
-                    if position == 'long':
-                        # 平多仓
-                        pnl = (current['close'] - entry_price) / entry_price * balance * 0.8
-                        trades.append({
-                            'type': 'close_long',
-                            'price': current['close'],
-                            'pnl': pnl,
-                            'timestamp': current['timestamp']
-                        })
-                        trade_details.append({
-                            'symbol': symbol,
-                            'side': 'close_long',
-                            'entry_price': entry_price,
-                            'exit_price': current['close'],
-                            'pnl': pnl,
-                            'pnl_percentage': (pnl / balance * 100),
-                            'entry_time': entry_time,
-                            'exit_time': current['timestamp'],
-                            'duration': (current['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
-                        })
-                        balance += pnl
-                    
-                    # 开空仓
+                    entry_price = float(cur['close'])
+                    entry_time = cur['timestamp']
+                    # 50x杠杆的合约数量（资金按80%参与）
+                    entry_size = (balance * 0.8 * 50) / entry_price
+                    trades.append({'type': 'open_long', 'price': entry_price, 'timestamp': entry_time})
+                elif cross_dn:
                     position = 'short'
-                    entry_price = current['close']
-                    entry_time = current['timestamp']
-                    trades.append({
-                        'type': 'open_short',
-                        'price': entry_price,
-                        'timestamp': current['timestamp']
-                    })
-        
-        # 计算回测结果
-        closed_trades = [t for t in trades if 'pnl' in t]
-        total_trades = len(closed_trades)
-        winning_trades = len([t for t in closed_trades if t['pnl'] > 0])
-        losing_trades = len([t for t in closed_trades if t['pnl'] < 0])
-        total_pnl = sum([t['pnl'] for t in closed_trades])
-        
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
-        profit_factor = abs(sum([t['pnl'] for t in closed_trades if t['pnl'] > 0]) / 
-                          sum([t['pnl'] for t in closed_trades if t['pnl'] < 0])) if losing_trades > 0 else float('inf')
-        
-        # 计算平均盈亏
-        avg_win = sum([t['pnl'] for t in closed_trades if t['pnl'] > 0]) / winning_trades if winning_trades > 0 else 0
-        avg_loss = sum([t['pnl'] for t in closed_trades if t['pnl'] < 0]) / losing_trades if losing_trades > 0 else 0
-        
-        backtest_result = {
+                    entry_price = float(cur['close'])
+                    entry_time = cur['timestamp']
+                    entry_size = (balance * 0.8 * 50) / entry_price
+                    trades.append({'type': 'open_short', 'price': entry_price, 'timestamp': entry_time})
+
+        # 结算
+        closed = [t for t in trades if 'pnl' in t]
+        total_trades = len(closed)
+        winning_trades = len([t for t in closed if t['pnl'] > 0])
+        losing_trades = len([t for t in closed if t['pnl'] < 0])
+        total_pnl = sum(t['pnl'] for t in closed)
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
+        profit_factor = abs(
+            sum(t['pnl'] for t in closed if t['pnl'] > 0) / sum(t['pnl'] for t in closed if t['pnl'] < 0)
+        ) if losing_trades > 0 else float('inf')
+
+        result = {
             'symbol': symbol,
             'days': days,
             'initial_balance': initial_balance,
             'final_balance': balance,
             'total_return': ((balance - initial_balance) / initial_balance * 100),
-            'return_rate': ((balance - initial_balance) / initial_balance * 100),
             'total_trades': total_trades,
             'winning_trades': winning_trades,
             'losing_trades': losing_trades,
             'win_rate': win_rate,
             'total_pnl': total_pnl,
             'profit_factor': profit_factor,
-            'avg_win': avg_win,
-            'avg_loss': avg_loss,
             'max_drawdown': max_drawdown,
             'trade_details': trade_details,
-            'trades': closed_trades
+            'trades': closed
         }
-        
-        log_message("INFO", f"回测完成 {symbol}: {total_trades}笔交易，胜率{win_rate:.1f}%，收益率{backtest_result['total_return']:.2f}%，最大回撤{max_drawdown:.2f}%")
-        return backtest_result
-        
+        log_message("INFO", f"回测完成 {symbol}: {total_trades}笔交易，胜率{win_rate:.1f}%，收益率{result['total_return']:.2f}%，最大回撤{max_drawdown:.2f}%")
+        return result
+
     except Exception as e:
         log_message("ERROR", f"策略回测失败 {symbol}: {e}")
         return None
@@ -1950,7 +1925,43 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
     """运行全面的回测分析"""
     try:
         if symbols is None:
-            symbols = SYMBOLS[:5]  # 默认回测前5个标的
+            # 自动从交易所获取热度前10的 USDT 合约（按24h成交量/信息字段排序），并追加 FIL/ZRO/WIF/WLD
+            try:
+                hot = []
+                if exchange:
+                    tickers = exchange.fetch_tickers()
+                    # 过滤 USDT 合约
+                    for sym, tk in tickers.items():
+                        if (sym.endswith('-USDT-SWAP') or sym.endswith(':USDT')) and ('SWAP' in sym or ':' in sym):
+                            vol = None
+                            # ccxt标准字段或OKX info字段
+                            vol = tk.get('quoteVolume') or tk.get('baseVolume')
+                            if vol is None and isinstance(tk.get('info'), dict):
+                                info = tk['info']
+                                # OKX 可能提供 24h成交量（计价币数量）
+                                vol = float(info.get('volCcy24h')) if info.get('volCcy24h') else None
+                            if vol:
+                                hot.append((sym, float(vol)))
+                    hot.sort(key=lambda x: x[1], reverse=True)
+                    top10 = [s for s, _ in hot[:10]]
+                else:
+                    top10 = SYMBOLS[:10]
+                # 统一成 OKX 合约格式 XXX-USDT-SWAP
+                def norm_sym(s):
+                    return s.replace(':USDT', '-USDT-SWAP') if ':USDT' in s else (s if s.endswith('-USDT-SWAP') else s + '-USDT-SWAP')
+                base = [norm_sym(s) for s in top10]
+                extras = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
+                # 去重保持顺序
+                seen = set()
+                symbols = []
+                for s in base + extras:
+                    if s not in seen:
+                        symbols.append(s)
+                        seen.add(s)
+                log_message("INFO", f"自动获取回测标的: {symbols[:10]} + extras")
+            except Exception as e:
+                log_message("WARNING", f"自动获取热门标的失败，使用默认列表: {str(e)}")
+                symbols = SYMBOLS[:10] + ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
         
         all_results = []
         
@@ -2543,7 +2554,7 @@ def enhanced_trading_loop():
         
         # 启动时运行全面回测
         log_message("INFO", "正在运行全面策略回测分析...")
-        backtest_results = run_comprehensive_backtest(SYMBOLS[:5], days_list=[7, 14, 30])
+        backtest_results = run_comprehensive_backtest(None, days_list=[7, 14, 30])
         
         if backtest_results:
             # 保存回测结果到文件
@@ -2661,17 +2672,17 @@ def enhanced_trading_loop():
 # =================================
 # 主程序入口 - 增强版
 # =================================
-# 保留原有增强循环：先保存引用，再包装为带多策略回测的入口
+# 保留原有增强循环：改为仅运行单一策略（EMA5/EMA10）的综合回测与交易
 _orig_enhanced_trading_loop = enhanced_trading_loop
 
 def enhanced_trading_loop():
-    log_message("INFO", "正在运行多策略回测（6个指标策略）...")
+    log_message("INFO", "正在运行单一策略综合回测（EMA5/EMA10），禁用多策略回测入口")
     try:
-        run_multi_strategy_backtests(SYMBOLS[:5], days_list=[7,14,30])
+        # 直接继续原有增强循环（其内部已执行综合回测 run_comprehensive_backtest(None, ...)）
+        return _orig_enhanced_trading_loop()
     except Exception as e:
-        log_message("WARNING", f"多策略回测阶段出错: {e}")
-    # 继续原有流程
-    return _orig_enhanced_trading_loop()
+        log_message("WARNING", f"单策略综合回测阶段出错: {e}")
+        return _orig_enhanced_trading_loop()
 
 if __name__ == "__main__":
     # 使用增强版交易循环替代原版本
