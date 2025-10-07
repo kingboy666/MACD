@@ -435,7 +435,7 @@ def generate_signal(symbol):
 
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 0.8 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 0.7 * vol_ma20)
         # 周末低量避开：周六/周日或当前量低于均值则暂停入场
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
@@ -540,7 +540,7 @@ def generate_signal(symbol):
                     }
 
             # Short：5m触上轨 + RSI>60 + VWAP<价
-            if (bb_upper is not None and close_ >= bb_upper) and (rsi_ is not None and rsi_ > 60) and (current_vwap is not None and close_ < float(current_vwap)):
+            if (bb_upper is not None and close_ >= bb_upper * 0.9995) and (rsi_ is not None and rsi_ > 60) and (current_vwap is not None and close_ < float(current_vwap)):
                 if kline_completed:
                     return {
                         'symbol': symbol,
@@ -2737,7 +2737,7 @@ def backtest_strategy_5m(symbol, days=14):
             rsi = row['RSI']
             macd = row['MACD']; macd_sig = row['MACD_SIGNAL']
             vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
-            volume_ok = (vol_ma20 is None) or (row['volume'] >= 0.8 * vol_ma20)
+            volume_ok = (vol_ma20 is None) or (row['volume'] >= 0.7 * vol_ma20)
             close = row['close']; open_ = row['open']
             vwap_bias = abs(close - vwap) / vwap > 0.001
             is_bullish = close > open_; is_bearish = close < open_
