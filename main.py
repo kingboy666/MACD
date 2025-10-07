@@ -109,6 +109,10 @@ MACD_FAST = 8                             # MACD快线周期
 MACD_SLOW = 21                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
+# Bollinger Bands配置
+BB_PERIOD = 20
+BB_STD = 2.0  # 震荡可调为1.5
+
 # ATR动态止盈止损配置
 USE_ATR_DYNAMIC_STOPS = True                 # 启用ATR动态止盈止损
 ATR_PERIOD = 14                              # ATR计算周期
@@ -119,7 +123,7 @@ ATR_TRAILING_CALLBACK_MULTIPLIER = 1.0      # 移动止盈回调倍数
 ATR_MIN_MULTIPLIER = 1.0                    # ATR最小倍数
 ATR_MAX_MULTIPLIER = 5.0                    # ATR最大倍数
 
-# ADX配置（已移除）
+# ADX配置（用于震荡识别，阈值20）
 ADX_TREND_THRESHOLD = 20
 
 # 风险管理配置
@@ -263,6 +267,30 @@ def get_account_info():
         log_message("ERROR", f"获取账户信息失败: {str(e)}")
         return None
 
+def calculate_adx(high, low, close, period=14):
+    try:
+        plus_dm = (high.diff()).clip(lower=0)
+        minus_dm = (-low.diff()).clip(lower=0)
+        # 仅保留有效方向动量
+        plus_dm[high.diff() < low.diff()] = 0
+        minus_dm[low.diff() < high.diff()] = 0
+
+        tr1 = (high - low)
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+
+        atr = tr.rolling(window=period).mean()
+
+        plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr).replace([np.inf, -np.inf], np.nan)
+        minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr).replace([np.inf, -np.inf], np.nan)
+
+        dx = (100 * (plus_di - minus_di).abs() / (plus_di + minus_di)).replace([np.inf, -np.inf], np.nan)
+        adx = dx.rolling(window=period).mean()
+        return adx
+    except Exception:
+        return pd.Series([np.nan] * len(close))
+
 def process_klines(ohlcv):
     """处理K线数据并计算技术指标（VWAP日内重置、MACD(12,26,9)、RSI(14)、VWAP±1SD、成交量均值）"""
     try:
@@ -307,6 +335,11 @@ def process_klines(ohlcv):
             df['VWAP_DOWN'] = df['VWAP'] - df['VWAP_SD']
             # 成交量20期均值（用于过滤）
             df['vol_ma20'] = df['volume'].rolling(window=20, min_periods=5).mean()
+            # 计算布林带（震荡识别与上下轨）
+            try:
+                df = calculate_bb(df)
+            except Exception as e:
+                log_message("WARNING", f"布林带计算失败: {str(e)}")
         except Exception as e:
             log_message("WARNING", f"VWAP/RSI/成交量计算失败: {str(e)}")
         
@@ -319,7 +352,11 @@ def process_klines(ohlcv):
         
         # 已移除ADX计算
         # 占位以兼容旧代码路径，避免KeyError
-        df['ADX'] = 25
+        try:
+            df['ADX'] = calculate_adx(df['high'], df['low'], df['close'], period=14)
+        except Exception as e:
+            log_message("WARNING", f"ADX计算失败: {str(e)}")
+            df['ADX'] = 25
         
         return df
         
@@ -339,6 +376,22 @@ def calculate_rsi(close, period=14):
     return rsi
 
 
+
+# 计算布林带指标
+def calculate_bb(df: pd.DataFrame, period: int = BB_PERIOD, std: float = BB_STD) -> pd.DataFrame:
+    try:
+        mid = df['close'].rolling(period).mean()
+        std_dev = df['close'].rolling(period).std()
+        df['BB_mid'] = mid
+        df['BB_upper'] = mid + (std_dev * std)
+        df['BB_lower'] = mid - (std_dev * std)
+        # 防止除零
+        safe_mid = mid.replace(0, np.nan)
+        df['BB_width'] = ((df['BB_upper'] - df['BB_lower']) / safe_mid).ffill()
+    except Exception:
+        # 保持健壮性：失败不阻断流程
+        pass
+    return df
 
 def generate_signal(symbol):
     """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）"""
@@ -406,6 +459,89 @@ def generate_signal(symbol):
         
         # VWAP+MACD(12,26,9)+RSI(14) 日内策略（优先执行，含成交量过滤与阳/阴线收盘确认）
         current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
+
+        # 震荡模式判定：ADX<20 或 布林带宽度<2%
+        is_sideways = False
+        try:
+            bb_width = float(df['BB_width'].iloc[-1]) if 'BB_width' in df.columns else None
+            adx_val = float(df['ADX'].iloc[-1]) if 'ADX' in df.columns else None
+            bb_narrow = (bb_width is not None) and (bb_width < 0.02)
+            adx_sideways = (adx_val is not None) and (adx_val < ADX_TREND_THRESHOLD)
+            is_sideways = bb_narrow or adx_sideways
+        except Exception:
+            pass
+
+        if is_sideways:
+            close_ = float(df['close'].iloc[-1])
+            rsi_ = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
+            # 使用MACD交叉而非仅信号线方向
+            golden = (df['MACD'].iloc[-2] <= df['MACD_SIGNAL'].iloc[-2]) and (df['MACD'].iloc[-1] > df['MACD_SIGNAL'].iloc[-1])
+            death = (df['MACD'].iloc[-2] >= df['MACD_SIGNAL'].iloc[-2]) and (df['MACD'].iloc[-1] < df['MACD_SIGNAL'].iloc[-1])
+            bb_lower = float(df['BB_lower'].iloc[-1]) if 'BB_lower' in df.columns else None
+            bb_upper = float(df['BB_upper'].iloc[-1]) if 'BB_upper' in df.columns else None
+
+            # Long：触下轨 + RSI<40 + MACD金叉
+            if (bb_lower is not None and close_ <= bb_lower) and (rsi_ is not None and rsi_ < 40) and golden:
+                if kline_completed:
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': close_,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'VWAP': current_vwap,
+                        'RSI': rsi_,
+                        'confirmation_type': 'BB下轨反弹+RSI<40+MACD金叉+K线收盘',
+                        'strategy_type': 'sideways_bb'
+                    }
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': close_,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'VWAP': current_vwap,
+                        'RSI': rsi_,
+                        'confirmation_type': 'BB下轨反弹+RSI<40+MACD金叉+等待K线收盘',
+                        'strategy_type': 'sideways_bb',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining,
+                        'kline_end_time': current_kline_end / 1000.0
+                    }
+
+            # Short：触上轨 + RSI>60 + MACD死叉
+            if (bb_upper is not None and close_ >= bb_upper) and (rsi_ is not None and rsi_ > 60) and death:
+                if kline_completed:
+                    return {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': close_,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'VWAP': current_vwap,
+                        'RSI': rsi_,
+                        'confirmation_type': 'BB上轨回落+RSI>60+MACD死叉+K线收盘',
+                        'strategy_type': 'sideways_bb'
+                    }
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    return {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': close_,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'VWAP': current_vwap,
+                        'RSI': rsi_,
+                        'confirmation_type': 'BB上轨回落+RSI>60+MACD死叉+等待K线收盘',
+                        'strategy_type': 'sideways_bb',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining,
+                        'kline_end_time': current_kline_end / 1000.0
+                    }
+        # 趋势模式继续走原VWAP逻辑
         current_rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
         volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
@@ -2332,6 +2468,14 @@ def check_positions():
                 vwap = float(df['VWAP'].iloc[-1]) if 'VWAP' in df.columns else None
                 rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
                 atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else None
+                # 震荡平仓：价格回到BB中轨±0.5%
+                try:
+                    bb_mid = float(df['BB_mid'].iloc[-1]) if 'BB_mid' in df.columns else None
+                    if bb_mid and (abs(last_close - bb_mid) / bb_mid < 0.005):
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 震荡平仓：回到BB中轨±0.5% 全平")
+                except Exception:
+                    pass
 
                 # MACD背离检测（简化版）：价格创新高/低但DIFF未同步创新高/低，幅度>5%
                 def has_bearish_divergence(series_price, series_diff):
@@ -2577,6 +2721,20 @@ def backtest_strategy_5m(symbol, days=14):
                     # 退出
                     exit_price = close
                     pnl = (exit_price - entry_price) if side == 'long' else (entry_price - exit_price)
+
+                    # Funding费用模拟：0.01%/8h，按持仓时长线性扣减
+                    try:
+                        funding_rate = 0.0001  # 0.01%
+                        # 计算持仓时长（小时）
+                        et = entry_time
+                        if not isinstance(et, (pd.Timestamp, datetime)):
+                            et = pd.to_datetime(et) if et is not None else current['timestamp']
+                        hold_hours = (current['timestamp'] - et).total_seconds() / 3600.0 if et else 0.0
+                        size = 1.0  # 简化按单位仓位扣减，可根据实际 size/equity 替换
+                        pnl -= funding_rate * (hold_hours / 8.0) * size
+                    except Exception:
+                        pass
+
                     pnl *= DEFAULT_LEVERAGE  # 杠杆模拟
                     fee_rate = 0.0005  # 每侧手续费（约0.05%）
                     slippage_rate = 0.0005  # 滑点成本（约0.05%）
