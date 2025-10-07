@@ -7,6 +7,8 @@ import time
 import json
 from dotenv import load_dotenv
 import os
+import smtplib
+from email.message import EmailMessage
 
 # 加载环境变量
 load_dotenv()
@@ -184,6 +186,69 @@ def log_message(level, message):
     utc8_timezone = timezone(timedelta(hours=8))
     timestamp = datetime.now(utc8_timezone).strftime('%Y-%m-%d %H:%M:%S')
     print(f"[{timestamp}] {level}: {message}")
+
+def notify_email(subject: str, body: str, to_addr: str = None):
+    """发送邮件通知（默认QQ SMTP），需在环境变量配置 SMTP_HOST/PORT/USER/PASS/SSL/EMAIL_TO"""
+    try:
+        host = os.getenv('SMTP_HOST', 'smtp.qq.com')
+        port = int(os.getenv('SMTP_PORT', '465'))
+        user = os.getenv('SMTP_USER')
+        pwd = os.getenv('SMTP_PASS')
+        use_ssl = os.getenv('SMTP_SSL', 'true').lower() in ['true','1','yes']
+        to = to_addr or os.getenv('EMAIL_TO') or user
+        if not all([host, port, user, pwd, to]):
+            log_message("WARNING", "邮件通知未配置完整，跳过")
+            return
+        msg = EmailMessage()
+        msg['Subject'] = subject
+        msg['From'] = user
+        msg['To'] = to
+        msg.set_content(body)
+        if use_ssl:
+            with smtplib.SMTP_SSL(host, port, timeout=10) as s:
+                s.login(user, pwd)
+                s.send_message(msg)
+        else:
+            with smtplib.SMTP(host, port, timeout=10) as s:
+                s.starttls()
+                s.login(user, pwd)
+                s.send_message(msg)
+    except Exception as e:
+        log_message("WARNING", f"邮件通知失败: {e}")
+
+def log_signal_overview(symbol, signal):
+    """输出信号详细概览：侧向、价格、强度、策略、RSI/ATR、确认类型、pending剩余时间"""
+    try:
+        side = signal.get('side')
+        price = signal.get('price')
+        strength = signal.get('signal_strength')
+        strat = signal.get('strategy_type')
+        rsi = signal.get('RSI')
+        atr = signal.get('atr_value')
+        confirm = signal.get('confirmation_type')
+        pending = bool(signal.get('kline_pending'))
+        time_remaining = signal.get('time_remaining')
+        line = f"{symbol} 信号: side={side}, price={price:.4f}, strength={strength}, strat={strat or 'NA'}"
+        if rsi is not None:
+            try: line += f", RSI={float(rsi):.1f}"
+            except: line += f", RSI={rsi}"
+        if atr is not None:
+            try: line += f", ATR={float(atr):.4f}"
+            except: line += f", ATR={atr}"
+        if confirm:
+            line += f", confirm={confirm}"
+        if pending:
+            try:
+                tr = float(time_remaining) if time_remaining is not None else None
+                line += f", pending剩余={tr:.0f}s" if tr is not None else ", pending"
+            except:
+                line += ", pending"
+        log_message("SIGNAL", line)
+    except Exception as e:
+        try:
+            log_message("SIGNAL", f"{symbol} 信号: {signal.get('side')} @ {signal.get('price')}")
+        except:
+            log_message("SIGNAL", f"{symbol} 信号: 概览输出异常 {e}")
 
 def test_api_connection():
     """测试交易所API连接"""
@@ -986,6 +1051,13 @@ def execute_trade(symbol, signal, signal_strength):
         
         if order:
             log_message("SUCCESS", f"{symbol} 交易成功: {side} {position_size} @ {price}")
+            try:
+                notify_email(
+                    f"{symbol} 下单成功",
+                    f"{'做多' if signal['side']=='long' else '做空'} {position_size:.6f} @ {price:.4f}\n策略: {signal.get('strategy_type','NA')}"
+                )
+            except Exception as e:
+                log_message("WARNING", f"下单邮件通知失败: {e}")
             # 成交后立即同步挂条件单（原子化保障）
             try:
                 ok_bracket = place_bracket_orders(symbol, signal['side'], position_size, price, signal.get('atr_value', 0))
@@ -1426,6 +1498,15 @@ def close_position(symbol, reason="手动平仓"):
             
             # 更新交易统计
             update_trade_stats(symbol, position['side'], pnl, entry_price, current_price)
+            try:
+                notify_email(
+                    f"{symbol} 平仓成功",
+                    f"{'平多' if position['side']=='long' else '平空'} {size:.6f} @ {current_price:.4f}
+PnL: {pnl:.4f}
+策略: {position.get('strategy_type','NA')}"
+                )
+            except Exception as e:
+                log_message("WARNING", f"平仓邮件通知失败: {e}")
             
             # 清理持仓记录
             del position_tracker['positions'][symbol]
@@ -1490,7 +1571,7 @@ def trading_loop():
                         # 生成交易信号
                         signal = generate_signal(symbol)
                         if signal:
-                            log_message("INFO", f"{symbol} 发现信号: {signal['side']} @ {signal['price']:.4f}")
+                            log_signal_overview(symbol, signal)
                             execute_trade(symbol, signal, signal['signal_strength'])
                         
                         time.sleep(1)  # 短暂延迟避免API限制
@@ -2561,7 +2642,7 @@ def enhanced_trading_loop():
                             if signal.get('signal_strength') == 'pending':
                                 # 信号处于pending状态，等待K线收盘
                                 log_message("DEBUG", f"{symbol} 信号等待K线收盘: {signal['side']} @ {signal['price']:.4f}, 剩余时间: {signal.get('time_remaining', 0):.0f}秒")
-                                
+                                log_signal_overview(symbol, signal)
                                 # 记录pending信号
                                 position_tracker['pending_signals'][symbol] = {
                                     'signal': signal,
@@ -2571,7 +2652,7 @@ def enhanced_trading_loop():
                                 
                             elif signal.get('signal_strength') in ['strong', 'medium', 'weak']:
                                 # 确认信号，执行交易
-                                log_message("INFO", f"{symbol} 发现确认信号: {signal['side']} @ {signal['price']:.4f}")
+                                log_signal_overview(symbol, signal)
                                 
                                 # 如果之前有pending信号，清除它
                                 if symbol in position_tracker['pending_signals']:
