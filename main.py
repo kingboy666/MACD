@@ -2437,7 +2437,7 @@ def check_positions():
 # =================================
 # 回测模块（统一为5m，使用相同入场/平仓规则）
 # =================================
-def backtest_strategy(symbol, days=14):
+def backtest_strategy_5m(symbol, days=14):
     """5m回测：VWAP+MACD+RSI 入场与平仓规则，返回交易记录与统计"""
     try:
         # 历史K线数量（5m，每天288根）
