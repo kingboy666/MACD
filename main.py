@@ -318,7 +318,7 @@ def process_klines(ohlcv):
             log_message("ERROR", f"MACD计算失败: {str(e)}")
             return None
         
-        # 计算VWAP(日内重置)与RSI(14) + VWAP标准差带 + 成交量均值
+        # 计算VWAP(日内重置)、RSI(14)、VWAP标准差带、成交量均值、布林带
         try:
             typical_price = (df['high'] + df['low'] + df['close']) / 3.0
             # 明确生成列，避免使用 Series.name=None 造成 KeyError
@@ -332,11 +332,6 @@ def process_klines(ohlcv):
             df['VWAP'] = (df['cum_vwap'] / safe_cum_volume).ffill()
             # RSI计算
             df['RSI'] = calculate_rsi(df['close'], period=14)
-        # 计算布林带（与实盘一致，用于震荡识别与回测逻辑）
-        try:
-            df = calculate_bb(df)
-        except Exception:
-            pass
             # VWAP标准差带（按日内重置）
             df['vwap_diff'] = (typical_price - df['VWAP'])
             df['VWAP_SD'] = df.groupby('day')['vwap_diff'].transform(lambda s: s.rolling(window=20, min_periods=5).std())
@@ -344,7 +339,7 @@ def process_klines(ohlcv):
             df['VWAP_DOWN'] = df['VWAP'] - df['VWAP_SD']
             # 成交量20期均值（用于过滤）
             df['vol_ma20'] = df['volume'].rolling(window=20, min_periods=5).mean()
-            # 计算布林带（震荡识别与上下轨）
+            # 计算布林带（与实盘一致，用于震荡识别与回测逻辑）
             try:
                 df = calculate_bb(df)
             except Exception as e:
