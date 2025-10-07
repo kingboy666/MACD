@@ -109,6 +109,10 @@ MACD_FAST = 8                             # MACD快线周期
 MACD_SLOW = 21                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
+# 时间框架配置
+TIMEFRAME_MAIN = '5m'       # 主图
+TIMEFRAME_CONFIRM = '15m'   # 确认
+
 # Bollinger Bands配置
 BB_PERIOD = 20
 BB_STD = 2.0  # 震荡可调为1.5
@@ -396,7 +400,7 @@ def calculate_bb(df: pd.DataFrame, period: int = BB_PERIOD, std: float = BB_STD)
 def generate_signal(symbol):
     """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）"""
     try:
-        ohlcv = get_klines(symbol, '5m', limit=100)
+        ohlcv = get_klines(symbol, TIMEFRAME_MAIN, limit=100)
         if not ohlcv:
             return None
         
@@ -449,9 +453,24 @@ def generate_signal(symbol):
 
 
         
-        # 检查MACD金叉死叉
+        # 检查MACD金叉死叉（主图）
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
         death_cross = prev_macd >= prev_signal and current_macd < current_signal
+
+        # 15m确认框架：MACD金叉/死叉
+        macd_confirm_golden = False
+        macd_confirm_death = False
+        try:
+            ohlcv_confirm = get_klines(symbol, TIMEFRAME_CONFIRM, limit=50)
+            if ohlcv_confirm:
+                df_confirm = pd.DataFrame(ohlcv_confirm, columns=['timestamp','open','high','low','close','volume'])
+                macd_c, sig_c, _ = calculate_macd(df_confirm['close'], fast=MACD_FAST, slow=MACC_SLOW if 'MACC_SLOW' in globals() else MACD_SLOW, signal=MACD_SIGNAL)
+                prev_c = macd_c.iloc[-2]; prev_sig_c = sig_c.iloc[-2]
+                curr_c = macd_c.iloc[-1]; curr_sig_c = sig_c.iloc[-1]
+                macd_confirm_golden = (prev_c <= prev_sig_c and curr_c > curr_sig_c)
+                macd_confirm_death = (prev_c >= prev_sig_c and curr_c < curr_sig_c)
+        except Exception:
+            pass
         
         # 检查K线阴阳线
         is_bullish = current_close > current_open  # 阳线：收盘价大于开盘价
@@ -460,14 +479,23 @@ def generate_signal(symbol):
         # VWAP+MACD(12,26,9)+RSI(14) 日内策略（优先执行，含成交量过滤与阳/阴线收盘确认）
         current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
 
-        # 震荡模式判定：ADX<20 或 布林带宽度<2%
+        # 市场状态判定：BB宽度<2%为震荡；>2.5%为趋势
         is_sideways = False
+        is_trend = False
+        bb_width = None
+        adx_val = None
         try:
             bb_width = float(df['BB_width'].iloc[-1]) if 'BB_width' in df.columns else None
             adx_val = float(df['ADX'].iloc[-1]) if 'ADX' in df.columns else None
-            bb_narrow = (bb_width is not None) and (bb_width < 0.02)
-            adx_sideways = (adx_val is not None) and (adx_val < ADX_TREND_THRESHOLD)
-            is_sideways = bb_narrow or adx_sideways
+            is_sideways = (bb_width is not None) and (bb_width < 0.02)
+            is_trend = (bb_width is not None) and (bb_width > 0.025)
+        except Exception:
+            pass
+        # 显示市场状态识别结果
+        try:
+            bw_disp = f"{bb_width:.4f}" if isinstance(bb_width, float) else "NA"
+            adx_disp = f"{adx_val:.2f}" if isinstance(adx_val, float) else "NA"
+            log_message("INFO", f"{symbol} 市场状态识别: ADX={adx_disp}, BB宽度={bw_disp}, 震荡={is_sideways}, 趋势={is_trend}")
         except Exception:
             pass
 
@@ -480,14 +508,14 @@ def generate_signal(symbol):
             bb_lower = float(df['BB_lower'].iloc[-1]) if 'BB_lower' in df.columns else None
             bb_upper = float(df['BB_upper'].iloc[-1]) if 'BB_upper' in df.columns else None
 
-            # Long：触下轨 + RSI<40 + MACD金叉
-            if (bb_lower is not None and close_ <= bb_lower) and (rsi_ is not None and rsi_ < 40) and golden:
+            # Long：5m触下轨 + RSI<40 + VWAP>价 + 15m MACD金叉确认
+            if (bb_lower is not None and close_ <= bb_lower) and (rsi_ is not None and rsi_ < 40) and (current_vwap is not None and close_ > float(current_vwap)) and macd_confirm_golden:
                 if kline_completed:
                     return {
                         'symbol': symbol,
                         'side': 'long',
                         'price': close_,
-                        'signal_strength': 'strong',
+                        'signal_strength': 'medium',
                         'atr_value': atr_value,
                         'VWAP': current_vwap,
                         'RSI': rsi_,
@@ -511,8 +539,8 @@ def generate_signal(symbol):
                         'kline_end_time': current_kline_end / 1000.0
                     }
 
-            # Short：触上轨 + RSI>60 + MACD死叉
-            if (bb_upper is not None and close_ >= bb_upper) and (rsi_ is not None and rsi_ > 60) and death:
+            # Short：5m触上轨 + RSI>60 + VWAP<价
+            if (bb_upper is not None and close_ >= bb_upper) and (rsi_ is not None and rsi_ > 60) and (current_vwap is not None and close_ < float(current_vwap)):
                 if kline_completed:
                     return {
                         'symbol': symbol,
@@ -930,7 +958,8 @@ def execute_trade(symbol, signal, signal_strength):
                 'size': position_size,
                 'entry_price': price,
                 'timestamp': datetime.now(timezone(timedelta(hours=8))),
-                'atr_value': signal.get('atr_value', 0)
+                'atr_value': signal.get('atr_value', 0),
+            'strategy_type': signal.get('strategy_type', 'trend')
             }
             
             # 开仓后立即设置止盈止损（强制即时挂条件单 + 兜底重试与验证）
@@ -1025,7 +1054,16 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
         atr_used = float(df_last['ATR_14'].iloc[-1]) if df_last is not None and 'ATR_14' in df_last.columns else (atr_value or 0)
 
         base_symbol = symbol.split('-')[0].upper()
-        tp_mult = 1.5 if base_symbol == 'BNB' else 2.0  # BNB用1.5x ATR，其它2x
+        # 震荡模式识别（ADX<20 或 BB宽度<2%）
+        is_sideways = False
+        try:
+            bb_width = float(df_last['BB_width'].iloc[-1]) if df_last is not None and 'BB_width' in df_last.columns else None
+            adx_val = float(df_last['ADX'].iloc[-1]) if df_last is not None and 'ADX' in df_last.columns else None
+            is_sideways = ((bb_width is not None and bb_width < 0.02) or (adx_val is not None and adx_val < ADX_TREND_THRESHOLD))
+        except Exception:
+            is_sideways = False
+        # TP倍数（震荡缩紧为1.2x）
+        tp_mult = 1.5 if base_symbol == 'BNB' else (1.2 if is_sideways else 2.0)
 
         if signal == 'long':
             candidates = []
@@ -1061,6 +1099,18 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
                 stop_loss = price * 1.01
             if take_profit >= current_price:
                 take_profit = min(current_price * 0.98, price * 0.98)
+
+        # 震荡模式SL/TP收紧：SL=1.5x ATR, TP=1.2x ATR（若有ATR）
+        try:
+            if is_sideways and atr_used and atr_used > 0:
+                if signal == 'long':
+                    stop_loss = price - (atr_used * 1.5)
+                    take_profit = price + (atr_used * 1.2)
+                else:
+                    stop_loss = price + (atr_used * 1.5)
+                    take_profit = price - (atr_used * 1.2)
+        except Exception:
+            pass
 
         log_message("DEBUG", f"{symbol} {signal} SL/TP: entry={price:.4f}, vwap={last_vwap if last_vwap else 0:.4f}, atr={atr_used:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f}")
         return {'stop_loss': stop_loss, 'take_profit': take_profit}
@@ -2468,12 +2518,26 @@ def check_positions():
                 vwap = float(df['VWAP'].iloc[-1]) if 'VWAP' in df.columns else None
                 rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
                 atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else None
-                # 震荡平仓：价格回到BB中轨±0.5%
+                # 震荡平仓：价格回到BB中轨±0.5% 或 15m反转
                 try:
                     bb_mid = float(df['BB_mid'].iloc[-1]) if 'BB_mid' in df.columns else None
-                    if bb_mid and (abs(last_close - bb_mid) / bb_mid < 0.005):
+                    # 15m反转确认
+                    macd15_death = False
+                    macd15_golden = False
+                    try:
+                        ohlcv_c = get_klines(symbol, TIMEFRAME_CONFIRM, limit=50)
+                        if ohlcv_c:
+                            df_c = pd.DataFrame(ohlcv_c, columns=['timestamp','open','high','low','close','volume'])
+                            macd_c, sig_c, _ = calculate_macd(df_c['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+                            macd15_death = (macd_c.iloc[-2] >= sig_c.iloc[-2] and macd_c.iloc[-1] < sig_c.iloc[-1])
+                            macd15_golden = (macd_c.iloc[-2] <= sig_c.iloc[-2] and macd_c.iloc[-1] > sig_c.iloc[-1])
+                    except Exception:
+                        pass
+                    bb_mid_hit = (bb_mid and (abs(last_close - bb_mid) / bb_mid < 0.005))
+                    reversal15 = (pos['side'] == 'long' and macd15_death) or (pos['side'] == 'short' and macd15_golden)
+                    if bb_mid_hit or reversal15:
                         exit_now = True
-                        log_message("INFO", f"{symbol} 震荡平仓：回到BB中轨±0.5% 全平")
+                        log_message("INFO", f"{symbol} 平仓触发：{'BB中轨' if bb_mid_hit else '15m反转'} 全平")
                 except Exception:
                     pass
 
