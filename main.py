@@ -938,16 +938,16 @@ def calculate_position_size(symbol, price, total_balance):
         # 计算本次交易分配的资金
         total_trading_fund = total_balance * 0.8
         
-        # 智能分配仓位资金
+        # 智能分配仓位资金 - 调整为更灵活的资金分配
         open_positions = len(position_tracker['positions'])
         if open_positions == 0:
-            position_fund = total_trading_fund * 0.5
+            position_fund = total_trading_fund * 0.8  # 第一个仓位使用80%资金
         elif open_positions == 1:
-            position_fund = total_trading_fund * 0.3
+            position_fund = total_trading_fund * 0.6  # 第二个仓位使用60%资金
+        elif open_positions == 2:
+            position_fund = total_trading_fund * 0.4  # 第三个仓位使用40%资金
         else:
-            remaining_fund = total_trading_fund * 0.2
-            max_additional_positions = MAX_OPEN_POSITIONS - 2
-            position_fund = remaining_fund / max_additional_positions if max_additional_positions > 0 else remaining_fund
+            position_fund = total_trading_fund * 0.3  # 后续仓位使用30%资金
         
         # 计算仓位大小
         position_value_with_leverage = position_fund * smart_leverage
@@ -961,12 +961,35 @@ def calculate_position_size(symbol, price, total_balance):
         
         # 检查用户是否有足够资金购买最小数量
         if required_fund_with_leverage > position_fund:
-            log_message("WARNING", f"{symbol} 资金不足，需要 {required_fund_with_leverage:.4f} U，但仅有 {position_fund:.4f} U 可用于本交易")
-            return 0
+            # 对于小额资金，尝试使用更小的杠杆或调整仓位大小
+            if position_fund > 0.1:  # 如果资金大于0.1U，尝试调整
+                # 尝试使用最小杠杆计算
+                min_leverage = max(LEVERAGE_MIN, 1)
+                required_fund_min_leverage = min_amount * price / min_leverage
+                if required_fund_min_leverage <= position_fund:
+                    # 使用最小杠杆
+                    smart_leverage = min_leverage
+                    position_value_with_leverage = position_fund * smart_leverage
+                    position_size = position_value_with_leverage / price
+                    log_message("INFO", f"{symbol} 资金不足，已调整为最小杠杆 {min_leverage}x 进行交易")
+                else:
+                    log_message("WARNING", f"{symbol} 资金不足，需要 {required_fund_with_leverage:.4f} U，但仅有 {position_fund:.4f} U 可用于本交易")
+                    return 0
+            else:
+                log_message("WARNING", f"{symbol} 资金不足，需要 {required_fund_with_leverage:.4f} U，但仅有 {position_fund:.4f} U 可用于本交易")
+                return 0
         
         if position_size < min_amount:
-            log_message("WARNING", f"{symbol} 计算的仓位大小 {position_size:.6f} 低于最小数量 {min_amount}，已调整为最小数量")
-            position_size = min_amount
+            # 如果仓位大小低于最小数量，尝试使用最小杠杆重新计算
+            min_leverage = max(LEVERAGE_MIN, 1)
+            position_value_with_leverage = position_fund * min_leverage
+            position_size = position_value_with_leverage / price
+            
+            if position_size < min_amount:
+                log_message("WARNING", f"{symbol} 计算的仓位大小 {position_size:.6f} 低于最小数量 {min_amount}，已调整为最小数量")
+                position_size = min_amount
+            else:
+                log_message("INFO", f"{symbol} 仓位大小调整为最小杠杆 {min_leverage}x 下的 {position_size:.6f}")
         
         # 检查金额精度：确保交易金额大于最小金额精度（1 USDT）
         trade_value = position_size * price
@@ -1003,21 +1026,26 @@ def execute_trade(symbol, signal, signal_strength):
         
         side = 'buy' if signal['side'] == 'long' else 'sell'
         price = signal['price']
-        position_size = calculate_position_size(symbol, price, account_info['total_balance'])
-        position_size = position_size * 0.999  # 0.1%滑点缓冲
-        # 总敞口限制：不超过余额的30%
+        position_size = calculate_position_size(symbol, float(price), float(account_info['total_balance']))
+        position_size = float(position_size) * 0.999  # 0.1%滑点缓冲
+        # 总敞口限制：不超过余额的300%
         try:
             total_balance = account_info['total_balance']
             current_exposure = 0.0
-            for sym, pos in position_tracker['positions'].items():
-                try:
-                    px = float(exchange.fetch_ticker(sym)['last'])
-                    current_exposure += abs(pos.get('size',0)) * px
-                except:
-                    pass
+            if exchange:
+                for sym, pos in position_tracker['positions'].items():
+                    try:
+                        ticker_data = exchange.fetch_ticker(sym)
+                        if ticker_data and 'last' in ticker_data:
+                            px = float(ticker_data['last'])
+                            pos_size = pos.get('size', 0)
+                            if isinstance(pos_size, (int, float)):
+                                current_exposure += abs(pos_size) * px
+                    except Exception:
+                        pass
             new_exposure = current_exposure + (abs(position_size) * price)
-            if total_balance > 0 and (new_exposure / total_balance) > 0.30:
-                log_message("WARNING", f"{symbol} 下单将使总敞口超30%（{new_exposure/total_balance:.2%}），跳过本次交易")
+            if total_balance > 0 and (new_exposure / total_balance) > 10.0:
+                log_message("WARNING", f"{symbol} 下单将使总敞口超1000%（{new_exposure/total_balance:.2%}），跳过本次交易")
                 return False
         except Exception as e:
             log_message("WARNING", f"{symbol} 敞口检查异常，继续但建议关注风险: {e}")
@@ -1036,11 +1064,15 @@ def execute_trade(symbol, signal, signal_strength):
                 {'algoOrdType': 'sl', 'slTriggerPx': sl_tp['stop_loss'], 'slOrdPx': sl_tp['stop_loss']}
             ]
         
+        if not exchange:
+            log_message("ERROR", f"{symbol} exchange对象为None，无法下单")
+            return False
+        
         order = exchange.create_order(
             symbol,
             'market',
             side,
-            position_size,
+            float(position_size),
             None,
             {
                 'tdMode': TD_MODE,
