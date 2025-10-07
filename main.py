@@ -134,7 +134,7 @@ ADX_TREND_THRESHOLD = 20
 RISK_PER_TRADE = 0.02                        # 单笔风险2%
 MAX_OPEN_POSITIONS = 5                       # 最大持仓数
 COOLDOWN_PERIOD = 300                        # 冷却期5分钟
-MAX_DAILY_TRADES = 20                        # 每日最大交易次数
+MAX_DAILY_TRADES = 100                        # 每日最大交易次数
 
 # 主循环配置
 MAIN_LOOP_DELAY = 10                         # 主循环延迟30秒
@@ -397,6 +397,36 @@ def calculate_bb(df: pd.DataFrame, period: int = BB_PERIOD, std: float = BB_STD)
         pass
     return df
 
+def calculate_bb_rsi_1m_stops(symbol: str, entry_price: float, side: str):
+    """
+    1m BB+RSI窄带回归策略专用SL/TP：
+    - SL：BB外0.5%缓冲（long: BB_lower - 0.5%*close；short: BB_upper + 0.5%*close）
+    - TP：BB中轨
+    """
+    try:
+        ohlcv = get_klines(symbol, '1m', limit=60)
+        if not ohlcv:
+            return None
+        df = process_klines(ohlcv)
+        if df is None or len(df) < 20 or 'BB_mid' not in df.columns:
+            return None
+        close = float(df['close'].iloc[-1])
+        bb_mid = float(df['BB_mid'].iloc[-1])
+        bb_upper = float(df['BB_upper'].iloc[-1])
+        bb_lower = float(df['BB_lower'].iloc[-1])
+
+        if side == 'long':
+            stop_loss = max(0.0, bb_lower - (close * 0.005))
+            take_profit = bb_mid
+        else:
+            stop_loss = bb_upper + (close * 0.005)
+            take_profit = bb_mid
+
+        return {'stop_loss': stop_loss, 'take_profit': take_profit}
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 1m BB+RSI 计算SL/TP失败: {e}")
+        return None
+
 def generate_signal(symbol):
     """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）"""
     try:
@@ -500,6 +530,82 @@ def generate_signal(symbol):
             pass
 
         if is_sideways:
+            # 先应用 1m BB(20,1.5SD) + RSI(14) 窄带回归策略
+            try:
+                ohlcv_1m = get_klines(symbol, '1m', limit=120)
+                if ohlcv_1m:
+                    df1m = process_klines(ohlcv_1m)
+                    if df1m is not None and len(df1m) >= 30 and 'BB_mid' in df1m.columns:
+                        c1 = float(df1m['close'].iloc[-1])
+                        r1 = float(df1m['RSI'].iloc[-1]) if 'RSI' in df1m.columns else None
+                        bb_l1 = float(df1m['BB_lower'].iloc[-1])
+                        bb_u1 = float(df1m['BB_upper'].iloc[-1])
+                        bb_m1 = float(df1m['BB_mid'].iloc[-1])
+
+                        # 1m K线收盘确认
+                        k1 = ohlcv_1m[-1]
+                        k1_start = k1[0]; k1_end = k1_start + 60 * 1000
+                        now_ms = int(time.time() * 1000)
+                        k1_completed = now_ms >= k1_end
+
+                        # Long：触BB下轨 + RSI<30
+                        if (c1 <= bb_l1 * 1.0000) and (r1 is not None and r1 < 30):
+                            if k1_completed:
+                                return {
+                                    'symbol': symbol,
+                                    'side': 'long',
+                                    'price': c1,
+                                    'signal_strength': 'strong',
+                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                                    'RSI': r1,
+                                    'confirmation_type': '1m触下轨+RSI<30+K线收盘',
+                                    'strategy_type': 'bb_rsi_1m'
+                                }
+                            else:
+                                return {
+                                    'symbol': symbol,
+                                    'side': 'long',
+                                    'price': c1,
+                                    'signal_strength': 'pending',
+                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                                    'RSI': r1,
+                                    'confirmation_type': '1m触下轨+RSI<30+等待K线收盘',
+                                    'strategy_type': 'bb_rsi_1m',
+                                    'kline_pending': True,
+                                    'time_remaining': (k1_end - now_ms) / 1000.0,
+                                    'kline_end_time': k1_end / 1000.0
+                                }
+
+                        # Short：触BB上轨 + RSI>70
+                        if (c1 >= bb_u1 * 1.0000) and (r1 is not None and r1 > 70):
+                            if k1_completed:
+                                return {
+                                    'symbol': symbol,
+                                    'side': 'short',
+                                    'price': c1,
+                                    'signal_strength': 'strong',
+                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                                    'RSI': r1,
+                                    'confirmation_type': '1m触上轨+RSI>70+K线收盘',
+                                    'strategy_type': 'bb_rsi_1m'
+                                }
+                            else:
+                                return {
+                                    'symbol': symbol,
+                                    'side': 'short',
+                                    'price': c1,
+                                    'signal_strength': 'pending',
+                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                                    'RSI': r1,
+                                    'confirmation_type': '1m触上轨+RSI>70+等待K线收盘',
+                                    'strategy_type': 'bb_rsi_1m',
+                                    'kline_pending': True,
+                                    'time_remaining': (k1_end - now_ms) / 1000.0,
+                                    'kline_end_time': k1_end / 1000.0
+                                }
+            except Exception:
+                pass
+
             close_ = float(df['close'].iloc[-1])
             rsi_ = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
             # 使用MACD交叉而非仅信号线方向
@@ -1904,7 +2010,15 @@ def setup_missing_stop_orders(position, symbol):
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
         
         # 根据策略类型计算不同的止盈止损参数
-        if strategy_type == 'oscillation':
+        if strategy_type == 'bb_rsi_1m':
+            # 1m BB+RSI窄带回归：SL=BB外0.5%，TP=BB中轨
+            sltp = calculate_bb_rsi_1m_stops(symbol, entry_price, side)
+            if not sltp:
+                return False
+            stop_loss = sltp['stop_loss']
+            take_profit = sltp['take_profit']
+            log_message("DEBUG", f"{symbol} 1m BB+RSI 止盈止损: 入场={entry_price:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f}")
+        elif strategy_type == 'oscillation':
             # 震荡策略：更紧的止损，更小的目标
             if USE_ATR_DYNAMIC_STOPS and atr and atr > 0:
                 # 震荡策略使用更小的ATR倍数
@@ -2207,7 +2321,19 @@ def get_performance_report():
 def place_bracket_orders(symbol, side, size, entry_price, atr_value=0):
     """同步挂条件止盈止损，记录订单ID到 order_tracking"""
     try:
-        sl_tp = calculate_stop_loss_take_profit(symbol, entry_price, side, atr_value or 0)
+        # 若为1m BB+RSI策略，优先使用专用SL/TP
+        strategy_type = None
+        try:
+            pos = position_tracker['positions'].get(symbol)
+            strategy_type = pos.get('strategy_type') if pos else None
+        except Exception:
+            strategy_type = None
+
+        if strategy_type == 'bb_rsi_1m':
+            sl_tp = calculate_bb_rsi_1m_stops(symbol, entry_price, side)
+        else:
+            sl_tp = calculate_stop_loss_take_profit(symbol, entry_price, side, atr_value or 0)
+
         if not sl_tp:
             return False
         pos_side = 'long' if side == 'long' else 'short'
@@ -2502,6 +2628,40 @@ def check_positions():
             return
         for symbol, pos in list(position_tracker['positions'].items()):
             try:
+                # 1m BB+RSI策略专用平仓规则（优先处理）
+                if pos.get('strategy_type') == 'bb_rsi_1m':
+                    ohlcv_1m = get_klines(symbol, '1m', limit=120)
+                    if ohlcv_1m:
+                        df1m = process_klines(ohlcv_1m)
+                        if df1m is not None and len(df1m) >= 30 and 'BB_mid' in df1m.columns:
+                            last_close_1m = float(df1m['close'].iloc[-1])
+                            bb_mid_1m = float(df1m['BB_mid'].iloc[-1])
+                            rsi_1m = float(df1m['RSI'].iloc[-1]) if 'RSI' in df1m.columns else None
+
+                            # 平仓：动态回中轨0.3%阈值
+                            mid_revert = (abs(last_close_1m - bb_mid_1m) / bb_mid_1m) < 0.003
+
+                            # RSI极值反转：long RSI>70平，short RSI<30平
+                            side = pos['side']
+                            rsi_revert = (side == 'long' and rsi_1m is not None and rsi_1m > 70) or (side == 'short' and rsi_1m is not None and rsi_1m < 30)
+
+                            # 时间>3min强制平
+                            force_time = False
+                            try:
+                                et = pos.get('timestamp')
+                                if et:
+                                    from datetime import datetime as dt
+                                    now_ = dt.now(timezone(timedelta(hours=8)))
+                                    force_time = (now_ - et).total_seconds() > 180
+                            except Exception:
+                                pass
+
+                            if mid_revert or rsi_revert or force_time:
+                                reason = "BB中轨0.3%回归" if mid_revert else ("RSI极值反转" if rsi_revert else "超过3分钟强制平")
+                                close_position(symbol, f"1m BB+RSI {reason}")
+                                # 进入下一循环项
+                                continue
+
                 # 拉取最新5m数据
                 ohlcv = get_klines(symbol, '5m', limit=120)
                 if not ohlcv:
