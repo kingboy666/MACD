@@ -286,6 +286,31 @@ def get_klines(symbol, timeframe, limit=100):
         log_message("ERROR", f"获取 {symbol} K线数据失败: {str(e)}")
         return None
 
+def get_klines_data(symbol, timeframe='5m', limit=100):
+    """获取K线数据并转换为智能网格策略所需格式"""
+    try:
+        ohlcv = get_klines(symbol, timeframe, limit)
+        if not ohlcv:
+            return None
+        
+        # 转换为DataFrame格式
+        import pandas as pd
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        
+        # 转换为智能网格策略所需格式
+        data = {
+            'high': df['high'].tolist(),
+            'low': df['low'].tolist(), 
+            'close': df['close'].tolist(),
+            'volume': df['volume'].tolist(),
+            'timestamp': df['timestamp'].tolist()
+        }
+        
+        return data
+    except Exception as e:
+        log_message("ERROR", f"转换 {symbol} K线数据失败: {str(e)}")
+        return None
+
 def get_smart_leverage(symbol, account_balance, atr_percentage=None):
     """根据币种、账户与波动性动态计算杠杆，最大不超过20x"""
     try:
@@ -522,9 +547,9 @@ def generate_signal(symbol):
                 # 需要先初始化exchange对象
                 exchange = initialize_exchange()
                 if exchange:
-                    grid_strategy = SmartGridStrategy(exchange, symbol)
-                    grid_signal = grid_strategy.run_strategy()
-                    if grid_signal:
+                    grid_strategy = SmartGridStrategy()
+                    grid_signal = grid_strategy.run_strategy(symbol, get_klines_data(symbol, '5m'))
+                    if grid_signal and grid_signal.get('side') in ['long', 'short']:
                         log_message("INFO", f"{symbol} 智能网格策略生成信号: {grid_signal}")
                         return grid_signal
             except Exception as e:
