@@ -115,7 +115,7 @@ TIMEFRAME_CONFIRM = '15m'   # 确认
 
 # Bollinger Bands配置
 BB_PERIOD = 20
-BB_STD = 2.0  # 震荡可调为1.5
+BB_STD = 1.5  # 震荡更敏感
 
 # ATR动态止盈止损配置
 USE_ATR_DYNAMIC_STOPS = True                 # 启用ATR动态止盈止损
@@ -435,7 +435,7 @@ def generate_signal(symbol):
 
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 0.9 * vol_ma20)
         # 周末低量避开：周六/周日或当前量低于均值则暂停入场
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
@@ -509,7 +509,7 @@ def generate_signal(symbol):
             bb_upper = float(df['BB_upper'].iloc[-1]) if 'BB_upper' in df.columns else None
 
             # Long：5m触下轨 + RSI<40 + VWAP>价 + 15m MACD金叉确认
-            if (bb_lower is not None and close_ <= bb_lower) and (rsi_ is not None and rsi_ < 40) and (current_vwap is not None and close_ > float(current_vwap)) and macd_confirm_golden:
+            if (bb_lower is not None and close_ <= bb_lower * 1.001) and (rsi_ is not None and rsi_ < 40) and (current_vwap is not None and close_ > float(current_vwap)) and macd_confirm_golden:
                 if kline_completed:
                     return {
                         'symbol': symbol,
@@ -2737,7 +2737,7 @@ def backtest_strategy_5m(symbol, days=14):
             rsi = row['RSI']
             macd = row['MACD']; macd_sig = row['MACD_SIGNAL']
             vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
-            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.0 * vol_ma20)
+            volume_ok = (vol_ma20 is None) or (row['volume'] >= 0.9 * vol_ma20)
             close = row['close']; open_ = row['open']
             vwap_bias = abs(close - vwap) / vwap > 0.001
             is_bullish = close > open_; is_bearish = close < open_
