@@ -11,7 +11,7 @@ import os
 import smtplib
 from email.message import EmailMessage
 import sys
-import talib as ta
+import numpy as np
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -836,11 +836,36 @@ def generate_signal(symbol):
             df_30m = pd.DataFrame(ohlcv_30m, columns=['timestamp','open','high','low','close','volume'])
             
             # 计算技术指标
-            ema5 = ta.EMA(df_30m['close'], timeperiod=5)
-            ema10 = ta.EMA(df_30m['close'], timeperiod=10)
-            ema20 = ta.EMA(df_30m['close'], timeperiod=20)
-            atr_30m = ta.ATR(df_30m['high'], df_30m['low'], df_30m['close'], timeperiod=14)
-            adx = ta.ADX(df_30m['high'], df_30m['low'], df_30m['close'], timeperiod=14)
+            # 使用pandas计算EMA
+            ema5 = df_30m['close'].ewm(span=5, adjust=False).mean()
+            ema10 = df_30m['close'].ewm(span=10, adjust=False).mean()
+            ema20 = df_30m['close'].ewm(span=20, adjust=False).mean()
+            
+            # 计算ATR (Average True Range)
+            high_low = df_30m['high'] - df_30m['low']
+            high_close_prev = abs(df_30m['high'] - df_30m['close'].shift(1))
+            low_close_prev = abs(df_30m['low'] - df_30m['close'].shift(1))
+            true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+            atr_30m = true_range.rolling(window=14).mean()
+            
+            # 计算ADX (Average Directional Index)
+            # 计算+DM和-DM
+            up_move = df_30m['high'] - df_30m['high'].shift(1)
+            down_move = df_30m['low'].shift(1) - df_30m['low']
+            
+            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+            
+            # 计算TR
+            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
+            
+            # 计算+DI和-DI
+            plus_di = 100 * (plus_dm.rolling(window=14).mean() / tr.rolling(window=14).mean())
+            minus_di = 100 * (minus_dm.rolling(window=14).mean() / tr.rolling(window=14).mean())
+            
+            # 计算DX和ADX
+            dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+            adx = dx.rolling(window=14).mean()
             
             # 获取当前值
             ema5_current = ema5.iloc[-1] if not ema5.empty else None
