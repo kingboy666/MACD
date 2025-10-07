@@ -2,6 +2,7 @@ import ccxt
 import pandas as pd
 import traceback
 import numpy as np
+from typing import Optional
 from datetime import datetime, timedelta, timezone
 import time
 import json
@@ -208,7 +209,7 @@ def log_message(level, message):
     
     print(f"[{timestamp}] {safe_level}: {safe_message}")
 
-def notify_email(subject: str, body: str, to_addr: str | None = None):
+def notify_email(subject: str, body: str, to_addr: Optional[str] = None):
     """发送邮件通知（默认QQ SMTP），需在环境变量配置 SMTP_HOST/PORT/USER/PASS/SSL/EMAIL_TO"""
     try:
         host = os.getenv('SMTP_HOST', 'smtp.qq.com')
@@ -1129,7 +1130,9 @@ def execute_trade(symbol, signal, signal_strength):
         price = signal['price']
         position_size = calculate_position_size(symbol, float(price), float(account_info['total_balance']))
         position_size = float(position_size) * 0.999  # 0.1%滑点缓冲
-        # 总敞口限制：不超过余额的300%
+        # 移除总敞口限制（允许无限制敞口）
+        # 原代码：总敞口限制不超过余额的300%
+        # 现在移除限制，允许更大的交易规模
         try:
             total_balance = account_info['total_balance']
             current_exposure = 0.0
@@ -1147,11 +1150,10 @@ def execute_trade(symbol, signal, signal_strength):
                     except Exception:
                         pass
             new_exposure = current_exposure + (abs(position_size) * price)
-            if total_balance > 0 and (new_exposure / total_balance) > 3.0:
-                log_message("WARNING", f"{symbol} 下单将使总敞口超300%（{new_exposure/total_balance:.2%}），跳过本次交易")
-                return False
+            # 移除敞口限制检查，允许任何规模的交易
+            log_message("INFO", f"{symbol} 当前敞口: {new_exposure/total_balance:.2%} (无限制)")
         except Exception as e:
-            log_message("WARNING", f"{symbol} 敞口检查异常，继续但建议关注风险: {e}")
+            log_message("WARNING", f"{symbol} 敞口计算异常: {e}")
         
         if position_size <= 0:
             log_message("WARNING", f"{symbol} 计算仓位大小为0，跳过交易")
