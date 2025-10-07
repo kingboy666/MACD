@@ -2531,6 +2531,7 @@ def backtest_strategy_5m(symbol, days=14):
             vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
             volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.1 * vol_ma20)
             close = row['close']; open_ = row['open']
+            vwap_bias = abs(close - vwap) / vwap > 0.001
             is_bullish = close > open_; is_bearish = close < open_
             atr = row['ATR_14'] if 'ATR_14' in df.columns else None
 
@@ -2587,9 +2588,9 @@ def backtest_strategy_5m(symbol, days=14):
 
             # 入场逻辑（仅在无持仓）
             if not position and volume_ok:
-                if golden and (close > vwap) and (rsi > 45) and is_bullish:
+                if golden and (close > vwap) and (rsi > 45) and vwap_bias and is_bullish:
                     position = {'side': 'long', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
-                elif death and (close < vwap) and (rsi < 55) and is_bearish:
+                elif death and (close < vwap) and (rsi < 55) and vwap_bias and is_bearish:
                     position = {'side': 'short', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
 
         # 统计
