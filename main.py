@@ -332,6 +332,11 @@ def process_klines(ohlcv):
             df['VWAP'] = (df['cum_vwap'] / safe_cum_volume).ffill()
             # RSI计算
             df['RSI'] = calculate_rsi(df['close'], period=14)
+        # 计算布林带（与实盘一致，用于震荡识别与回测逻辑）
+        try:
+            df = calculate_bb(df)
+        except Exception:
+            pass
             # VWAP标准差带（按日内重置）
             df['vwap_diff'] = (typical_price - df['VWAP'])
             df['VWAP_SD'] = df.groupby('day')['vwap_diff'].transform(lambda s: s.rolling(window=20, min_periods=5).std())
