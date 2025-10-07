@@ -40,6 +40,36 @@ def calculate_macd(close, fast=6, slow=16, signal=9):
     histogram = macd_line - signal_line
     return macd_line, signal_line, histogram
 
+def calculate_ema(close, period):
+    """计算EMA指标"""
+    return close.ewm(span=period).mean()
+
+def calculate_adx(high, low, close, period=14):
+    """计算ADX指标"""
+    # 计算真实波幅
+    tr1 = high - low
+    tr2 = abs(high - close.shift())
+    tr3 = abs(low - close.shift())
+    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+    
+    # 计算方向移动
+    up_move = high - high.shift()
+    down_move = low.shift() - low
+    
+    plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
+    minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
+    
+    # 计算方向指标
+    tr_ema = tr.ewm(span=period).mean()
+    plus_di = 100 * pd.Series(plus_dm, index=close.index).ewm(span=period).mean() / tr_ema
+    minus_di = 100 * pd.Series(minus_dm, index=close.index).ewm(span=period).mean() / tr_ema
+    
+    # 计算ADX
+    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
+    adx = dx.ewm(span=period).mean()
+    
+    return adx, plus_di, minus_di
+
 def calculate_atr(high, low, close, period=14):
     """计算ATR指标"""
     tr1 = high - low
@@ -129,8 +159,8 @@ MACD_SLOW = 21                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
 # 时间框架配置
-TIMEFRAME_MAIN = '5m'       # 主图
-TIMEFRAME_CONFIRM = '15m'   # 确认
+TIMEFRAME_MAIN = '30m'      # 主图 - 改为M30
+TIMEFRAME_CONFIRM = '1h'    # 确认 - 改为1小时
 
 # Bollinger Bands配置
 BB_PERIOD = 20
@@ -580,8 +610,9 @@ def calculate_bb_rsi_1m_stops(symbol: str, entry_price: float, side: str):
 def generate_signal(symbol):
     """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）
     同时包含智能网格策略"""
+    signals = []  # 统一收集所有策略的信号
     try:
-        # 首先检查是否为BTC/ETH，如果是则优先使用智能网格策略
+        # 首先检查是否为BTC/ETH，如果是则运行智能网格策略
         if symbol in ['BTC-USDT-SWAP', 'ETH-USDT-SWAP']:
             try:
                 # 需要先初始化exchange对象
@@ -591,7 +622,9 @@ def generate_signal(symbol):
                     grid_signal = grid_strategy.run_strategy(symbol, get_klines_data(symbol, '5m'))
                     if grid_signal and grid_signal.get('side') in ['long', 'short']:
                         log_message("INFO", f"{symbol} 智能网格策略生成信号: {grid_signal}")
-                        return grid_signal
+                        # 将网格信号添加到统一列表中，而不是直接返回
+                        grid_signal['strategy_type'] = 'smart_grid'
+                        signals.append(grid_signal)
             except Exception as e:
                 log_message("WARNING", f"{symbol} 智能网格策略执行失败: {str(e)}")
         
@@ -671,115 +704,91 @@ def generate_signal(symbol):
         # VWAP+MACD(12,26,9)+RSI(14) 日内策略（优先执行，含成交量过滤与阳/阴线收盘确认）
         current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
 
-        # 市场状态判定：BB宽度<2%为震荡；>2.5%为趋势
-        is_sideways = False
-        is_trend = False
-        bb_width = None
-        adx_val = None
+        # 并行执行所有策略，不再根据市场状态选择
+        signals = []
+        
+        # 策略1: 1m BB(20,1.5SD) + RSI(14) 窄带回归策略（任何市场状态都执行）
         try:
-            bb_width = float(df['BB_width'].iloc[-1]) if 'BB_width' in df.columns else None
-            adx_val = float(df['ADX'].iloc[-1]) if 'ADX' in df.columns else None
-            is_sideways = (bb_width is not None) and (bb_width < 0.02)
-            is_trend = (bb_width is not None) and (bb_width > 0.025)
-        except Exception:
-            pass
-        # 显示市场状态识别结果
+            ohlcv_1m = get_klines(symbol, '1m', limit=120)
+            if ohlcv_1m:
+                df1m = process_klines(ohlcv_1m)
+                if df1m is not None and len(df1m) >= 30 and 'BB_mid' in df1m.columns:
+                    c1 = float(df1m['close'].iloc[-1])
+                    r1 = float(df1m['RSI'].iloc[-1]) if 'RSI' in df1m.columns else None
+                    bb_l1 = float(df1m['BB_lower'].iloc[-1])
+                    bb_u1 = float(df1m['BB_upper'].iloc[-1])
+                    bb_m1 = float(df1m['BB_mid'].iloc[-1])
+
+                    # 1m K线收盘确认
+                    k1 = ohlcv_1m[-1]
+                    k1_start = k1[0]; k1_end = k1_start + 60 * 1000
+                    now_ms = int(time.time() * 1000)
+                    k1_completed = now_ms >= k1_end
+
+                    # Long：触BB下轨 + RSI<35 (灰区优化)
+                    if (c1 <= bb_l1 * 1.0000) and (r1 is not None and r1 < 35):
+                        signal_data = {
+                            'symbol': symbol,
+                            'side': 'long',
+                            'price': c1,
+                            'signal_strength': 'strong',
+                            'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                            'RSI': r1,
+                            'confirmation_type': '1m触下轨+RSI<30+K线收盘',
+                            'strategy_type': 'bb_rsi_1m'
+                        }
+                        if not k1_completed:
+                            signal_data.update({
+                                'signal_strength': 'pending',
+                                'confirmation_type': '1m触下轨+RSI<30+等待K线收盘',
+                                'kline_pending': True,
+                                'time_remaining': (k1_end - now_ms) / 1000.0,
+                                'kline_end_time': k1_end / 1000.0
+                            })
+                        signals.append(signal_data)
+
+                    # Short：触BB上轨 + RSI>65 (灰区优化)
+                    if (c1 >= bb_u1 * 1.0000) and (r1 is not None and r1 > 65):
+                        signal_data = {
+                            'symbol': symbol,
+                            'side': 'short',
+                            'price': c1,
+                            'signal_strength': 'strong',
+                            'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
+                            'RSI': r1,
+                            'confirmation_type': '1m触上轨+RSI>70+K线收盘',
+                            'strategy_type': 'bb_rsi_1m'
+                        }
+                        if not k1_completed:
+                            signal_data.update({
+                                'signal_strength': 'pending',
+                                'confirmation_type': '1m触上轨+RSI>70+等待K线收盘',
+                                'kline_pending': True,
+                                'time_remaining': (k1_end - now_ms) / 1000.0,
+                                'kline_end_time': k1_end / 1000.0
+                            })
+                        signals.append(signal_data)
+        except Exception as e:
+            log_message("WARNING", f"{symbol} 1m BB+RSI策略执行失败: {str(e)}")
+
+        # 策略2: 震荡市场布林带策略（任何市场状态都执行）
         try:
-            bw_disp = f"{bb_width:.4f}" if isinstance(bb_width, float) else "NA"
-            adx_disp = f"{adx_val:.2f}" if isinstance(adx_val, float) else "NA"
-            log_message("INFO", f"{symbol} 市场状态识别: ADX={adx_disp}, BB宽度={bw_disp}, 震荡={is_sideways}, 趋势={is_trend}")
-        except Exception:
-            pass
+            ohlcv_5m = get_klines(symbol, '5m', limit=100)
+            if ohlcv_5m:
+                df5m = process_klines(ohlcv_5m)
+                if df5m is not None and len(df5m) >= 50 and 'BB_lower' in df5m.columns:
+                    close_ = float(df5m['close'].iloc[-1])
+                    rsi_ = float(df5m['RSI'].iloc[-1]) if 'RSI' in df5m.columns else None
+                    # 使用MACD交叉而非仅信号线方向
+                    golden = (df5m['MACD'].iloc[-2] <= df5m['MACD_SIGNAL'].iloc[-2]) and (df5m['MACD'].iloc[-1] > df5m['MACD_SIGNAL'].iloc[-1])
+                    death = (df5m['MACD'].iloc[-2] >= df5m['MACD_SIGNAL'].iloc[-2]) and (df5m['MACD'].iloc[-1] < df5m['MACD_SIGNAL'].iloc[-1])
+                    bb_lower = float(df5m['BB_lower'].iloc[-1]) if 'BB_lower' in df5m.columns else None
+                    bb_upper = float(df5m['BB_upper'].iloc[-1]) if 'BB_upper' in df5m.columns else None
 
-        if is_sideways:
-            # 先应用 1m BB(20,1.5SD) + RSI(14) 窄带回归策略
-            try:
-                ohlcv_1m = get_klines(symbol, '1m', limit=120)
-                if ohlcv_1m:
-                    df1m = process_klines(ohlcv_1m)
-                    if df1m is not None and len(df1m) >= 30 and 'BB_mid' in df1m.columns:
-                        c1 = float(df1m['close'].iloc[-1])
-                        r1 = float(df1m['RSI'].iloc[-1]) if 'RSI' in df1m.columns else None
-                        bb_l1 = float(df1m['BB_lower'].iloc[-1])
-                        bb_u1 = float(df1m['BB_upper'].iloc[-1])
-                        bb_m1 = float(df1m['BB_mid'].iloc[-1])
-
-                        # 1m K线收盘确认
-                        k1 = ohlcv_1m[-1]
-                        k1_start = k1[0]; k1_end = k1_start + 60 * 1000
-                        now_ms = int(time.time() * 1000)
-                        k1_completed = now_ms >= k1_end
-
-                        # Long：触BB下轨 + RSI<35 (灰区优化)
-                        if (c1 <= bb_l1 * 1.0000) and (r1 is not None and r1 < 35):
-                            if k1_completed:
-                                return {
-                                    'symbol': symbol,
-                                    'side': 'long',
-                                    'price': c1,
-                                    'signal_strength': 'strong',
-                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
-                                    'RSI': r1,
-                                    'confirmation_type': '1m触下轨+RSI<30+K线收盘',
-                                    'strategy_type': 'bb_rsi_1m'
-                                }
-                            else:
-                                return {
-                                    'symbol': symbol,
-                                    'side': 'long',
-                                    'price': c1,
-                                    'signal_strength': 'pending',
-                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
-                                    'RSI': r1,
-                                    'confirmation_type': '1m触下轨+RSI<30+等待K线收盘',
-                                    'strategy_type': 'bb_rsi_1m',
-                                    'kline_pending': True,
-                                    'time_remaining': (k1_end - now_ms) / 1000.0,
-                                    'kline_end_time': k1_end / 1000.0
-                                }
-
-                        # Short：触BB上轨 + RSI>65 (灰区优化)
-                        if (c1 >= bb_u1 * 1.0000) and (r1 is not None and r1 > 65):
-                            if k1_completed:
-                                return {
-                                    'symbol': symbol,
-                                    'side': 'short',
-                                    'price': c1,
-                                    'signal_strength': 'strong',
-                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
-                                    'RSI': r1,
-                                    'confirmation_type': '1m触上轨+RSI>70+K线收盘',
-                                    'strategy_type': 'bb_rsi_1m'
-                                }
-                            else:
-                                return {
-                                    'symbol': symbol,
-                                    'side': 'short',
-                                    'price': c1,
-                                    'signal_strength': 'pending',
-                                    'atr_value': float(df1m['ATR_14'].iloc[-1]) if 'ATR_14' in df1m.columns else 0,
-                                    'RSI': r1,
-                                    'confirmation_type': '1m触上轨+RSI>70+等待K线收盘',
-                                    'strategy_type': 'bb_rsi_1m',
-                                    'kline_pending': True,
-                                    'time_remaining': (k1_end - now_ms) / 1000.0,
-                                    'kline_end_time': k1_end / 1000.0
-                                }
-            except Exception:
-                pass
-
-            close_ = float(df['close'].iloc[-1])
-            rsi_ = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
-            # 使用MACD交叉而非仅信号线方向
-            golden = (df['MACD'].iloc[-2] <= df['MACD_SIGNAL'].iloc[-2]) and (df['MACD'].iloc[-1] > df['MACD_SIGNAL'].iloc[-1])
-            death = (df['MACD'].iloc[-2] >= df['MACD_SIGNAL'].iloc[-2]) and (df['MACD'].iloc[-1] < df['MACD_SIGNAL'].iloc[-1])
-            bb_lower = float(df['BB_lower'].iloc[-1]) if 'BB_lower' in df.columns else None
-            bb_upper = float(df['BB_upper'].iloc[-1]) if 'BB_upper' in df.columns else None
-
-            # Long：5m触下轨 + RSI<40 + VWAP>价 + 15m MACD金叉确认
-            if (bb_lower is not None and close_ <= bb_lower * 1.0005) and (rsi_ is not None and rsi_ < 40) and (current_vwap is not None and close_ > float(current_vwap)) and macd_confirm_golden:
-                if kline_completed:
-                    return {
+                    # Long：5m触下轨 + RSI<40 + VWAP>价 + 15m MACD金叉确认
+                    if (bb_lower is not None and close_ <= bb_lower * 1.0005) and (rsi_ is not None and rsi_ < 40) and (current_vwap is not None and close_ > float(current_vwap)) and macd_confirm_golden:
+                        if kline_completed:
+                            signals.append({
                         'symbol': symbol,
                         'side': 'long',
                         'price': close_,
@@ -789,10 +798,10 @@ def generate_signal(symbol):
                         'RSI': rsi_,
                         'confirmation_type': 'BB下轨反弹+RSI<40+MACD金叉+K线收盘',
                         'strategy_type': 'sideways_bb'
-                    }
+                    })
                 else:
                     time_remaining = (current_kline_end - current_timestamp) / 1000
-                    return {
+                    signals.append({
                         'symbol': symbol,
                         'side': 'long',
                         'price': close_,
@@ -805,12 +814,12 @@ def generate_signal(symbol):
                         'kline_pending': True,
                         'time_remaining': time_remaining,
                         'kline_end_time': current_kline_end / 1000.0
-                    }
+                    })
 
             # Short：5m触上轨 + RSI>60 + VWAP<价
             if (bb_upper is not None and close_ >= bb_upper * 0.9995) and (rsi_ is not None and rsi_ > 60) and (current_vwap is not None and close_ < float(current_vwap)):
                 if kline_completed:
-                    return {
+                    signals.append({
                         'symbol': symbol,
                         'side': 'short',
                         'price': close_,
@@ -820,10 +829,10 @@ def generate_signal(symbol):
                         'RSI': rsi_,
                         'confirmation_type': 'BB上轨回落+RSI>60+MACD死叉+K线收盘',
                         'strategy_type': 'sideways_bb'
-                    }
+                    })
                 else:
                     time_remaining = (current_kline_end - current_timestamp) / 1000
-                    return {
+                    signals.append({
                         'symbol': symbol,
                         'side': 'short',
                         'price': close_,
@@ -836,198 +845,112 @@ def generate_signal(symbol):
                         'kline_pending': True,
                         'time_remaining': time_remaining,
                         'kline_end_time': current_kline_end / 1000.0
-                    }
-        # 趋势模式继续走原VWAP逻辑
-        current_rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
-        vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
-        # Funding过滤：正funding>0.03%时避免做多
-        try:
-            if not exchange:
-                return None
-            funding = exchange.fetch_funding_rate(symbol).get('fundingRate')
-            if funding is not None and funding > 0.0003 and golden_cross:
-                return None
-        except Exception:
-            pass
-        # 1h框架确认：多单需1小时MACD>0，空单需<0
-        h1_ok = True
-        try:
-            ohlcv_1h = get_klines(symbol, '1h', limit=100)
-            if ohlcv_1h:
-                df1h = pd.DataFrame(ohlcv_1h, columns=['timestamp','open','high','low','close','volume'])
-                macd_h, sig_h, _ = calculate_macd(df1h['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
-                macd_h_last = macd_h.iloc[-1]
-                if golden_cross:
-                    h1_ok = macd_h_last > 0
-                elif death_cross:
-                    h1_ok = macd_h_last < 0
-        except Exception:
-            h1_ok = True  # 兜底：若获取失败不阻断
-        
-        if current_vwap is not None and current_rsi is not None and volume_ok and h1_ok:
-            vwap_bias = abs(float(current_price) - float(current_vwap)) / float(current_vwap) > 0.002 if current_price and current_vwap else False
-            if golden_cross and (current_close > current_vwap) and vwap_bias and (current_rsi > 50) and is_bullish:
-                if kline_completed:
-                    return {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'strong',
-                        'atr_value': atr_value,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'VWAP': current_vwap,
-                        'RSI': current_rsi,
-                        'confirmation_type': 'VWAP+MACD金叉+RSI>50+K线收盘',
-                        'strategy_type': 'intraday_vwap_macd_rsi'
-                    }
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    return {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'pending',
-                        'atr_value': atr_value,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'VWAP': current_vwap,
-                        'RSI': current_rsi,
-                        'confirmation_type': 'VWAP+MACD金叉+RSI>50+等待K线收盘',
-                        'strategy_type': 'intraday_vwap_macd_rsi',
-                        'kline_pending': True,
-                        'time_remaining': time_remaining,
-                        'kline_end_time': current_kline_end / 1000.0
-                    }
-            elif death_cross and (current_close < current_vwap) and vwap_bias and (current_rsi < 50) and is_bearish:
-                if kline_completed:
-                    return {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'strong',
-                        'atr_value': atr_value,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'VWAP': current_vwap,
-                        'RSI': current_rsi,
-                        'confirmation_type': 'VWAP+MACD死叉+RSI<50+K线收盘',
-                        'strategy_type': 'intraday_vwap_macd_rsi'
-                    }
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    return {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'pending',
-                        'atr_value': atr_value,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'VWAP': current_vwap,
-                        'RSI': current_rsi,
-                        'confirmation_type': 'VWAP+MACD死叉+RSI<50+等待K线收盘',
-                        'strategy_type': 'intraday_vwap_macd_rsi',
-                        'kline_pending': True,
-                        'time_remaining': time_remaining,
-                        'kline_end_time': current_kline_end / 1000.0
-                    }
-
-        return None
-        
-        # 策略选择：根据ADX判断市场状态
-        if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情 - 使用MACD策略
-            # 严格信号确认：ADX显示趋势 + MACD交叉 + K线确认 + K线收盘确认
-            if golden_cross and is_bullish:
-                if kline_completed:
-                    signal = {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'strong',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'is_bullish': is_bullish,
-                        'confirmation_type': 'MACD金叉+阳线确认+ADX趋势+K线收盘',
-                        'strategy_type': 'trend'
-                    }
-                    log_message("DEBUG", f"{symbol} 趋势策略做多信号确认: ADX={current_adx:.2f}, 金叉确认, 阳线确认, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    # 不返回None，而是记录信号状态，等待K线收盘后重新检查
-                    return {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'pending',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'is_bullish': is_bullish,
-                        'confirmation_type': 'MACD金叉+阳线确认+ADX趋势+等待K线收盘',
-                        'strategy_type': 'trend',
-                        'kline_pending': True,
-                        'time_remaining': time_remaining
-                    }
-                
-            elif death_cross and is_bearish:
-                if kline_completed:
-                    signal = {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'strong',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'is_bearish': is_bearish,
-                        'confirmation_type': 'MACD死叉+阴线确认+ADX趋势+K线收盘',
-                        'strategy_type': 'trend'
-                    }
-                    log_message("DEBUG", f"{symbol} 趋势策略做空信号确认: ADX={current_adx:.2f}, 死叉确认, 阴线确认, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    # 不返回None，而是记录信号状态，等待K线收盘后重新检查
-                    return {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'pending',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'macd_value': current_macd,
-                        'signal_value': current_signal,
-                        'is_bearish': is_bearish,
-                        'confirmation_type': 'MACD死叉+阴线确认+ADX趋势+等待K线收盘',
-                        'strategy_type': 'trend',
-                        'kline_pending': True,
-                        'time_remaining': time_remaining
-                    }
+                    })
+    # M30 EMA交叉策略 - 完整结构化策略
+    # 获取30分钟K线数据
+    try:
+        ohlcv_30m = get_klines(symbol, '30m', limit=100)
+        if ohlcv_30m:
+            df_30m = pd.DataFrame(ohlcv_30m, columns=['timestamp','open','high','low','close','volume'])
             
-            # 如果没有符合条件的信号，返回None
-            if signal is None:
-                return None
-        
-
-        
-        else:  # 中等趋势强度 - 优先使用趋势策略
-            if golden_cross and is_bullish:
-                log_message("DEBUG", f"{symbol} 中等趋势做多信号: ADX={current_adx:.2f}, 金叉确认, 阳线确认")
-            elif death_cross and is_bearish:
-                log_message("DEBUG", f"{symbol} 中等趋势做空信号: ADX={current_adx:.2f}, 死叉确认, 阴线确认")
-        
-        return signal
-        
+            # 计算技术指标
+            ema5 = ta.EMA(df_30m['close'], timeperiod=5)
+            ema10 = ta.EMA(df_30m['close'], timeperiod=10)
+            ema20 = ta.EMA(df_30m['close'], timeperiod=20)
+            atr_30m = ta.ATR(df_30m['high'], df_30m['low'], df_30m['close'], timeperiod=14)
+            adx = ta.ADX(df_30m['high'], df_30m['low'], df_30m['close'], timeperiod=14)
+            
+            # 获取当前值
+            ema5_current = ema5.iloc[-1] if not ema5.empty else None
+            ema10_current = ema10.iloc[-1] if not ema10.empty else None
+            ema20_current = ema20.iloc[-1] if not ema20.empty else None
+            atr_30m_current = atr_30m.iloc[-1] if not atr_30m.empty else None
+            adx_current = adx.iloc[-1] if not adx.empty else None
+            
+            # 计算EMA斜率（趋势强度）
+            ema20_slope = (ema20.iloc[-1] - ema20.iloc[-2]) / ema20.iloc[-2] * 100 if len(ema20) >= 2 else 0
+            
+            # 交叉信号检测
+            ema5_prev = ema5.iloc[-2] if len(ema5) >= 2 else None
+            ema10_prev = ema10.iloc[-2] if len(ema10) >= 2 else None
+            golden_cross_30m = (ema5_prev <= ema10_prev and ema5_current > ema10_current)
+            death_cross_30m = (ema5_prev >= ema10_prev and ema5_current < ema10_current)
+            
+            # 趋势确认条件（多层过滤）
+            bullish_trend = (ema5_current > ema10_current and ema10_current > ema20_current and 
+                           (ema20_slope > 0.05 or (adx_current is not None and adx_current > 25)))
+            bearish_trend = (ema5_current < ema10_current and ema10_current < ema20_current and 
+                           (ema20_slope < -0.05 or (adx_current is not None and adx_current > 25)))
+            
+            # 冷却机制检查
+            last_trade_time = position_tracker['last_trade_time'].get(symbol, 0)
+            current_time = time.time()
+            cooldown_period = 3 * 30 * 60  # 3根M30 K线（90分钟）
+            in_cooldown = (current_time - last_trade_time) < cooldown_period
+            
+            # 波动性过滤（ATR/价格比率）
+            atr_ratio = atr_30m_current / current_price if atr_30m_current and current_price else 0
+            volatility_ok = 0.001 < atr_ratio < 0.05  # 过滤异常波动
+            
+            # 入场条件（完整结构化）
+            if golden_cross_30m and bullish_trend and kline_completed and not in_cooldown and volatility_ok:
+                # 计算动态止盈止损
+                tp_distance = 1.2 * atr_30m_current if atr_30m_current else 0
+                sl_distance = 0.8 * atr_30m_current if atr_30m_current else 0
+                
+                signals.append({
+                    'symbol': symbol,
+                    'side': 'long',
+                    'price': current_price,
+                    'signal_strength': 'strong',
+                    'atr_value': atr_30m_current,
+                    'ema5': ema5_current,
+                    'ema10': ema10_current,
+                    'ema20': ema20_current,
+                    'ema20_slope': ema20_slope,
+                    'adx_value': adx_current,
+                    'tp_distance': tp_distance,
+                    'sl_distance': sl_distance,
+                    'confirmation_type': 'EMA5/EMA10金叉+EMA20多头排列+ADX趋势确认+冷却过滤',
+                    'strategy_type': 'm30_ema_cross'
+                })
+                log_message("DEBUG", f"{symbol} M30 EMA交叉策略做多信号确认")
+                
+            elif death_cross_30m and bearish_trend and kline_completed and not in_cooldown and volatility_ok:
+                # 计算动态止盈止损
+                tp_distance = 1.2 * atr_30m_current if atr_30m_current else 0
+                sl_distance = 0.8 * atr_30m_current if atr_30m_current else 0
+                
+                signals.append({
+                    'symbol': symbol,
+                    'side': 'short',
+                    'price': current_price,
+                    'signal_strength': 'strong',
+                    'atr_value': atr_30m_current,
+                    'ema5': ema5_current,
+                    'ema10': ema10_current,
+                    'ema20': ema20_current,
+                    'ema20_slope': ema20_slope,
+                    'adx_value': adx_current,
+                    'tp_distance': tp_distance,
+                    'sl_distance': sl_distance,
+                    'confirmation_type': 'EMA5/EMA10死叉+EMA20空头排列+ADX趋势确认+冷却过滤',
+                    'strategy_type': 'm30_ema_cross'
+                })
+                log_message("DEBUG", f"{symbol} M30 EMA交叉策略做空信号确认")
+                
     except Exception as e:
-        log_message("ERROR", f"{symbol} 生成信号失败: {str(e)}")
+        log_message("ERROR", f"{symbol} M30 EMA策略执行失败: {str(e)}")
+    
+    # 返回所有收集到的信号
+    if signals:
+        return signals
+    else:
         return None
+
+except Exception as e:
+    log_message("ERROR", f"{symbol} 生成信号失败: {str(e)}")
+    return None
 
 def calculate_position_size(symbol, price, total_balance):
     """计算仓位大小"""
@@ -1160,14 +1083,42 @@ def execute_trade(symbol, signal, signal_strength):
             return False
         
         # 执行市价单（同时挂条件止盈止损）
-        sl_tp = calculate_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+        strategy_type = signal.get('strategy_type', '')
         attach_algo = []
-        if sl_tp:
-            # 同时附带止盈/止损条件单（OKX attachAlgoOrds）
-            attach_algo = [
-                {'algoOrdType': 'tp', 'tpTriggerPx': sl_tp['take_profit'], 'tpOrdPx': sl_tp['take_profit']},
-                {'algoOrdType': 'sl', 'slTriggerPx': sl_tp['stop_loss'], 'slOrdPx': sl_tp['stop_loss']}
-            ]
+        
+        # M30 EMA策略使用分批止盈
+        if strategy_type == 'm30_ema_cross':
+            # 使用分批止盈逻辑
+            sl_tp = calculate_m30_ema_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+            if sl_tp:
+                # 分批止盈：第一止盈点（50%仓位）
+                tp1_distance = sl_tp.get('tp1_distance', 0)
+                tp1_price = price + tp1_distance if signal['side'] == 'long' else price - tp1_distance
+                tp1_size = position_size * 0.5  # 50%仓位
+                
+                # 移动止盈：第二止盈点（剩余50%仓位）
+                tp2_distance = sl_tp.get('tp2_distance', 0)
+                tp2_price = price + tp2_distance if signal['side'] == 'long' else price - tp2_distance
+                tp2_size = position_size * 0.5  # 剩余50%仓位
+                
+                # 止损单
+                sl_distance = sl_tp.get('sl_distance', 0)
+                sl_price = price - sl_distance if signal['side'] == 'long' else price + sl_distance
+                
+                attach_algo = [
+                    {'algoOrdType': 'tp', 'tpTriggerPx': tp1_price, 'tpOrdPx': tp1_price, 'sz': tp1_size},
+                    {'algoOrdType': 'tp', 'tpTriggerPx': tp2_price, 'tpOrdPx': tp2_price, 'sz': tp2_size},
+                    {'algoOrdType': 'sl', 'slTriggerPx': sl_price, 'slOrdPx': sl_price}
+                ]
+                log_message("INFO", f"{symbol} M30 EMA策略使用分批止盈: TP1={tp1_price:.4f}(50%), TP2={tp2_price:.4f}(50%), SL={sl_price:.4f}")
+        else:
+            # 其他策略使用标准止盈止损
+            sl_tp = calculate_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+            if sl_tp:
+                attach_algo = [
+                    {'algoOrdType': 'tp', 'tpTriggerPx': sl_tp['take_profit'], 'tpOrdPx': sl_tp['take_profit']},
+                    {'algoOrdType': 'sl', 'slTriggerPx': sl_tp['stop_loss'], 'slOrdPx': sl_tp['stop_loss']}
+                ]
         
         if not exchange:
             log_message("ERROR", f"{symbol} exchange对象为None，无法下单")
@@ -1269,15 +1220,28 @@ def execute_trade(symbol, signal, signal_strength):
                 log_message("WARNING", f"{symbol} 条件单即时验证异常: {e}")
             
             # 记录持仓
-            position_tracker['positions'][symbol] = {
+            position_key = f"{symbol}_{signal['side']}"
+            position_data = {
                 'symbol': symbol,
                 'side': signal['side'],
                 'size': position_size,
                 'entry_price': price,
                 'timestamp': datetime.now(timezone(timedelta(hours=8))),
                 'atr_value': signal.get('atr_value', 0),
-            'strategy_type': signal.get('strategy_type', 'trend')
+                'strategy_type': signal.get('strategy_type', 'trend'),
+                'strategy_name': signal.get('strategy_name', '')
             }
+            
+            # M30 EMA策略特殊处理：添加分批止盈跟踪信息
+            if signal.get('strategy_name') == 'm30_ema_cross':
+                position_data.update({
+                    'tp1_reached': False,
+                    'tp1_price': 0,
+                    'remaining_size': position_size,
+                    'trailing_stop_activated': False
+                })
+            
+            position_tracker['positions'][position_key] = position_data
             
             # 开仓后立即设置止盈止损（强制即时挂条件单 + 兜底重试与验证）
             # 立即计算并下条件单，避免延迟
@@ -1359,8 +1323,19 @@ def execute_trade(symbol, signal, signal_strength):
         log_message("ERROR", f"{symbol} 执行交易失败: {str(e)}")
         return False
 
-def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
-    """计算止损止盈价格（静态规则：VWAP保护 + 入场K线极值±0.5% + ATR固定倍数；BNB使用1.5x ATR TP）"""
+def calculate_stop_loss_take_profit(symbol, price, signal, atr_value, strategy_type="default"):
+    """计算止损止盈价格 - 支持多种策略类型"""
+    try:
+        if strategy_type == "m30_ema":
+            return calculate_m30_ema_stop_loss_take_profit(symbol, price, signal, atr_value)
+        else:
+            return calculate_default_stop_loss_take_profit(symbol, price, signal, atr_value)
+    except Exception as e:
+        log_message("ERROR", f"计算止损止盈失败: {str(e) if e is not None else 'Unknown error'}")
+        return None
+
+def calculate_default_stop_loss_take_profit(symbol, price, signal, atr_value):
+    """默认策略止盈止损计算（静态规则：VWAP保护 + 入场K线极值±0.5% + ATR固定倍数；BNB使用1.5x ATR TP）"""
     try:
         if not exchange:
             return None
@@ -1435,7 +1410,60 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
         log_message("DEBUG", f"{symbol} {signal} SL/TP: entry={price:.4f}, vwap={last_vwap if last_vwap else 0:.4f}, atr={atr_used:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f}")
         return {'stop_loss': stop_loss, 'take_profit': take_profit}
     except Exception as e:
-        log_message("ERROR", f"计算止损止盈失败: {str(e) if e is not None else 'Unknown error'}")
+        log_message("ERROR", f"计算默认止损止盈失败: {str(e) if e is not None else 'Unknown error'}")
+        return None
+
+def calculate_m30_ema_stop_loss_take_profit(symbol, price, signal, atr_value):
+    """M30 EMA策略止盈止损计算（分批止盈 + 移动止盈）"""
+    try:
+        if not exchange:
+            return None
+            
+        ohlcv = get_klines(symbol, '30m', limit=2)
+        df_last = process_klines(ohlcv)
+        atr_used = float(df_last['ATR_14'].iloc[-1]) if df_last is not None and 'ATR_14' in df_last.columns else (atr_value or 0)
+        
+        if atr_used <= 0:
+            atr_used = price * 0.02  # 默认2%作为ATR
+            
+        # M30 EMA策略止盈止损规则
+        if signal == 'long':
+            # 初始止损：入场价下方1.5x ATR
+            stop_loss = price - (atr_used * 1.5)
+            
+            # 分批止盈：
+            # 第一目标：1x ATR（平仓50%）
+            take_profit_1 = price + (atr_used * 1.0)
+            # 第二目标：移动止盈（剩余50%）
+            take_profit_2 = price + (atr_used * 2.0)
+            
+            # 移动止盈逻辑：当价格达到第一目标后，止损移动到入场价
+            trailing_stop = price  # 达到第一目标后移动止损到入场价
+            
+        else:  # short
+            # 初始止损：入场价上方1.5x ATR
+            stop_loss = price + (atr_used * 1.5)
+            
+            # 分批止盈：
+            # 第一目标：1x ATR（平仓50%）
+            take_profit_1 = price - (atr_used * 1.0)
+            # 第二目标：移动止盈（剩余50%）
+            take_profit_2 = price - (atr_used * 2.0)
+            
+            # 移动止盈逻辑：当价格达到第一目标后，止损移动到入场价
+            trailing_stop = price  # 达到第一目标后移动止损到入场价
+            
+        log_message("DEBUG", f"M30 EMA {symbol} {signal} SL/TP: entry={price:.4f}, atr={atr_used:.4f}, SL={stop_loss:.4f}, TP1={take_profit_1:.4f}, TP2={take_profit_2:.4f}")
+        
+        return {
+            'stop_loss': stop_loss,
+            'take_profit_1': take_profit_1,
+            'take_profit_2': take_profit_2,
+            'trailing_stop': trailing_stop,
+            'atr_value': atr_used
+        }
+    except Exception as e:
+        log_message("ERROR", f"计算M30 EMA止损止盈失败: {str(e) if e is not None else 'Unknown error'}")
         return None
 
 def sync_exchange_positions():
@@ -2102,7 +2130,7 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
 # =================================
 
 def check_trailing_stop(symbol, position_info):
-    """检查并更新动态止损（修复：区分趋势和震荡策略，添加K线收盘确认）"""
+    """检查并更新动态止损（修复：区分趋势和震荡策略，添加K线收盘确认，支持M30 EMA策略分批止盈）"""
     try:
         if not position_info or position_info['size'] == 0:
             return False
@@ -2128,8 +2156,6 @@ def check_trailing_stop(symbol, position_info):
         else:
             if not exchange:
                 return
-            if not exchange:
-                return
             ticker = exchange.fetch_ticker(symbol) if exchange else None
             current_price = float(ticker['last']) if ticker and 'last' in ticker else None
         
@@ -2137,10 +2163,15 @@ def check_trailing_stop(symbol, position_info):
         side = position_info['side']
         size = float(position_info['size'])
         strategy_type = position_info.get('strategy_type', 'trend')  # 默认为趋势策略
+        strategy_name = position_info.get('strategy_name', '')
         
         # 获取ATR值
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
+        
+        # M30 EMA策略特殊处理：分批止盈 + 移动止盈
+        if strategy_name == 'm30_ema_cross':
+            return check_m30_ema_trailing_stop(symbol, position_info, current_price, kline_end_time, current_time)
         
         # 根据策略类型设置不同的动态止损参数
         if strategy_type == 'oscillation':
@@ -2233,6 +2264,176 @@ def check_trailing_stop(symbol, position_info):
         
     except Exception as e:
         log_message("ERROR", f"检查动态止损失败 {symbol}: {e}")
+        return False
+
+def check_m30_ema_trailing_stop(symbol, position_info, current_price, kline_end_time, current_time):
+    """M30 EMA策略移动止盈检查（分批止盈 + 移动止盈）"""
+    try:
+        if not position_info or position_info['size'] == 0 or not current_price:
+            return False
+            
+        entry_price = float(position_info['entry_price'])
+        side = position_info['side']
+        size = float(position_info['size'])
+        
+        # 获取仓位跟踪信息
+        position_tracker_key = f"{symbol}_{side}"
+        position_data = position_tracker['positions'].get(position_tracker_key, {})
+        
+        # 检查是否已经达到第一目标（分批止盈）
+        tp1_reached = position_data.get('tp1_reached', False)
+        tp1_price = position_data.get('tp1_price', 0)
+        
+        # 获取ATR值用于移动止盈
+        if not exchange:
+            return False
+        ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=14)
+        if len(ohlcv) < 14:
+            return False
+            
+        df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
+        atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
+        
+        if side == 'long':
+            # 检查是否达到第一止盈目标（1x ATR）
+            if not tp1_reached and current_price >= entry_price + atr:
+                # 达到第一目标，平仓50%
+                close_amount = abs(size) * 0.5
+                try:
+                    exchange.create_order(
+                        symbol=symbol,
+                        type='market',
+                        side='sell',
+                        amount=close_amount,
+                        params={'reduceOnly': True}
+                    )
+                    log_message("INFO", f"M30 EMA {symbol} 达到第一止盈目标，平仓50%: {close_amount}")
+                    
+                    # 更新仓位跟踪信息
+                    position_tracker['positions'][position_tracker_key]['tp1_reached'] = True
+                    position_tracker['positions'][position_tracker_key]['tp1_price'] = current_price
+                    position_tracker['positions'][position_tracker_key]['remaining_size'] = abs(size) * 0.5
+                    
+                except Exception as e:
+                    log_message("ERROR", f"M30 EMA {symbol} 分批止盈失败: {e}")
+                    return False
+            
+            # 移动止盈逻辑：达到第一目标后，止损移动到入场价
+            if tp1_reached:
+                # 设置移动止损为入场价
+                new_stop_loss = entry_price
+                
+                # 检查是否需要更新止损单
+                if not exchange:
+                    return False
+                current_orders = exchange.fetch_open_orders(symbol)
+                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
+                
+                should_update = True
+                for order in stop_orders:
+                    if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
+                        should_update = False
+                        break
+                
+                if should_update and current_time >= kline_end_time:
+                    # 取消旧的止损单
+                    for order in stop_orders:
+                        try:
+                            exchange.cancel_order(order['id'], symbol)
+                        except:
+                            pass
+                    
+                    # 下新的止损单
+                    remaining_size = position_tracker['positions'][position_tracker_key].get('remaining_size', abs(size) * 0.5)
+                    exchange.create_order(
+                        symbol=symbol,
+                        type='conditional',
+                        side='sell',
+                        amount=remaining_size,
+                        price=new_stop_loss,
+                        params={
+                            'slTriggerPx': new_stop_loss,
+                            'slOrdPx': new_stop_loss,
+                            'tdMode': TD_MODE,
+                            'posSide': 'long',
+                            'reduceOnly': True
+                        }
+                    )
+                    log_message("INFO", f"M30 EMA {symbol} 更新移动止损到入场价: {new_stop_loss:.4f}")
+                    return True
+        
+        else:  # short position
+            # 检查是否达到第一止盈目标（1x ATR）
+            if not tp1_reached and current_price <= entry_price - atr:
+                # 达到第一目标，平仓50%
+                close_amount = abs(size) * 0.5
+                try:
+                    exchange.create_order(
+                        symbol=symbol,
+                        type='market',
+                        side='buy',
+                        amount=close_amount,
+                        params={'reduceOnly': True}
+                    )
+                    log_message("INFO", f"M30 EMA {symbol} 达到第一止盈目标，平仓50%: {close_amount}")
+                    
+                    # 更新仓位跟踪信息
+                    position_tracker['positions'][position_tracker_key]['tp1_reached'] = True
+                    position_tracker['positions'][position_tracker_key]['tp1_price'] = current_price
+                    position_tracker['positions'][position_tracker_key]['remaining_size'] = abs(size) * 0.5
+                    
+                except Exception as e:
+                    log_message("ERROR", f"M30 EMA {symbol} 分批止盈失败: {e}")
+                    return False
+            
+            # 移动止盈逻辑：达到第一目标后，止损移动到入场价
+            if tp1_reached:
+                # 设置移动止损为入场价
+                new_stop_loss = entry_price
+                
+                # 检查是否需要更新止损单
+                if not exchange:
+                    return False
+                current_orders = exchange.fetch_open_orders(symbol)
+                stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
+                
+                should_update = True
+                for order in stop_orders:
+                    if abs(float(order['stopPrice']) - new_stop_loss) < new_stop_loss * 0.01:
+                        should_update = False
+                        break
+                
+                if should_update and current_time >= kline_end_time:
+                    # 取消旧的止损单
+                    for order in stop_orders:
+                        try:
+                            exchange.cancel_order(order['id'], symbol)
+                        except:
+                            pass
+                    
+                    # 下新的止损单
+                    remaining_size = position_tracker['positions'][position_tracker_key].get('remaining_size', abs(size) * 0.5)
+                    exchange.create_order(
+                        symbol=symbol,
+                        type='conditional',
+                        side='buy',
+                        amount=remaining_size,
+                        price=new_stop_loss,
+                        params={
+                            'slTriggerPx': new_stop_loss,
+                            'slOrdPx': new_stop_loss,
+                            'tdMode': TD_MODE,
+                            'posSide': 'short',
+                            'reduceOnly': True
+                        }
+                    )
+                    log_message("INFO", f"M30 EMA {symbol} 更新移动止损到入场价: {new_stop_loss:.4f}")
+                    return True
+        
+        return False
+        
+    except Exception as e:
+        log_message("ERROR", f"M30 EMA移动止盈检查失败 {symbol}: {e}")
         return False
 
 def check_pending_signals():
