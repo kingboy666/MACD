@@ -1018,8 +1018,9 @@ def calculate_position_size(symbol, price, total_balance):
         except Exception as e:
             log_message("ERROR", f"计算仓位大小错误: {str(e)}")
             return 0
-                position_size = min_amount
-                # 如果调整后仍然不满足金额精度，则跳过交易
+            
+    position_size = min_amount
+    # 如果调整后仍然不满足金额精度，则跳过交易
                 trade_value = position_size * price
                 if trade_value < min_trade_value:
                     log_message("ERROR", f"{symbol} 调整后交易金额 {trade_value:.4f} USDT 仍低于最小金额精度 {min_trade_value} USDT，跳过交易")
