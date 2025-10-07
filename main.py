@@ -30,25 +30,7 @@ def calculate_atr(high, low, close, period=14):
     atr = tr.rolling(window=period).mean()
     return atr
 
-def calculate_adx(high, low, close, period=14):
-    """计算ADX指标"""
-    plus_dm = high.diff()
-    minus_dm = low.diff()
-    plus_dm[plus_dm < 0] = 0
-    minus_dm[minus_dm > 0] = 0
-    minus_dm = minus_dm.abs()
-    
-    tr1 = high - low
-    tr2 = abs(high - close.shift())
-    tr3 = abs(low - close.shift())
-    tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
-    atr = tr.rolling(window=period).mean()
-    
-    plus_di = 100 * (plus_dm.rolling(window=period).mean() / atr)
-    minus_di = 100 * (minus_dm.rolling(window=period).mean() / atr)
-    dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-    adx = dx.rolling(window=period).mean()
-    return adx
+
 
 # ============================================
 # API配置 - 从环境变量获取
@@ -94,12 +76,12 @@ SYMBOLS = [
 # ============================================
 # 智能杠杆配置
 # ============================================
-MAX_LEVERAGE_BTC = 100                       # BTC最大杠杆
-MAX_LEVERAGE_ETH = 50                        # ETH最大杠杆
-MAX_LEVERAGE_MAJOR = 30                      # 主流币最大杠杆
-MAX_LEVERAGE_OTHERS = 25                     # 其他币种最大杠杆
-LEVERAGE_MIN = 20                            # 全局最低杠杆
-DEFAULT_LEVERAGE = 25                        # 默认杠杆
+MAX_LEVERAGE_BTC = 20                        # BTC最大杠杆
+MAX_LEVERAGE_ETH = 20                        # ETH最大杠杆
+MAX_LEVERAGE_MAJOR = 20                      # 主流币最大杠杆
+MAX_LEVERAGE_OTHERS = 20                     # 其他币种最大杠杆
+LEVERAGE_MIN = 10                             # 全局最低杠杆
+DEFAULT_LEVERAGE = 10                         # 默认杠杆
 
 # 主流币种定义
 MAJOR_COINS = ['BNB', 'XRP', 'ADA', 'SOL', 'DOT', 'AVAX', 'DOGE']
@@ -123,8 +105,8 @@ MIN_TRADE_AMOUNT = {
 }
 
 # MACD指标配置
-MACD_FAST = 6                             # MACD快线周期
-MACD_SLOW = 16                            # MACD慢线周期
+MACD_FAST = 12                            # MACD快线周期
+MACD_SLOW = 26                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
 # ATR动态止盈止损配置
@@ -137,10 +119,8 @@ ATR_TRAILING_CALLBACK_MULTIPLIER = 1.0      # 移动止盈回调倍数
 ATR_MIN_MULTIPLIER = 1.0                    # ATR最小倍数
 ATR_MAX_MULTIPLIER = 5.0                    # ATR最大倍数
 
-# ADX配置
-ADX_PERIOD = 14                              # ADX计算周期
-ADX_TREND_THRESHOLD = 25                     # ADX趋势阈值
-ADX_SIDEWAYS_THRESHOLD = 20                  # ADX震荡阈值
+# ADX配置（已移除）
+ADX_TREND_THRESHOLD = 20
 
 # 风险管理配置
 RISK_PER_TRADE = 0.02                        # 单笔风险2%
@@ -149,7 +129,7 @@ COOLDOWN_PERIOD = 300                        # 冷却期5分钟
 MAX_DAILY_TRADES = 20                        # 每日最大交易次数
 
 # 主循环配置
-MAIN_LOOP_DELAY = 30                         # 主循环延迟30秒
+MAIN_LOOP_DELAY = 10                         # 主循环延迟30秒
 
 # 账户与保证金模式（用于 OKX 下单参数）
 ACCOUNT_MODE = 'hedge'                       # 可选 'hedge'（双向持仓）或 'one-way'（单向持仓）
@@ -218,22 +198,22 @@ def get_klines(symbol, timeframe, limit=100):
         return None
 
 def get_smart_leverage(symbol, account_balance, atr_percentage=None):
-    """根据币种和账户大小智能计算杠杆倍数"""
+    """根据币种、账户与波动性动态计算杠杆，最大不超过20x"""
     try:
         base_symbol = symbol.split('-')[0].upper()
         
         if base_symbol == 'BTC':
             max_leverage = MAX_LEVERAGE_BTC
-            base_leverage = 60
+            base_leverage = 10
         elif base_symbol == 'ETH':
             max_leverage = MAX_LEVERAGE_ETH
-            base_leverage = 30
+            base_leverage = 8
         elif base_symbol in MAJOR_COINS:
             max_leverage = MAX_LEVERAGE_MAJOR
-            base_leverage = 25
+            base_leverage = 7
         else:
             max_leverage = MAX_LEVERAGE_OTHERS
-            base_leverage = 25
+            base_leverage = 6
         
         # 根据账户大小调整杠杆
         if account_balance >= 10000:
@@ -258,8 +238,8 @@ def get_smart_leverage(symbol, account_balance, atr_percentage=None):
                 volatility_multiplier = 1.2
         
         calculated_leverage = int(base_leverage * leverage_multiplier * volatility_multiplier)
-        final_leverage = min(calculated_leverage, max_leverage)
-        final_leverage = max(final_leverage, LEVERAGE_MIN)
+        final_leverage = min(calculated_leverage, max_leverage)  # 上限20x
+        final_leverage = max(final_leverage, LEVERAGE_MIN)       # 下限5x
         
         return final_leverage
         
@@ -284,7 +264,7 @@ def get_account_info():
         return None
 
 def process_klines(ohlcv):
-    """处理K线数据并计算技术指标"""
+    """处理K线数据并计算技术指标（VWAP日内重置、MACD(12,26,9)、RSI(14)、VWAP±1SD、成交量均值）"""
     try:
         if not ohlcv or len(ohlcv) < 50:
             return None
@@ -306,6 +286,25 @@ def process_klines(ohlcv):
             log_message("ERROR", f"MACD计算失败: {str(e)}")
             return None
         
+        # 计算VWAP(日内重置)与RSI(14) + VWAP标准差带 + 成交量均值
+        try:
+            typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+            vwap_value = typical_price * df['volume']
+            df['day'] = df['timestamp'].dt.date
+            df['cum_vwap'] = df.groupby('day')[vwap_value.name].cumsum()
+            df['cum_volume'] = df.groupby('day')['volume'].cumsum()
+            df['VWAP'] = df['cum_vwap'] / df['cum_volume']
+            df['RSI'] = calculate_rsi(df['close'], period=14)
+            # VWAP标准差带（按日内重置）
+            df['vwap_diff'] = (typical_price - df['VWAP'])
+            df['VWAP_SD'] = df.groupby('day')['vwap_diff'].transform(lambda s: s.rolling(window=20, min_periods=5).std())
+            df['VWAP_UP'] = df['VWAP'] + df['VWAP_SD']
+            df['VWAP_DOWN'] = df['VWAP'] - df['VWAP_SD']
+            # 成交量20期均值（用于过滤）
+            df['vol_ma20'] = df['volume'].rolling(window=20, min_periods=5).mean()
+        except Exception as e:
+            log_message("WARNING", f"VWAP/RSI/成交量计算失败: {str(e)}")
+        
         # 计算ATR
         try:
             df['ATR_14'] = calculate_atr(df['high'], df['low'], df['close'], period=ATR_PERIOD)
@@ -313,12 +312,7 @@ def process_klines(ohlcv):
             log_message("WARNING", f"ATR计算失败: {str(e)}")
             df['ATR_14'] = 0
         
-        # 计算ADX
-        try:
-            df['ADX'] = calculate_adx(df['high'], df['low'], df['close'], period=ADX_PERIOD)
-        except Exception as e:
-            log_message("WARNING", f"ADX计算失败: {str(e)}")
-            df['ADX'] = 30  # 默认值
+        # 已移除ADX计算
         
         return df
         
@@ -326,13 +320,7 @@ def process_klines(ohlcv):
         log_message("ERROR", f"处理K线数据失败: {str(e)}")
         return None
 
-def calculate_bollinger_bands(close, period=20, std_dev=2):
-    """计算布林带指标"""
-    sma = close.rolling(window=period).mean()
-    std = close.rolling(window=period).std()
-    upper_band = sma + (std * std_dev)
-    lower_band = sma - (std * std_dev)
-    return upper_band, sma, lower_band
+
 
 def calculate_rsi(close, period=14):
     """计算RSI指标"""
@@ -343,18 +331,12 @@ def calculate_rsi(close, period=14):
     rsi = 100 - (100 / (1 + rs))
     return rsi
 
-def calculate_stochastic(high, low, close, k_period=14, d_period=3):
-    """计算随机指标"""
-    lowest_low = low.rolling(window=k_period).min()
-    highest_high = high.rolling(window=k_period).max()
-    k = ((close - lowest_low) / (highest_high - lowest_low)) * 100
-    d = k.rolling(window=d_period).mean()
-    return k, d
+
 
 def generate_signal(symbol):
-    """基于MACD趋势策略和布林带震荡策略生成交易信号"""
+    """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）"""
     try:
-        ohlcv = get_klines(symbol, '30m', limit=100)
+        ohlcv = get_klines(symbol, '5m', limit=100)
         if not ohlcv:
             return None
         
@@ -362,17 +344,14 @@ def generate_signal(symbol):
         if df is None or len(df) < 50:
             return None
         
-        # 计算布林带震荡策略指标
-        df['BB_UPPER'], df['BB_MIDDLE'], df['BB_LOWER'] = calculate_bollinger_bands(df['close'])
-        df['RSI'] = calculate_rsi(df['close'])
-        df['STOCH_K'], df['STOCH_D'] = calculate_stochastic(df['high'], df['low'], df['close'])
+        # 使用日内VWAP与RSI(14)作为过滤，指标在process_klines已计算
         
         # 获取当前时间戳，检查K线是否已收盘
         import time
         current_timestamp = int(time.time() * 1000)
         current_kline = ohlcv[-1]
         current_kline_start = current_kline[0]
-        current_kline_end = current_kline_start + 30 * 60 * 1000  # 30分钟K线结束时间
+        current_kline_end = current_kline_start + 5 * 60 * 1000  # 5分钟K线结束时间
         kline_completed = current_timestamp >= current_kline_end
         
         # 获取当前数据
@@ -380,19 +359,21 @@ def generate_signal(symbol):
         current_signal = df['MACD_SIGNAL'].iloc[-1]
         prev_macd = df['MACD'].iloc[-2]
         prev_signal = df['MACD_SIGNAL'].iloc[-2]
-        current_adx = df['ADX'].iloc[-1]
+        current_adx = None
         current_price = df['close'].iloc[-1]
         current_open = df['open'].iloc[-1]
         current_close = df['close'].iloc[-1]
         atr_value = df['ATR_14'].iloc[-1]
         
-        # 布林带震荡策略数据
-        current_bb_upper = df['BB_UPPER'].iloc[-1]
-        current_bb_lower = df['BB_LOWER'].iloc[-1]
-        current_bb_middle = df['BB_MIDDLE'].iloc[-1]
+        # 指标数据（RSI与成交量过滤）
+
+
+
         current_rsi = df['RSI'].iloc[-1]
-        current_stoch_k = df['STOCH_K'].iloc[-1]
-        current_stoch_d = df['STOCH_D'].iloc[-1]
+        vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.2 * vol_ma20)
+
+
         
         # 检查MACD金叉死叉
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
@@ -402,7 +383,88 @@ def generate_signal(symbol):
         is_bullish = current_close > current_open  # 阳线：收盘价大于开盘价
         is_bearish = current_close < current_open  # 阴线：收盘价小于开盘价
         
-        signal = None
+        # VWAP+MACD(12,26,9)+RSI(14) 日内策略（优先执行，含成交量过滤与阳/阴线收盘确认）
+        current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
+        current_rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
+        vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.2 * vol_ma20)
+        # Funding过滤：正funding>0.03%时避免做多
+        try:
+            funding = exchange.fetch_funding_rate(symbol).get('fundingRate')
+            if funding is not None and funding > 0.0003 and golden_cross:
+                return None
+        except Exception:
+            pass
+        if current_vwap is not None and current_rsi is not None and volume_ok:
+            vwap_bias = abs(current_price - current_vwap) / current_vwap > 0.002
+            if golden_cross and (current_close > current_vwap) and vwap_bias and (current_rsi > 50) and is_bullish:
+                if kline_completed:
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'VWAP': current_vwap,
+                        'RSI': current_rsi,
+                        'confirmation_type': 'VWAP+MACD金叉+RSI>50+K线收盘',
+                        'strategy_type': 'intraday_vwap_macd_rsi'
+                    }
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    return {
+                        'symbol': symbol,
+                        'side': 'long',
+                        'price': current_price,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'VWAP': current_vwap,
+                        'RSI': current_rsi,
+                        'confirmation_type': 'VWAP+MACD金叉+RSI>50+等待K线收盘',
+                        'strategy_type': 'intraday_vwap_macd_rsi',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining,
+                        'kline_end_time': current_kline_end / 1000.0
+                    }
+            elif death_cross and (current_close < current_vwap) and vwap_bias and (current_rsi < 50) and is_bearish:
+                if kline_completed:
+                    return {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'strong',
+                        'atr_value': atr_value,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'VWAP': current_vwap,
+                        'RSI': current_rsi,
+                        'confirmation_type': 'VWAP+MACD死叉+RSI<50+K线收盘',
+                        'strategy_type': 'intraday_vwap_macd_rsi'
+                    }
+                else:
+                    time_remaining = (current_kline_end - current_timestamp) / 1000
+                    return {
+                        'symbol': symbol,
+                        'side': 'short',
+                        'price': current_price,
+                        'signal_strength': 'pending',
+                        'atr_value': atr_value,
+                        'macd_value': current_macd,
+                        'signal_value': current_signal,
+                        'VWAP': current_vwap,
+                        'RSI': current_rsi,
+                        'confirmation_type': 'VWAP+MACD死叉+RSI<50+等待K线收盘',
+                        'strategy_type': 'intraday_vwap_macd_rsi',
+                        'kline_pending': True,
+                        'time_remaining': time_remaining,
+                        'kline_end_time': current_kline_end / 1000.0
+                    }
+
+        return None
         
         # 策略选择：根据ADX判断市场状态
         if current_adx > ADX_TREND_THRESHOLD:  # 趋势行情 - 使用MACD策略
@@ -483,130 +545,7 @@ def generate_signal(symbol):
             if signal is None:
                 return None
         
-        elif current_adx < ADX_SIDEWAYS_THRESHOLD:  # 震荡行情 - 使用布林带策略
-            # 布林带震荡策略信号
-            bb_signal = None
-            
-            # 检查布林带位置和指标确认
-            price_near_bb_lower = current_price <= current_bb_lower * 1.02  # 价格接近下轨
-            price_near_bb_upper = current_price >= current_bb_upper * 0.98  # 价格接近上轨
-            
-            # RSI超卖超买确认
-            rsi_oversold = current_rsi < 30  # RSI超卖
-            rsi_overbought = current_rsi > 70  # RSI超买
-            
-            # 随机指标确认
-            stoch_oversold = current_stoch_k < 20 and current_stoch_d < 20  # 随机指标超卖
-            stoch_overbought = current_stoch_k > 80 and current_stoch_d > 80  # 随机指标超买
-            
-            # 震荡策略做多信号：价格接近下轨 + RSI超卖 + 随机指标超卖 + 阳线确认 + K线收盘确认
-            if price_near_bb_lower and rsi_oversold and stoch_oversold and is_bullish:
-                if kline_completed:
-                    bb_signal = {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'medium',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'bb_upper': current_bb_upper,
-                        'bb_lower': current_bb_lower,
-                        'bb_middle': current_bb_middle,
-                        'rsi_value': current_rsi,
-                        'stoch_k': current_stoch_k,
-                        'stoch_d': current_stoch_d,
-                        'is_bullish': is_bullish,
-                        'confirmation_type': '布林带下轨+RSI超卖+随机超卖+阳线确认+K线收盘',
-                        'strategy_type': 'oscillation'
-                    }
-                    log_message("DEBUG", f"{symbol} 震荡策略做多信号确认: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近下轨, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 震荡做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
-            
-            # 震荡策略做空信号：价格接近上轨 + RSI超买 + 随机指标超买 + 阴线确认 + K线收盘确认
-            elif price_near_bb_upper and rsi_overbought and stoch_overbought and is_bearish:
-                if kline_completed:
-                    bb_signal = {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'medium',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'bb_upper': current_bb_upper,
-                        'bb_lower': current_bb_lower,
-                        'bb_middle': current_bb_middle,
-                        'rsi_value': current_rsi,
-                        'stoch_k': current_stoch_k,
-                        'stoch_d': current_stoch_d,
-                        'is_bearish': is_bearish,
-                        'confirmation_type': '布林带上轨+RSI超买+随机超买+阴线确认+K线收盘',
-                        'strategy_type': 'oscillation'
-                    }
-                    log_message("DEBUG", f"{symbol} 震荡策略做空信号确认: ADX={current_adx:.2f}, RSI={current_rsi:.1f}, 价格接近上轨, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 震荡做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
-            
-            # 中等强度信号：缺少一个指标确认但其他条件满足 + K线收盘确认
-            elif price_near_bb_lower and (rsi_oversold or stoch_oversold) and is_bullish:
-                if kline_completed:
-                    bb_signal = {
-                        'symbol': symbol,
-                        'side': 'long',
-                        'price': current_price,
-                        'signal_strength': 'weak',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'bb_upper': current_bb_upper,
-                        'bb_lower': current_bb_lower,
-                        'bb_middle': current_bb_middle,
-                        'rsi_value': current_rsi,
-                        'stoch_k': current_stoch_k,
-                        'stoch_d': current_stoch_d,
-                        'is_bullish': is_bullish,
-                        'confirmation_type': '布林带下轨+部分指标确认+阳线确认+K线收盘',
-                        'strategy_type': 'oscillation'
-                    }
-                    log_message("DEBUG", f"{symbol} 震荡策略弱做多信号确认: ADX={current_adx:.2f}, 价格接近下轨, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 震荡弱做多信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
-            
-            elif price_near_bb_upper and (rsi_overbought or stoch_overbought) and is_bearish:
-                if kline_completed:
-                    bb_signal = {
-                        'symbol': symbol,
-                        'side': 'short',
-                        'price': current_price,
-                        'signal_strength': 'weak',
-                        'atr_value': atr_value,
-                        'adx_value': current_adx,
-                        'bb_upper': current_bb_upper,
-                        'bb_lower': current_bb_lower,
-                        'bb_middle': current_bb_middle,
-                        'rsi_value': current_rsi,
-                        'stoch_k': current_stoch_k,
-                        'stoch_d': current_stoch_d,
-                        'is_bearish': is_bearish,
-                        'confirmation_type': '布林带上轨+部分指标确认+阴线确认+K线收盘',
-                        'strategy_type': 'oscillation'
-                    }
-                    log_message("DEBUG", f"{symbol} 震荡策略弱做空信号确认: ADX={current_adx:.2f}, 价格接近上轨, K线已收盘")
-                else:
-                    time_remaining = (current_kline_end - current_timestamp) / 1000
-                    log_message("DEBUG", f"{symbol} 震荡弱做空信号条件满足但等待K线收盘 (还需等待{time_remaining:.0f}秒)")
-                    return None  # 等待K线收盘，不返回信号
-            
-            # 如果没有符合条件的信号，返回None
-            if bb_signal is None:
-                return None
-            
-            signal = bb_signal
+
         
         else:  # 中等趋势强度 - 优先使用趋势策略
             if golden_cross and is_bullish:
@@ -694,12 +633,22 @@ def execute_trade(symbol, signal, signal_strength):
         side = 'buy' if signal['side'] == 'long' else 'sell'
         price = signal['price']
         position_size = calculate_position_size(symbol, price, account_info['total_balance'])
+        position_size = position_size * 0.999  # 0.1%滑点缓冲
         
         if position_size <= 0:
             log_message("WARNING", f"{symbol} 计算仓位大小为0，跳过交易")
             return False
         
-        # 执行市价单
+        # 执行市价单（同时挂条件止盈止损）
+        sl_tp = calculate_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+        attach_algo = []
+        if sl_tp:
+            # 同时附带止盈/止损条件单（OKX attachAlgoOrds）
+            attach_algo = [
+                {'algoOrdType': 'tp', 'tpTriggerPx': sl_tp['take_profit'], 'tpOrdPx': sl_tp['take_profit']},
+                {'algoOrdType': 'sl', 'slTriggerPx': sl_tp['stop_loss'], 'slOrdPx': sl_tp['stop_loss']}
+            ]
+        
         order = exchange.create_order(
             symbol,
             'market',
@@ -707,13 +656,84 @@ def execute_trade(symbol, signal, signal_strength):
             position_size,
             None,
             {
-                'tdMode': 'cross',
-                'posSide': 'long' if signal['side'] == 'long' else 'short'
+                'tdMode': TD_MODE,
+                'posSide': 'long' if signal['side'] == 'long' else 'short',
+                'attachAlgoOrds': attach_algo
             }
         )
         
         if order:
             log_message("SUCCESS", f"{symbol} 交易成功: {side} {position_size} @ {price}")
+            # 成交后立即同步挂条件单（原子化保障）
+            try:
+                ok_bracket = place_bracket_orders(symbol, signal['side'], position_size, price, signal.get('atr_value', 0))
+                if not ok_bracket:
+                    time.sleep(1)
+                    place_bracket_orders(symbol, signal['side'], position_size, price, signal.get('atr_value', 0))
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 同步挂条件单异常: {e}")
+            
+            # 强制即时验证条件单是否已存在，缺失则立即补挂（最多重试3次）
+            try:
+                retries = 3
+                for attempt in range(1, retries + 1):
+                    orders = exchange.fetch_open_orders(symbol)
+                    has_sl = False; has_tp = False
+                    for o in orders:
+                        info_str = str(o.get('info', {}))
+                        t = o.get('type', '')
+                        p = float(o.get('price') or o.get('stopPrice') or 0) if (o.get('price') or o.get('stopPrice')) else 0.0
+                        if (t in ['conditional', 'stop', 'stop_loss']) and ('slTriggerPx' in info_str or 'stopPrice' in info_str):
+                            has_sl = True
+                        if (t in ['conditional', 'limit', 'take_profit']) and ('tpTriggerPx' in info_str or 'takeProfitPrice' in info_str):
+                            has_tp = True
+                    log_message("DEBUG", f"{symbol} 条件单即时验证: SL={has_sl}, TP={has_tp}, 尝试{attempt}/{retries}")
+                    if has_sl and has_tp:
+                        break
+                    # 缺失则即时补挂
+                    sl_tp_now = calculate_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+                    if sl_tp_now:
+                        side_action_sl = 'sell' if signal['side'] == 'long' else 'buy'
+                        pos_side = 'long' if signal['side'] == 'long' else 'short'
+                        try:
+                            # 补挂止损
+                            exchange.create_order(
+                                symbol=symbol,
+                                type='conditional',
+                                side=side_action_sl,
+                                amount=abs(position_size),
+                                price=sl_tp_now['stop_loss'],
+                                params={
+                                    'slTriggerPx': sl_tp_now['stop_loss'],
+                                    'slOrdPx': sl_tp_now['stop_loss'],
+                                    'tdMode': TD_MODE,
+                                    'posSide': pos_side,
+                                    'reduceOnly': True
+                                }
+                            )
+                        except Exception as e:
+                            log_message("WARNING", f"{symbol} 补挂止损失败: {e}")
+                        try:
+                            # 补挂止盈
+                            exchange.create_order(
+                                symbol=symbol,
+                                type='conditional',
+                                side=side_action_sl,
+                                amount=abs(position_size),
+                                price=sl_tp_now['take_profit'],
+                                params={
+                                    'tpTriggerPx': sl_tp_now['take_profit'],
+                                    'tpOrdPx': sl_tp_now['take_profit'],
+                                    'tdMode': TD_MODE,
+                                    'posSide': pos_side,
+                                    'reduceOnly': True
+                                }
+                            )
+                        except Exception as e:
+                            log_message("WARNING", f"{symbol} 补挂止盈失败: {e}")
+                    time.sleep(1)
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 条件单即时验证异常: {e}")
             
             # 记录持仓
             position_tracker['positions'][symbol] = {
@@ -725,9 +745,75 @@ def execute_trade(symbol, signal, signal_strength):
                 'atr_value': signal.get('atr_value', 0)
             }
             
-            # 开仓后立即设置止盈止损
+            # 开仓后立即设置止盈止损（强制即时挂条件单 + 兜底重试与验证）
+            # 立即计算并下条件单，避免延迟
             try:
-                setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                sl_tp = calculate_stop_loss_take_profit(symbol, price, signal['side'], signal.get('atr_value', 0))
+                if sl_tp:
+                    side_action_sl = 'sell' if signal['side'] == 'long' else 'buy'
+                    pos_side = 'long' if signal['side'] == 'long' else 'short'
+                    # 止损条件单
+                    try:
+                        exchange.create_order(
+                            symbol=symbol,
+                            type='conditional',
+                            side=side_action_sl,
+                            amount=abs(position_size),
+                            price=sl_tp['stop_loss'],
+                            params={
+                                'slTriggerPx': sl_tp['stop_loss'],
+                                'slOrdPx': sl_tp['stop_loss'],
+                                'tdMode': TD_MODE,
+                                'posSide': pos_side,
+                                'reduceOnly': True
+                            }
+                        )
+                        log_message("INFO", f"{symbol} 即时设置止损单: {sl_tp['stop_loss']:.4f}")
+                    except Exception as e:
+                        log_message("WARNING", f"{symbol} 即时设置止损单失败: {e}")
+                    # 止盈条件单
+                    try:
+                        exchange.create_order(
+                            symbol=symbol,
+                            type='conditional',
+                            side=side_action_sl,
+                            amount=abs(position_size),
+                            price=sl_tp['take_profit'],
+                            params={
+                                'tpTriggerPx': sl_tp['take_profit'],
+                                'tpOrdPx': sl_tp['take_profit'],
+                                'tdMode': TD_MODE,
+                                'posSide': pos_side,
+                                'reduceOnly': True
+                            }
+                        )
+                        log_message("INFO", f"{symbol} 即时设置止盈单: {sl_tp['take_profit']:.4f}")
+                    except Exception as e:
+                        log_message("WARNING", f"{symbol} 即时设置止盈单失败: {e}")
+                # 兜底：执行旧逻辑再尝试并验证
+                ok = setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                ok = setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                if not ok:
+                    log_message("WARNING", f"{symbol} 首次设置止盈止损未成功，准备重试")
+                    time.sleep(1)
+                    setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                # 验证止损/止盈条件单是否已存在
+                try:
+                    orders = exchange.fetch_open_orders(symbol)
+                    has_sl = False; has_tp = False
+                    for o in orders:
+                        info_str = str(o.get('info', {}))
+                        t = o.get('type', '')
+                        p = float(o.get('price') or o.get('stopPrice') or 0) if (o.get('price') or o.get('stopPrice')) else 0.0
+                        if (t in ['conditional', 'stop', 'stop_loss']) and ('slTriggerPx' in info_str or 'stopPrice' in info_str):
+                            has_sl = True
+                        if (t in ['conditional', 'limit', 'take_profit']) and ('tpTriggerPx' in info_str or 'takeProfitPrice' in info_str):
+                            has_tp = True
+                    if not has_sl or not has_tp:
+                        log_message("WARNING", f"{symbol} 条件单验证失败: SL={has_sl}, TP={has_tp}，尝试再次补齐")
+                        setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                except Exception as ve:
+                    log_message("WARNING", f"{symbol} 条件单验证异常: {ve}")
             except Exception as e:
                 log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {e}")
             
@@ -740,58 +826,56 @@ def execute_trade(symbol, signal, signal_strength):
         return False
 
 def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
-    """计算止损止盈价格"""
+    """计算止损止盈价格（静态规则：VWAP保护 + 入场K线极值±0.5% + ATR固定倍数；BNB使用1.5x ATR TP）"""
     try:
-        # 获取当前价格用于验证
         current_price = float(exchange.fetch_ticker(symbol)['last'])
-        
-        if USE_ATR_DYNAMIC_STOPS and atr_value and atr_value > 0:
-            # 使用ATR动态计算
-            atr_sl_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_STOP_LOSS_MULTIPLIER))
-            atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER))
-            
-            if signal == 'long':
-                stop_loss = max(price * 0.95, price - (atr_value * atr_sl_multiplier))  # 至少5%止损
-                take_profit = price + (atr_value * atr_tp_multiplier)
-            else:  # short
-                stop_loss = min(price * 1.05, price + (atr_value * atr_sl_multiplier))  # 至少5%止损
-                take_profit = max(price * 0.94, price - (atr_value * atr_tp_multiplier))  # 至少6%止盈
-        else:
-            # 固定百分比止损止盈
-            if signal == 'long':
-                stop_loss = price * 0.95  # 5%止损
-                take_profit = price * 1.06  # 6%止盈
-            else:  # short
-                stop_loss = price * 1.05  # 5%止损
-                take_profit = price * 0.94  # 6%止盈
-        
-        # 严格验证止盈止损价格合理性
+        ohlcv = get_klines(symbol, '5m', limit=2)
+        df_last = process_klines(ohlcv)
+        last_vwap = df_last['VWAP'].iloc[-1] if df_last is not None and 'VWAP' in df_last.columns else None
+        last_high = float(df_last['high'].iloc[-1]) if df_last is not None else None
+        last_low = float(df_last['low'].iloc[-1]) if df_last is not None else None
+        atr_used = float(df_last['ATR_14'].iloc[-1]) if df_last is not None and 'ATR_14' in df_last.columns else (atr_value or 0)
+
+        base_symbol = symbol.split('-')[0].upper()
+        tp_mult = 1.5 if base_symbol == 'BNB' else 2.0  # BNB用1.5x ATR，其它2x
+
         if signal == 'long':
-            # 做多：止盈必须高于入场价，止损必须低于入场价
-            if take_profit <= price:
-                take_profit = price * 1.06  # 确保止盈高于入场价
-            if stop_loss >= price:
-                stop_loss = price * 0.95  # 确保止损低于入场价
-            # 额外验证：止盈必须高于当前价格
-            if take_profit <= current_price:
-                take_profit = current_price * 1.02  # 设置比当前价高2%的止盈
+            candidates = []
+            if last_vwap:
+                candidates.append(last_vwap - (atr_used if atr_used > 0 else last_vwap * 0.01))  # VWAP - 1x ATR 或约1%
+            if last_low:
+                candidates.append(last_low * 0.995)  # 入场K线低点下方0.5%
+            stop_loss = min(candidates) if candidates else (price * 0.99)
+
+            take_profit = price + (atr_used * tp_mult) if atr_used > 0 else price * 1.02
         else:  # short
-            # 做空：止盈必须低于入场价，止损必须高于入场价
+            candidates = []
+            if last_vwap:
+                candidates.append(last_vwap + (atr_used if atr_used > 0 else last_vwap * 0.01))  # VWAP + 1x ATR 或约1%
+            if last_high:
+                candidates.append(last_high * 1.005)  # 入场K线高点上方0.5%
+            stop_loss = max(candidates) if candidates else (price * 1.01)
+
+            take_profit = price - (atr_used * tp_mult) if atr_used > 0 else price * 0.98
+
+        # 合理性校验
+        if signal == 'long':
+            if take_profit <= price:
+                take_profit = price * 1.02
+            if stop_loss >= price:
+                stop_loss = price * 0.99
+            if take_profit <= current_price:
+                take_profit = max(current_price * 1.02, price * 1.02)
+        else:
             if take_profit >= price:
-                take_profit = price * 0.94  # 确保止盈低于入场价
+                take_profit = price * 0.98
             if stop_loss <= price:
-                stop_loss = price * 1.05  # 确保止损高于入场价
-            # 额外验证：止盈必须低于当前价格
+                stop_loss = price * 1.01
             if take_profit >= current_price:
-                take_profit = current_price * 0.98  # 设置比当前价低2%的止盈
-        
-        log_message("DEBUG", f"{symbol} {signal} 止盈止损计算: 入场价={price:.4f}, 当前价={current_price:.4f}, 止损={stop_loss:.4f}, 止盈={take_profit:.4f}")
-        
-        return {
-            'stop_loss': stop_loss,
-            'take_profit': take_profit
-        }
-        
+                take_profit = min(current_price * 0.98, price * 0.98)
+
+        log_message("DEBUG", f"{symbol} {signal} SL/TP: entry={price:.4f}, vwap={last_vwap if last_vwap else 0:.4f}, atr={atr_used:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f}")
+        return {'stop_loss': stop_loss, 'take_profit': take_profit}
     except Exception as e:
         log_message("ERROR", f"计算止损止盈失败: {str(e)}")
         return None
@@ -865,7 +949,7 @@ def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
     except Exception as e:
         log_message("ERROR", f"更新交易统计失败: {str(e)}")
 
-def check_positions():
+def check_positions_legacy():
     """检查持仓状态，基于MACD金叉/死叉和K线阴阳线确认平仓"""
     try:
         for symbol in list(position_tracker['positions'].keys()):
@@ -977,7 +1061,7 @@ def close_position(symbol, reason="手动平仓"):
         if ACCOUNT_MODE == 'hedge':
             params['posSide'] = 'long' if position['side'] == 'long' else 'short'
         
-        order = exchange.createOrder(
+        order = exchange.create_order(
             symbol,
             'market',
             side,
@@ -1085,619 +1169,6 @@ def trading_loop():
         log_message("ERROR", f"交易循环启动失败: {str(e)}")
         traceback.print_exc()
 
-# =================================
-# 附加：6个策略函数 + 可选 SYMBOLS 覆盖（不改动现有逻辑）
-# 使用说明：
-# - 这些函数供你的回测/外部加载器使用；当前 main.py 的回测仍按既有流程运行。
-# - 若需用下面的 SYMBOLS 覆盖现有 SYMBOLS，请在环境变量设置 USE_APPENDED_SYMBOLS=1。
-# =================================
-
-from typing import Dict, Any, Optional
-
-def _bool_series(s):
-    # 将任意布尔条件安全地转换为布尔Series并与索引对齐
-    return pd.Series(s, index=s.index).fillna(False).astype(bool)
-
-def generate_signals_trend_ema_adx_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    ema_fast = int(cfg.get("ema_fast", 20))
-    ema_slow = int(cfg.get("ema_slow", 50))
-    adx_thr = float(cfg.get("adx_thr", 25))
-    rsi_len = int(cfg.get("rsi_len", 14))
-    rsi_os = float(cfg.get("rsi_os", 35))
-    rsi_ob = float(cfg.get("rsi_ob", 65))
-
-    ema_f = df["close"].ewm(span=ema_fast, adjust=False).mean()
-    ema_s = df["close"].ewm(span=ema_slow, adjust=False).mean()
-    adx_series = calculate_adx(df["high"], df["low"], df["close"], period=cfg.get("adx_period", 14))
-    rsi_series = calculate_rsi(df["close"], period=rsi_len)
-
-    long_entry = (ema_f > ema_s) & (adx_series > adx_thr) & (rsi_series > rsi_os)
-    long_exit  = (ema_f < ema_s) | (rsi_series > rsi_ob)
-    short_entry = (ema_f < ema_s) & (adx_series > adx_thr) & (rsi_series < (100 - rsi_os))
-    short_exit  = (ema_f > ema_s) | (rsi_series < (100 - rsi_ob))
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    fast = int(cfg.get("fast", 12)); slow = int(cfg.get("slow", 26)); signal = int(cfg.get("signal", 9))
-    rsi_len = int(cfg.get("rsi_len", 14))
-    rsi_os = float(cfg.get("rsi_os", 35)); rsi_ob = float(cfg.get("rsi_ob", 65))
-    macd_line, signal_line, _ = calculate_macd(df["close"], fast=fast, slow=slow, signal=signal)
-    rsi_series = calculate_rsi(df["close"], period=rsi_len)
-
-    cross_up = (macd_line > signal_line) & (macd_line.shift(1) <= signal_line.shift(1))
-    cross_dn = (macd_line < signal_line) & (macd_line.shift(1) >= signal_line.shift(1))
-
-    long_entry = cross_up & (rsi_series > rsi_os)
-    long_exit  = cross_dn | (rsi_series > rsi_ob)
-    short_entry = cross_dn & (rsi_series < (100 - rsi_os))
-    short_exit  = cross_up | (rsi_series < (100 - rsi_ob))
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    period = int(cfg.get("period", 20)); std_k = float(cfg.get("std_k", 2.0))
-    rsi_len = int(cfg.get("rsi_len", 14))
-    rsi_os = float(cfg.get("rsi_os", 30)); rsi_ob = float(cfg.get("rsi_ob", 70))
-    upper, mid, lower = calculate_bollinger_bands(df["close"], period=period, std_dev=std_k)
-    rsi_series = calculate_rsi(df["close"], period=rsi_len)
-
-    long_entry = (df["close"] <= lower) & (rsi_series <= rsi_os)
-    long_exit  = (df["close"] >= mid) | (rsi_series >= rsi_ob)
-    short_entry = (df["close"] >= upper) & (rsi_series >= rsi_ob)
-    short_exit  = (df["close"] <= mid) | (rsi_series <= rsi_os)
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    k_period = int(cfg.get("k_period", 9)); d_period = int(cfg.get("d_period", 3))
-    ma_fast = int(cfg.get("ma_fast", 10)); ma_slow = int(cfg.get("ma_slow", 30))
-    vol_len = int(cfg.get("vol_len", 20)); vol_k = float(cfg.get("vol_k", 1.2))
-    k, d = calculate_stochastic(df["high"], df["low"], df["close"], k_period=k_period, d_period=d_period)
-    ma_f = df["close"].rolling(ma_fast).mean()
-    ma_s = df["close"].rolling(ma_slow).mean()
-    vol_ma = df["volume"].rolling(vol_len).mean()
-
-    cross_up = (k > d) & (k.shift(1) <= d.shift(1))
-    cross_dn = (k < d) & (k.shift(1) >= d.shift(1))
-
-    long_entry = cross_up & (ma_f > ma_s) & (df["volume"] > vol_ma * vol_k)
-    long_exit  = cross_dn | (ma_f < ma_s)
-    short_entry = cross_dn & (ma_f < ma_s) & (df["volume"] > vol_ma * vol_k)
-    short_exit  = cross_up | (ma_f > ma_s)
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    atr_p = int(cfg.get("atr_p", 14)); sma_p = int(cfg.get("sma_p", 20)); k = float(cfg.get("k", 1.5))
-    atr_series = calculate_atr(df["high"], df["low"], df["close"], period=atr_p)
-    sma = df["close"].rolling(sma_p).mean()
-
-    long_entry = df["close"] > (sma + k * atr_series)
-    long_exit  = df["close"] < sma
-    short_entry = df["close"] < (sma - k * atr_series)
-    short_exit  = df["close"] > sma
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_pullback_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    cfg = cfg or {}
-    ema_fast = int(cfg.get("ema_fast", 20)); ema_slow = int(cfg.get("ema_slow", 50))
-    bb_p = int(cfg.get("bb_p", 20)); bb_k = float(cfg.get("bb_k", 2.0))
-    rsi_len = int(cfg.get("rsi_len", 14)); rsi_pullback = float(cfg.get("rsi_pullback", 45)); rsi_rebound = float(cfg.get("rsi_rebound", 55))
-    ema_f = df["close"].ewm(span=ema_fast, adjust=False).mean()
-    ema_s = df["close"].ewm(span=ema_slow, adjust=False).mean()
-    upper, mid, lower = calculate_bollinger_bands(df["close"], period=bb_p, std_dev=bb_k)
-    rsi_series = calculate_rsi(df["close"], period=rsi_len)
-
-    long_entry = (ema_f > ema_s) & (df["close"] <= mid) & (rsi_series <= rsi_pullback)
-    long_exit  = (rsi_series >= rsi_rebound) | (df["close"] >= upper)
-    short_entry = (ema_f < ema_s) & (df["close"] >= mid) & (rsi_series >= (100 - rsi_pullback))
-    short_exit  = (rsi_series <= (100 - rsi_rebound)) | (df["close"] <= lower)
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-# 可选：覆盖 SYMBOLS（仅当设置 USE_APPENDED_SYMBOLS=1 时生效）
-if os.getenv("USE_APPENDED_SYMBOLS", "0") == "1":
-    SYMBOLS = [
-        'BTC-USDT-SWAP', 'ETH-USDT-SWAP', 'SOL-USDT-SWAP', 'BNB-USDT-SWAP',
-        'XRP-USDT-SWAP', 'DOGE-USDT-SWAP', 'ADA-USDT-SWAP', 'AVAX-USDT-SWAP',
-        'SHIB-USDT-SWAP', 'DOT-USDT-SWAP', 'FIL-USDT-SWAP', 'ZRO-USDT-SWAP',
-        'WIF-USDT-SWAP', 'WLD-USDT-SWAP'
-    ]
-
-# =================================
-# 多策略回测模块（追加，不改动原有逻辑）
-# - 依赖上面已追加的6个 generate_signals_xxx 函数
-# - 在启动流程中自动执行：打印每个策略名的结果并保存独立报告
-# =================================
-from typing import Callable, Tuple
-
-def generate_signals_combined_high_winrate_profit(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI（高胜率）+ 趋势EMA_ADX_RSI（高盈利率）"""
-    cfg = cfg or {}
-    
-    # 获取两个策略的信号
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    
-    # 信号叠加：两个策略同时满足条件才开仓
-    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"]
-    
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-# 高胜率指标（趋势回调_布林带_RSI）的搭配组合
-def generate_signals_pullback_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + MACD_RSI"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_macd = generate_signals_macd_rsi(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_macd["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_macd["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_macd["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_macd["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + 布林带_RSI"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_bb = generate_signals_bb_rsi(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_bb["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_bb["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_bb["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_bb["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + KDJ_MA_成交量"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_kdj["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_kdj["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_kdj["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_kdj["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + ATR突破"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_atr = generate_signals_atr_breakout(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_atr["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_atr["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_atr["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_atr["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_trend_macd(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + MACD_RSI"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_macd = generate_signals_macd_rsi(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_macd["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_macd["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_macd["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_macd["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_trend_bb(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + 布林带_RSI"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_bb = generate_signals_bb_rsi(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_bb["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_bb["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_bb["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_bb["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_trend_kdj(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + KDJ_MA_成交量"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_kdj["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_kdj["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_kdj["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_kdj["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_pullback_trend_atr(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势回调_布林带_RSI + 趋势EMA_ADX_RSI + ATR突破"""
-    cfg = cfg or {}
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_atr = generate_signals_atr_breakout(df, cfg)
-    long_entry = signals_pullback["long_entry"] & signals_trend["long_entry"] & signals_atr["long_entry"]
-    long_exit = signals_pullback["long_exit"] | signals_trend["long_exit"] | signals_atr["long_exit"]
-    short_entry = signals_pullback["short_entry"] & signals_trend["short_entry"] & signals_atr["short_entry"]
-    short_exit = signals_pullback["short_exit"] | signals_trend["short_exit"] | signals_atr["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-# 高盈利指标（趋势EMA_ADX_RSI）的搭配组合
-def generate_signals_trend_macd_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + MACD_RSI"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_macd = generate_signals_macd_rsi(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_macd["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_macd["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_macd["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_macd["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_bb_rsi(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + 布林带_RSI"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_bb = generate_signals_bb_rsi(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_bb["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_bb["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_bb["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_bb["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_kdj_ma_volume(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + KDJ_MA_成交量"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_kdj["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_kdj["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_kdj["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_kdj["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_atr_breakout(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + ATR突破"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_atr = generate_signals_atr_breakout(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_atr["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_atr["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_atr["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_atr["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_pullback_macd(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + MACD_RSI"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_macd = generate_signals_macd_rsi(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_macd["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_macd["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_macd["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_macd["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_pullback_bb(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + 布林带_RSI"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_bb = generate_signals_bb_rsi(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_bb["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_bb["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_bb["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_bb["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_pullback_kdj(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + KDJ_MA_成交量"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_kdj = generate_signals_kdj_ma_volume(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_kdj["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_kdj["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_kdj["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_kdj["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def generate_signals_trend_pullback_atr(df: pd.DataFrame, cfg: Optional[Dict[str, Any]] = None) -> Dict[str, pd.Series]:
-    """组合策略：趋势EMA_ADX_RSI + 趋势回调_布林带_RSI + ATR突破"""
-    cfg = cfg or {}
-    signals_trend = generate_signals_trend_ema_adx_rsi(df, cfg)
-    signals_pullback = generate_signals_trend_pullback_bb_rsi(df, cfg)
-    signals_atr = generate_signals_atr_breakout(df, cfg)
-    long_entry = signals_trend["long_entry"] & signals_pullback["long_entry"] & signals_atr["long_entry"]
-    long_exit = signals_trend["long_exit"] | signals_pullback["long_exit"] | signals_atr["long_exit"]
-    short_entry = signals_trend["short_entry"] & signals_pullback["short_entry"] & signals_atr["short_entry"]
-    short_exit = signals_trend["short_exit"] | signals_pullback["short_exit"] | signals_atr["short_exit"]
-    return {
-        "long_entry": _bool_series(long_entry),
-        "long_exit": _bool_series(long_exit),
-        "short_entry": _bool_series(short_entry),
-        "short_exit": _bool_series(short_exit),
-    }
-
-def _strategy_registry() -> list[Tuple[str, str, Callable]]:
-    """返回策略名称、指标描述和策略函数"""
-    return [
-        # 原始单指标策略
-        ("趋势EMA_ADX_RSI", "EMA+ADX+RSI趋势跟踪", generate_signals_trend_ema_adx_rsi),
-        ("MACD_RSI", "MACD+RSI动量反转", generate_signals_macd_rsi),
-        ("布林带_RSI", "布林带+RSI超买超卖", generate_signals_bb_rsi),
-        ("KDJ_MA_成交量", "KDJ+MA+成交量突破", generate_signals_kdj_ma_volume),
-        ("ATR突破", "ATR+威廉指标+动量", generate_signals_atr_breakout),
-        ("趋势回调_布林带_RSI", "趋势回调+布林带+RSI", generate_signals_trend_pullback_bb_rsi),
-        
-        # 高胜率指标（趋势回调_布林带_RSI）的搭配组合
-        ("高胜率+高盈利率组合", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI", generate_signals_combined_high_winrate_profit),
-        ("高胜率+MACD_RSI", "趋势回调_布林带_RSI+MACD_RSI", generate_signals_pullback_macd_rsi),
-        ("高胜率+布林带_RSI", "趋势回调_布林带_RSI+布林带_RSI", generate_signals_pullback_bb_rsi),
-        ("高胜率+KDJ_MA_成交量", "趋势回调_布林带_RSI+KDJ_MA_成交量", generate_signals_pullback_kdj_ma_volume),
-        ("高胜率+ATR突破", "趋势回调_布林带_RSI+ATR突破", generate_signals_pullback_atr_breakout),
-        ("高胜率+趋势+MACD", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+MACD_RSI", generate_signals_pullback_trend_macd),
-        ("高胜率+趋势+布林带", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+布林带_RSI", generate_signals_pullback_trend_bb),
-        ("高胜率+趋势+KDJ", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+KDJ_MA_成交量", generate_signals_pullback_trend_kdj),
-        ("高胜率+趋势+ATR", "趋势回调_布林带_RSI+趋势EMA_ADX_RSI+ATR突破", generate_signals_pullback_trend_atr),
-        
-        # 高盈利指标（趋势EMA_ADX_RSI）的搭配组合
-        ("高盈利+MACD_RSI", "趋势EMA_ADX_RSI+MACD_RSI", generate_signals_trend_macd_rsi),
-        ("高盈利+布林带_RSI", "趋势EMA_ADX_RSI+布林带_RSI", generate_signals_trend_bb_rsi),
-        ("高盈利+KDJ_MA_成交量", "趋势EMA_ADX_RSI+KDJ_MA_成交量", generate_signals_trend_kdj_ma_volume),
-        ("高盈利+ATR突破", "趋势EMA_ADX_RSI+ATR突破", generate_signals_trend_atr_breakout),
-        ("高盈利+高胜率+MACD", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+MACD_RSI", generate_signals_trend_pullback_macd),
-        ("高盈利+高胜率+布林带", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+布林带_RSI", generate_signals_trend_pullback_bb),
-        ("高盈利+高胜率+KDJ", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+KDJ_MA_成交量", generate_signals_trend_pullback_kdj),
-        ("高盈利+高胜率+ATR", "趋势EMA_ADX_RSI+趋势回调_布林带_RSI+ATR突破", generate_signals_trend_pullback_atr),
-    ]
-
-def backtest_with_signals(symbol: str, days: int, initial_balance: float, signals: dict) -> dict:
-    """
-    基于给定信号字典 {long_entry,long_exit,short_entry,short_exit} 的简单持仓回测。
-    单仓位、双向可切换，资金按 initial_balance*0.8 参与，收益以点对点价差近似。
-    """
-    df = get_historical_data(symbol, days)
-    if df is None or len(df) < 100:
-        return None
-
-    # 对齐信号索引
-    le = signals.get("long_entry", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
-    lx = signals.get("long_exit", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
-    se = signals.get("short_entry", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
-    sx = signals.get("short_exit", pd.Series(False, index=df.index)).reindex(df.index, fill_value=False)
-
-    position = None  # 'long' | 'short' | None
-    entry_price = 0.0
-    entry_time = None
-    balance = initial_balance
-    trades = []
-    peak = balance
-    max_dd = 0.0
-
-    for i in range(1, len(df)):
-        price = float(df["close"].iloc[i])
-        ts = df["timestamp"].iloc[i]
-
-        # 更新回撤
-        if balance > peak:
-            peak = balance
-        dd = (peak - balance) / peak * 100 if peak > 0 else 0
-        if dd > max_dd:
-            max_dd = dd
-
-        # 平仓逻辑优先
-        if position == 'long' and (lx.iloc[i] or se.iloc[i]):
-            pnl = (price - entry_price) / entry_price * balance * 0.8
-            balance += pnl
-            trades.append({"type":"close_long","price":price,"pnl":pnl,"timestamp":ts})
-            position = None
-
-        elif position == 'short' and (sx.iloc[i] or le.iloc[i]):
-            pnl = (entry_price - price) / entry_price * balance * 0.8
-            balance += pnl
-            trades.append({"type":"close_short","price":price,"pnl":pnl,"timestamp":ts})
-            position = None
-
-        # 开仓
-        if position is None:
-            if le.iloc[i]:
-                position = 'long'
-                entry_price = price
-                entry_time = ts
-                trades.append({"type":"open_long","price":price,"timestamp":ts})
-            elif se.iloc[i]:
-                position = 'short'
-                entry_price = price
-                entry_time = ts
-                trades.append({"type":"open_short","price":price,"timestamp":ts})
-
-    closed = [t for t in trades if 'pnl' in t]
-    total_trades = len(closed)
-    win = len([t for t in closed if t['pnl'] > 0])
-    loss = len([t for t in closed if t['pnl'] < 0])
-    total_pnl = sum(t['pnl'] for t in closed)
-    win_rate = (win / total_trades * 100) if total_trades > 0 else 0.0
-    pf = abs(sum(t['pnl'] for t in closed if t['pnl'] > 0) / sum(t['pnl'] for t in closed if t['pnl'] < 0)) if loss > 0 else float('inf')
-
-    return {
-        "symbol": symbol,
-        "days": days,
-        "initial_balance": initial_balance,
-        "final_balance": balance,
-        "total_return": (balance - initial_balance) / initial_balance * 100,
-        "total_trades": total_trades,
-        "winning_trades": win,
-        "losing_trades": loss,
-        "win_rate": win_rate,
-        "total_pnl": total_pnl,
-        "profit_factor": pf,
-        "max_drawdown": max_dd,
-    }
-
-def run_multi_strategy_backtests(symbols=None, days_list=[7,14,30], initial_balance=10000):
-    if symbols is None:
-        symbols = SYMBOLS[:5]
-    all_reports = []
-    report_lines = ["=== 多策略回测报告（按指标组合分组） ===", ""]
-
-    for strat_name, indicator_desc, strat_fn in _strategy_registry():
-        report_lines.append(f"--- 策略: {strat_name} ---")
-        report_lines.append(f"指标组合: {indicator_desc}")
-        for days in days_list:
-            day_results = []
-            for sym in symbols:
-                try:
-                    # 准备 DataFrame 后生成策略信号
-                    df = get_historical_data(sym, days)
-                    if df is None or len(df) < 100:
-                        log_message("WARNING", f"[{strat_name}] {sym} 历史数据不足，跳过")
-                        continue
-                    signals = strat_fn(df, {})
-                    result = backtest_with_signals(sym, days, initial_balance, signals)
-                    if result:
-                        day_results.append(result)
-                        log_message("INFO", f"[{strat_name}] {sym} {days}天: 胜率{result['win_rate']:.1f}% 收益{result['total_return']:.2f}% 交易{result['total_trades']}")
-                except Exception as e:
-                    log_message("ERROR", f"[{strat_name}] 回测 {sym} 失败: {e}")
-                    continue
-
-            if day_results:
-                avg_win_rate = sum(r['win_rate'] for r in day_results)/len(day_results)
-                avg_return = sum(r['total_return'] for r in day_results)/len(day_results)
-                total_trades = sum(r['total_trades'] for r in day_results)
-                report_lines.extend([
-                    f"{days}天汇总: 标的数={len(day_results)} 平均胜率={avg_win_rate:.1f}% 平均收益={avg_return:.2f}% 总交易={total_trades}",
-                    ""
-                ])
-                all_reports.extend([dict(r, strategy=strat_name, indicator_desc=indicator_desc) for r in day_results])
-
-    # 保存报告
-    try:
-        timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-        out = f"backtest_results_multi_{timestamp}.txt"
-        with open(out, "w", encoding="utf-8") as f:
-            f.write("\n".join(report_lines))
-        log_message("SUCCESS", f"多策略回测结果已保存到: {out}")
-    except Exception as e:
-        log_message("WARNING", f"保存多策略回测报告失败: {e}")
-
-    # 控制台打印汇总
-    
-    return all_reports
-
-
-
 def start_trading_system():
     """启动交易系统"""
     global exchange
@@ -1714,7 +1185,7 @@ def start_trading_system():
             return
         
         # 显示启动信息
-        log_message("SUCCESS", "MACD(6,16,9)策略交易系统启动成功")
+        log_message("SUCCESS", "VWAP+MACD(12,26,9)+RSI(14)策略交易系统启动成功")
         log_message("INFO", f"智能杠杆系统: BTC最大{MAX_LEVERAGE_BTC}x, ETH最大{MAX_LEVERAGE_ETH}x")
         log_message("INFO", f"交易对数量: {len(SYMBOLS)}")
         log_message("INFO", f"最大持仓数: {MAX_OPEN_POSITIONS}")
@@ -1734,187 +1205,179 @@ def start_trading_system():
 # =================================
 
 def get_historical_data(symbol, days=30):
-    """获取历史数据用于回测（支持无API密钥的公共行情模式）"""
+    """获取历史数据用于回测"""
     try:
-        import ccxt
         # 计算需要获取的K线数量
-        limit = days * 24 * 2  # 30分钟K线，每天48根
-
-        # 准备只读公共行情客户端
-        ex = exchange
-        if ex is None:
-            # 优先使用 OKX（与你的合约格式 XXX-USDT-SWAP 一致），失败则回退 Binance
-            try:
-                ex = ccxt.okx()
-            except Exception:
-                ex = ccxt.binance()
-
-        # 统一交易对格式：Binance 无 SWAP 后缀，OKX 需要 -USDT-SWAP
-        sym = symbol
-        if isinstance(ex, ccxt.binance):
-            # 转为 Binance 现货/合约通用格式，如 BTC/USDT
-            if '-USDT-SWAP' in sym:
-                sym = sym.replace('-USDT-SWAP', '/USDT')
-            elif ':' in sym:
-                sym = sym.replace(':USDT', '/USDT')
-        elif isinstance(ex, ccxt.okx):
-            # 确保是 OKX 合约格式
-            if ':USDT' in sym:
-                sym = sym.replace(':USDT', '-USDT-SWAP')
-            elif not sym.endswith('-USDT-SWAP'):
-                sym = sym.split('/USDT')[0] + '-USDT-SWAP' if '/USDT' in sym else sym
-
-        # 拉取30m K线（公共接口无需私钥）
-        ohlcv = ex.fetch_ohlcv(sym, timeframe='30m', limit=limit)
-        if not ohlcv or len(ohlcv) == 0:
-            raise Exception("公共行情返回为空")
-
+        limit = days * 24 * 12  # 5分钟K线，每天288根
+        
+        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=limit)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+        
         return df
     except Exception as e:
         log_message("ERROR", f"获取历史数据失败 {symbol}: {e}")
         return None
 
 def backtest_strategy(symbol, days=7, initial_balance=10000):
-    """策略回测 - EMA5/EMA10 交叉 + 固定止盈0.0058 + 交叉前一根K线止损；统一50x杠杆"""
+    """策略回测 - 增强版"""
     try:
         log_message("INFO", f"开始回测 {symbol}，回测天数: {days}，初始资金: {initial_balance}")
-        log_message("INFO", "已启用BB(20,2)中轨0.5%入场过滤")
+        
+        # 获取历史数据
         df = get_historical_data(symbol, days)
-        if df is None or len(df) < 50:
+        if df is None or len(df) < 100:
             log_message("WARNING", f"历史数据不足，无法回测 {symbol}")
             return None
-
-        # 计算 EMA5/EMA10
-        df['ema5'] = df['close'].ewm(span=5, adjust=False).mean()
-        df['ema10'] = df['close'].ewm(span=10, adjust=False).mean()
-        # 计算 BB(20,2) 中轨（仅用于过滤）
-        df['bb_mid'] = df['close'].rolling(window=20, min_periods=20).mean()
-        bb_threshold = 0.005  # 0.5%
-
-        position = None  # 'long' | 'short' | None
-        entry_price = 0.0
+        
+        # 计算技术指标
+        # VWAP(日内) + MACD(12,26,9) + RSI(14)
+        df['macd'], df['macd_signal'], df['macd_histogram'] = calculate_macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+        typical_price = (df['high'] + df['low'] + df['close']) / 3.0
+        vwap_value = typical_price * df['volume']
+        df['day'] = df['timestamp'].dt.date
+        df['cum_vwap'] = df.groupby('day')[vwap_value.name].cumsum()
+        df['cum_volume'] = df.groupby('day')['volume'].cumsum()
+        df['VWAP'] = df['cum_vwap'] / df['cum_volume']
+        df['RSI'] = calculate_rsi(df['close'], period=14)
+        
+        # 回测变量
+        position = None
+        entry_price = 0
         entry_time = None
-        entry_size = 0.0  # 以50x杠杆计算的合约数量
         trades = []
         balance = initial_balance
+        max_drawdown = 0
         peak_balance = initial_balance
-        max_drawdown = 0.0
         trade_details = []
-
+        
         for i in range(1, len(df)):
-            cur = df.iloc[i]
-            prev = df.iloc[i - 1]
-
+            current = df.iloc[i]
+            prev = df.iloc[i-1]
+            
             # 更新最大回撤
             if balance > peak_balance:
                 peak_balance = balance
-            dd = (peak_balance - balance) / peak_balance * 100 if peak_balance > 0 else 0
-            if dd > max_drawdown:
-                max_drawdown = dd
-
-            # 计算交叉
-            cross_up = (prev['ema5'] <= prev['ema10']) and (cur['ema5'] > cur['ema10'])
-            cross_dn = (prev['ema5'] >= prev['ema10']) and (cur['ema5'] < cur['ema10'])
-
-            # 平仓检查（基于止盈/止损）
-            if position == 'long':
-                tp_price = entry_price * (1 + 0.0058)
-                sl_price = float(prev['low'])  # 交叉前一根K线的低点
-                # 触发 TP 或 SL
-                if cur['high'] >= tp_price or cur['low'] <= sl_price:
-                    exit_price = tp_price if cur['high'] >= tp_price else sl_price
-                    pnl = (exit_price - entry_price) * entry_size
-                    balance += pnl
-                    trades.append({'type': 'close_long', 'price': exit_price, 'pnl': pnl, 'timestamp': cur['timestamp']})
-                    trade_details.append({
-                        'symbol': symbol, 'side': 'close_long',
-                        'entry_price': entry_price, 'exit_price': exit_price,
-                        'pnl': pnl, 'pnl_percentage': (pnl / initial_balance * 100) if initial_balance > 0 else 0,
-                        'entry_time': entry_time, 'exit_time': cur['timestamp'],
-                        'duration': (cur['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+            current_drawdown = (peak_balance - balance) / peak_balance * 100
+            if current_drawdown > max_drawdown:
+                max_drawdown = current_drawdown
+            
+            # 检查信号
+            if pd.notna(current['macd']) and pd.notna(current['adx']):
+                # 做多信号
+                if (prev['macd'] <= prev['macd_signal'] and 
+                    current['macd'] > current['macd_signal'] and 
+                    current['close'] > current['VWAP'] and 
+                    current['RSI'] > 50 and position != 'long'):
+                    
+                    if position == 'short':
+                        # 平空仓
+                        pnl = (entry_price - current['close']) / entry_price * balance * 0.8
+                        trades.append({
+                            'type': 'close_short',
+                            'price': current['close'],
+                            'pnl': pnl,
+                            'timestamp': current['timestamp']
+                        })
+                        trade_details.append({
+                            'symbol': symbol,
+                            'side': 'close_short',
+                            'entry_price': entry_price,
+                            'exit_price': current['close'],
+                            'pnl': pnl,
+                            'pnl_percentage': (pnl / balance * 100),
+                            'entry_time': entry_time,
+                            'exit_time': current['timestamp'],
+                            'duration': (current['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+                        })
+                        balance += pnl
+                    
+                    # 开多仓
+                    position = 'long'
+                    entry_price = current['close']
+                    entry_time = current['timestamp']
+                    trades.append({
+                        'type': 'open_long',
+                        'price': entry_price,
+                        'timestamp': current['timestamp']
                     })
-                    position = None
-                    entry_price = 0.0
-                    entry_size = 0.0
-                    entry_time = None
-
-            elif position == 'short':
-                tp_price = entry_price * (1 - 0.0058)
-                sl_price = float(prev['high'])  # 交叉前一根K线的高点
-                if cur['low'] <= tp_price or cur['high'] >= sl_price:
-                    exit_price = tp_price if cur['low'] <= tp_price else sl_price
-                    pnl = (entry_price - exit_price) * entry_size
-                    balance += pnl
-                    trades.append({'type': 'close_short', 'price': exit_price, 'pnl': pnl, 'timestamp': cur['timestamp']})
-                    trade_details.append({
-                        'symbol': symbol, 'side': 'close_short',
-                        'entry_price': entry_price, 'exit_price': exit_price,
-                        'pnl': pnl, 'pnl_percentage': (pnl / initial_balance * 100) if initial_balance > 0 else 0,
-                        'entry_time': entry_time, 'exit_time': cur['timestamp'],
-                        'duration': (cur['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+                
+                # 做空信号
+                elif (prev['macd'] >= prev['macd_signal'] and 
+                      current['macd'] < current['macd_signal'] and 
+                      current['close'] < current['VWAP'] and 
+                      current['RSI'] < 50 and position != 'short'):
+                    
+                    if position == 'long':
+                        # 平多仓
+                        pnl = (current['close'] - entry_price) / entry_price * balance * 0.8
+                        trades.append({
+                            'type': 'close_long',
+                            'price': current['close'],
+                            'pnl': pnl,
+                            'timestamp': current['timestamp']
+                        })
+                        trade_details.append({
+                            'symbol': symbol,
+                            'side': 'close_long',
+                            'entry_price': entry_price,
+                            'exit_price': current['close'],
+                            'pnl': pnl,
+                            'pnl_percentage': (pnl / balance * 100),
+                            'entry_time': entry_time,
+                            'exit_time': current['timestamp'],
+                            'duration': (current['timestamp'] - entry_time).total_seconds() / 3600 if entry_time else 0
+                        })
+                        balance += pnl
+                    
+                    # 开空仓
+                    position = 'short'
+                    entry_price = current['close']
+                    entry_time = current['timestamp']
+                    trades.append({
+                        'type': 'open_short',
+                        'price': entry_price,
+                        'timestamp': current['timestamp']
                     })
-                    position = None
-                    entry_price = 0.0
-                    entry_size = 0.0
-                    entry_time = None
-
-            # 入场（仅在无持仓时，根据交叉开仓 + BB(20,2)过滤）
-            if position is None:
-                if cross_up:
-                    # 做多过滤：close 在 [bb_mid, bb_mid*(1+0.5%)]
-                    if pd.notna(cur['bb_mid']):
-                        mid = float(cur['bb_mid'])
-                        upper_near = mid * (1.0 + bb_threshold)
-                        if (cur['close'] >= mid) and (cur['close'] <= upper_near):
-                            position = 'long'
-                            entry_price = float(cur['close'])
-                            entry_time = cur['timestamp']
-                            entry_size = (balance * 0.8 * 50) / entry_price
-                            trades.append({'type': 'open_long', 'price': entry_price, 'timestamp': entry_time})
-                elif cross_dn:
-                    # 做空过滤：close 在 [bb_mid*(1-0.5%), bb_mid]
-                    if pd.notna(cur['bb_mid']):
-                        mid = float(cur['bb_mid'])
-                        lower_near = mid * (1.0 - bb_threshold)
-                        if (cur['close'] <= mid) and (cur['close'] >= lower_near):
-                            position = 'short'
-                            entry_price = float(cur['close'])
-                            entry_time = cur['timestamp']
-                            entry_size = (balance * 0.8 * 50) / entry_price
-                            trades.append({'type': 'open_short', 'price': entry_price, 'timestamp': entry_time})
-
-        # 结算
-        closed = [t for t in trades if 'pnl' in t]
-        total_trades = len(closed)
-        winning_trades = len([t for t in closed if t['pnl'] > 0])
-        losing_trades = len([t for t in closed if t['pnl'] < 0])
-        total_pnl = sum(t['pnl'] for t in closed)
-        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0.0
-        profit_factor = abs(
-            sum(t['pnl'] for t in closed if t['pnl'] > 0) / sum(t['pnl'] for t in closed if t['pnl'] < 0)
-        ) if losing_trades > 0 else float('inf')
-
-        result = {
+        
+        # 计算回测结果
+        closed_trades = [t for t in trades if 'pnl' in t]
+        total_trades = len(closed_trades)
+        winning_trades = len([t for t in closed_trades if t['pnl'] > 0])
+        losing_trades = len([t for t in closed_trades if t['pnl'] < 0])
+        total_pnl = sum([t['pnl'] for t in closed_trades])
+        
+        win_rate = (winning_trades / total_trades * 100) if total_trades > 0 else 0
+        profit_factor = abs(sum([t['pnl'] for t in closed_trades if t['pnl'] > 0]) / 
+                          sum([t['pnl'] for t in closed_trades if t['pnl'] < 0])) if losing_trades > 0 else float('inf')
+        
+        # 计算平均盈亏
+        avg_win = sum([t['pnl'] for t in closed_trades if t['pnl'] > 0]) / winning_trades if winning_trades > 0 else 0
+        avg_loss = sum([t['pnl'] for t in closed_trades if t['pnl'] < 0]) / losing_trades if losing_trades > 0 else 0
+        
+        backtest_result = {
             'symbol': symbol,
             'days': days,
             'initial_balance': initial_balance,
             'final_balance': balance,
             'total_return': ((balance - initial_balance) / initial_balance * 100),
+            'return_rate': ((balance - initial_balance) / initial_balance * 100),
             'total_trades': total_trades,
             'winning_trades': winning_trades,
             'losing_trades': losing_trades,
             'win_rate': win_rate,
             'total_pnl': total_pnl,
             'profit_factor': profit_factor,
+            'avg_win': avg_win,
+            'avg_loss': avg_loss,
             'max_drawdown': max_drawdown,
             'trade_details': trade_details,
-            'trades': closed
+            'trades': closed_trades
         }
-        log_message("INFO", f"回测完成 {symbol}: {total_trades}笔交易，胜率{win_rate:.1f}%，收益率{result['total_return']:.2f}%，最大回撤{max_drawdown:.2f}%")
-        return result
-
+        
+        log_message("INFO", f"回测完成 {symbol}: {total_trades}笔交易，胜率{win_rate:.1f}%，收益率{backtest_result['total_return']:.2f}%，最大回撤{max_drawdown:.2f}%")
+        return backtest_result
+        
     except Exception as e:
         log_message("ERROR", f"策略回测失败 {symbol}: {e}")
         return None
@@ -1966,43 +1429,7 @@ def run_comprehensive_backtest(symbols=None, days_list=[7, 14, 30]):
     """运行全面的回测分析"""
     try:
         if symbols is None:
-            # 自动从交易所获取热度前10的 USDT 合约（按24h成交量/信息字段排序），并追加 FIL/ZRO/WIF/WLD
-            try:
-                hot = []
-                if exchange:
-                    tickers = exchange.fetch_tickers()
-                    # 过滤 USDT 合约
-                    for sym, tk in tickers.items():
-                        if (sym.endswith('-USDT-SWAP') or sym.endswith(':USDT')) and ('SWAP' in sym or ':' in sym):
-                            vol = None
-                            # ccxt标准字段或OKX info字段
-                            vol = tk.get('quoteVolume') or tk.get('baseVolume')
-                            if vol is None and isinstance(tk.get('info'), dict):
-                                info = tk['info']
-                                # OKX 可能提供 24h成交量（计价币数量）
-                                vol = float(info.get('volCcy24h')) if info.get('volCcy24h') else None
-                            if vol:
-                                hot.append((sym, float(vol)))
-                    hot.sort(key=lambda x: x[1], reverse=True)
-                    top10 = [s for s, _ in hot[:10]]
-                else:
-                    top10 = SYMBOLS[:10]
-                # 统一成 OKX 合约格式 XXX-USDT-SWAP
-                def norm_sym(s):
-                    return s.replace(':USDT', '-USDT-SWAP') if ':USDT' in s else (s if s.endswith('-USDT-SWAP') else s + '-USDT-SWAP')
-                base = [norm_sym(s) for s in top10]
-                extras = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
-                # 去重保持顺序
-                seen = set()
-                symbols = []
-                for s in base + extras:
-                    if s not in seen:
-                        symbols.append(s)
-                        seen.add(s)
-                log_message("INFO", f"自动获取回测标的: {symbols[:10]} + extras")
-            except Exception as e:
-                log_message("WARNING", f"自动获取热门标的失败，使用默认列表: {str(e)}")
-                symbols = SYMBOLS[:10] + ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
+            symbols = SYMBOLS[:5]  # 默认回测前5个标的
         
         all_results = []
         
@@ -2142,7 +1569,7 @@ def check_trailing_stop(symbol, position_info):
                     params={
                         'slTriggerPx': new_stop_loss,
                         'slOrdPx': new_stop_loss,
-                        'tdMode': 'cross',
+                        'tdMode': TD_MODE,
                         'posSide': pos_side,
                         'reduceOnly': True
                     }
@@ -2325,7 +1752,7 @@ def setup_missing_stop_orders(position, symbol):
                     params={
                         'slTriggerPx': stop_loss,
                         'slOrdPx': stop_loss,
-                        'tdMode': 'cross',
+                        'tdMode': TD_MODE,
                         'posSide': 'long',
                         'reduceOnly': True
                     }
@@ -2340,7 +1767,7 @@ def setup_missing_stop_orders(position, symbol):
                     params={
                         'slTriggerPx': stop_loss,
                         'slOrdPx': stop_loss,
-                        'tdMode': 'cross',
+                        'tdMode': TD_MODE,
                         'posSide': 'short',
                         'reduceOnly': True
                     }
@@ -2391,7 +1818,7 @@ def setup_missing_stop_orders(position, symbol):
                     params={
                         'tpTriggerPx': take_profit,
                         'tpOrdPx': take_profit,
-                        'tdMode': 'cross',
+                        'tdMode': TD_MODE,
                         'posSide': 'long',
                         'reduceOnly': True
                     }
@@ -2537,6 +1964,59 @@ def get_performance_report():
 # 条件单管理模块
 # =================================
 
+def place_bracket_orders(symbol, side, size, entry_price, atr_value=0):
+    """同步挂条件止盈止损，记录订单ID到 order_tracking"""
+    try:
+        sl_tp = calculate_stop_loss_take_profit(symbol, entry_price, side, atr_value or 0)
+        if not sl_tp:
+            return False
+        pos_side = 'long' if side == 'long' else 'short'
+        side_action = 'sell' if side == 'long' else 'buy'
+        # 止损
+        o_sl = exchange.create_order(
+            symbol=symbol,
+            type='conditional',
+            side=side_action,
+            amount=abs(size),
+            price=sl_tp['stop_loss'],
+            params={
+                'slTriggerPx': sl_tp['stop_loss'],
+                'slOrdPx': sl_tp['stop_loss'],
+                'tdMode': TD_MODE,
+                'posSide': pos_side,
+                'reduceOnly': True
+            }
+        )
+        # 止盈
+        o_tp = exchange.create_order(
+            symbol=symbol,
+            type='conditional',
+            side=side_action,
+            amount=abs(size),
+            price=sl_tp['take_profit'],
+            params={
+                'tpTriggerPx': sl_tp['take_profit'],
+                'tpOrdPx': sl_tp['take_profit'],
+                'tdMode': TD_MODE,
+                'posSide': pos_side,
+                'reduceOnly': True
+            }
+        )
+        # 记录ID以便后续管理
+        order_tracking[symbol] = {
+            'last_setup_time': time.time(),
+            'stop_loss': sl_tp['stop_loss'],
+            'take_profit': sl_tp['take_profit'],
+            'sl_id': (o_sl.get('id') if isinstance(o_sl, dict) else None),
+            'tp_id': (o_tp.get('id') if isinstance(o_tp, dict) else None),
+            'entry_price': entry_price,
+        }
+        log_message("INFO", f"{symbol} 同步挂条件单: SL={sl_tp['stop_loss']:.4f}, TP={sl_tp['take_profit']:.4f}")
+        return True
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 条件单提交失败: {e}")
+        return False
+
 def manage_conditional_orders():
     """管理条件单"""
     try:
@@ -2593,9 +2073,9 @@ def enhanced_trading_loop():
     try:
         log_message("SUCCESS", "开始增强版交易循环...")
         
-        # 启动时运行单策略（EMA5/EMA10 + BB过滤）回测
-        log_message("INFO", "正在运行单一策略综合回测（EMA5/EMA10 + BB(20,2)过滤，0.5%阈值）...")
-        backtest_results = run_ema_bb_backtest(None, days_list=[7, 14, 30])
+        # 启动时运行全面回测
+        log_message("INFO", "正在运行全面策略回测分析...")
+        backtest_results = run_comprehensive_backtest(SYMBOLS[:5], days_list=[7, 14, 30])
         
         if backtest_results:
             # 保存回测结果到文件
@@ -2711,286 +2191,304 @@ def enhanced_trading_loop():
         traceback.print_exc()
 
 # =================================
-# 单策略回测入口（EMA5/EMA10 + BB(20,2)过滤，0.5%阈值）
+# 平仓管理模块（日内 VWAP + MACD + RSI）
 # =================================
-def run_ema_bb_backtest(symbols=None, days_list=[7, 14, 30], initial_balance=10000):
-    """
-    运行单策略综合回测（EMA5/EMA10 + BB(20,2)入场过滤，0.5%阈值），并输出汇总报告。
-    - symbols=None: 自动抓取交易所USDT合约热度前10，并追加 FIL/ZRO/WIF/WLD
-    - days_list: 回测天数列表
-    - initial_balance: 初始资金
-    """
+def check_positions():
+    """每分钟检查持仓并执行退出规则：VWAP反转、RSI极值分批/全平、MACD背离、时间止损、ATR追踪止损"""
     try:
-        # 自动获取热门标的（与综合回测一致）
-        if symbols is None:
+        if not position_tracker['positions']:
+            return
+        for symbol, pos in list(position_tracker['positions'].items()):
             try:
-                hot = []
-                if 'exchange' in globals() and exchange:
-                    tickers = exchange.fetch_tickers()
-                    for sym, tk in tickers.items():
-                        if (sym.endswith('-USDT-SWAP') or sym.endswith(':USDT')) and ('SWAP' in sym or ':' in sym):
-                            vol = tk.get('quoteVolume') or tk.get('baseVolume')
-                            if vol is None and isinstance(tk.get('info'), dict):
-                                info = tk['info']
-                                vol = float(info.get('volCcy24h')) if info.get('volCcy24h') else None
-                            if vol:
-                                hot.append((sym, float(vol)))
-                    hot.sort(key=lambda x: x[1], reverse=True)
-                    top10 = [s for s, _ in hot[:10]]
-                else:
-                    top10 = SYMBOLS[:10]
-                def norm_sym(s):
-                    return s.replace(':USDT', '-USDT-SWAP') if ':USDT' in s else (s if s.endswith('-USDT-SWAP') else s + '-USDT-SWAP')
-                base = [norm_sym(s) for s in top10]
-                extras = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
-                seen, symbols = set(), []
-                for s in base + extras:
-                    if s not in seen:
-                        symbols.append(s); seen.add(s)
-                log_message("INFO", f"[EMA/BB] 自动获取回测标的: {symbols[:10]} + extras")
-            except Exception as e:
-                log_message("WARNING", f"[EMA/BB] 自动获取热门标的失败，使用默认: {str(e)}")
-                symbols = SYMBOLS[:10] + ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
-
-        report_lines = ["=== EMA5/EMA10 + BB(20,2) 入场过滤（0.5%）回测报告 ===", f"标的数量: {len(symbols)}", ""]
-        total_trades_all = 0
-        sum_win_rate_all = 0.0
-        sum_return_all = 0.0
-        results_summary = []
-
-        for days in days_list:
-            log_message("INFO", f"[EMA/BB] 开始 {days} 天回测分析...")
-            day_results = []
-            for sym in symbols:
-                try:
-                    res = backtest_strategy(sym, days=days, initial_balance=initial_balance)
-                    if res:
-                        day_results.append(res)
-                        total_trades_all += res.get('total_trades', 0)
-                        sum_win_rate_all += res.get('win_rate', 0.0)
-                        sum_return_all += res.get('total_return', 0.0)
-                        log_message("INFO", f"[EMA/BB] {sym} {days}天: 胜率{res['win_rate']:.1f}% 收益率{res['total_return']:.2f}% 交易{res['total_trades']}")
-                except Exception as e:
-                    log_message("ERROR", f"[EMA/BB] 回测 {sym} 失败: {e}")
+                # 拉取最新5m数据
+                ohlcv = get_klines(symbol, '5m', limit=120)
+                if not ohlcv:
+                    continue
+                df = process_klines(ohlcv)
+                if df is None or len(df) < 50:
                     continue
 
-            if day_results:
-                avg_win = sum(r['win_rate'] for r in day_results) / len(day_results)
-                avg_ret = sum(r['total_return'] for r in day_results) / len(day_results)
-                report_lines.extend([
-                    f"=== {days}天回测结果 ===",
-                    f"标的: {len(day_results)}",
-                    f"总交易: {sum(r['total_trades'] for r in day_results)}",
-                    f"平均胜率: {avg_win:.1f}%",
-                    f"平均收益率: {avg_ret:.2f}%",
-                    ""
-                ])
-                results_summary.append({'days': days, 'avg_win': avg_win, 'avg_ret': avg_ret})
+                last_close = float(df['close'].iloc[-1])
+                last_open = float(df['open'].iloc[-1])
+                is_bullish = last_close > last_open
+                is_bearish = last_close < last_open
 
-        # 汇总与保存
-        timestamp = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-        out_file = f"backtest_results_ema_bb_{timestamp}.txt"
-        with open(out_file, 'w', encoding='utf-8') as f:
-            f.writelines(report_lines)
-        log_message("SUCCESS", f"[EMA/BB] 回测结果已保存到: {out_file}")
-        return results_summary
+                vwap = float(df['VWAP'].iloc[-1]) if 'VWAP' in df.columns else None
+                rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
+                atr = float(df['ATR_14'].iloc[-1]) if 'ATR_14' in df.columns else None
 
+                # MACD背离检测（简化版）：价格创新高/低但DIFF未同步创新高/低，幅度>5%
+                def has_bearish_divergence(series_price, series_diff):
+                    try:
+                        p1 = float(series_price.iloc[-3]); p2 = float(series_price.iloc[-1])
+                        d1 = float(series_diff.iloc[-3]); d2 = float(series_diff.iloc[-1])
+                        return (p2 > p1) and (d2 < d1) and ((p2 - p1) / p1 >= 0.05)
+                    except:
+                        return False
+                def has_bullish_divergence(series_price, series_diff):
+                    try:
+                        p1 = float(series_price.iloc[-3]); p2 = float(series_price.iloc[-1])
+                        d1 = float(series_diff.iloc[-3]); d2 = float(series_diff.iloc[-1])
+                        return (p2 < p1) and (d2 > d1) and ((p1 - p2) / p1 >= 0.05)
+                    except:
+                        return False
+
+                macd_diff = df['MACD'] if 'MACD' in df.columns else None
+                price_series = df['close']
+
+                side = pos['side']  # 'long' or 'short'
+                entry_price = float(pos.get('entry_price', last_close))
+                size = float(pos.get('size', 0))
+                entry_time = pos.get('timestamp')
+
+                # 计算未实现盈亏与追踪阈值
+                unrealized_pnl = (last_close - entry_price) * size if side == 'long' else (entry_price - last_close) * size
+                trailing_trigger = (atr if atr and atr > 0 else 0)  # >=1x ATR 启用追踪
+                trailing_distance = 0.5 * atr if atr and atr > 0 else None
+
+                # 退出条件集合
+                exit_now = False
+                exit_partial = False
+                partial_ratio = 0.5
+
+                # 1) VWAP反转：趋势失效立即全平
+                if vwap is not None:
+                    if side == 'long' and last_close < vwap:
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 多仓VWAP反转: close<{vwap:.4f} 全平")
+                    if side == 'short' and last_close > vwap:
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 空仓VWAP反转: close>{vwap:.4f} 全平")
+
+                # 2) RSI极值：分批/全平（长>80全平，>70半平；短<20全平，<30半平）
+                if rsi is not None:
+                    if side == 'long':
+                        if rsi > 80:
+                            exit_now = True
+                            log_message("INFO", f"{symbol} 多仓RSI>80 全平")
+                        elif rsi > 70:
+                            exit_partial = True
+                            partial_ratio = 0.5
+                            log_message("INFO", f"{symbol} 多仓RSI>70 平50%")
+                    else:
+                        if rsi < 20:
+                            exit_now = True
+                            log_message("INFO", f"{symbol} 空仓RSI<20 全平")
+                        elif rsi < 30:
+                            exit_partial = True
+                            partial_ratio = 0.5
+                            log_message("INFO", f"{symbol} 空仓RSI<30 平50%")
+
+                # 3) MACD背离：幅度>5% 全平
+                if macd_diff is not None:
+                    if side == 'long' and has_bearish_divergence(price_series, macd_diff):
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 多仓熊背离 全平")
+                    if side == 'short' and has_bullish_divergence(price_series, macd_diff):
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 空仓牛背离 全平")
+
+                # 4) 时间止损：>120分钟无新高/低退出（更稳健）
+                try:
+                    from datetime import datetime as dt
+                    now = dt.now(timezone(timedelta(hours=8)))
+                    if entry_time and (now - entry_time).total_seconds() > 120 * 60:
+                        exit_now = True
+                        log_message("INFO", f"{symbol} 持仓超过120分钟 时间止损全平")
+                except Exception:
+                    pass
+
+                # 5) Breakeven保护与分批止盈
+                # Breakeven: 盈利达到0.5%后，回落到入场价则全平
+                try:
+                    if side == 'long':
+                        if (last_close - entry_price) / entry_price >= 0.005 and not pos.get('breakeven_active'):
+                            pos['breakeven_active'] = True
+                        if pos.get('breakeven_active') and last_close <= entry_price:
+                            exit_now = True
+                            log_message("INFO", f"{symbol} 多仓回落至保本位 全平")
+                    else:
+                        if (entry_price - last_close) / entry_price >= 0.005 and not pos.get('breakeven_active'):
+                            pos['breakeven_active'] = True
+                        if pos.get('breakeven_active') and last_close >= entry_price:
+                            exit_now = True
+                            log_message("INFO", f"{symbol} 空仓回升至保本位 全平")
+                except:
+                    pass
+
+                # 分批TP：盈利达到1x ATR先平50%
+                if atr and atr > 0:
+                    if side == 'long' and (last_close - entry_price) >= atr and not pos.get('partial1_done'):
+                        exit_partial = True; partial_ratio = 0.5
+                        pos['partial1_done'] = True
+                        log_message("INFO", f"{symbol} 多仓达到1x ATR 盈利 先平50%")
+                    if side == 'short' and (entry_price - last_close) >= atr and not pos.get('partial1_done'):
+                        exit_partial = True; partial_ratio = 0.5
+                        pos['partial1_done'] = True
+                        log_message("INFO", f"{symbol} 空仓达到1x ATR 盈利 先平50%")
+
+                # MACD柱峰值回落：平出30%
+                try:
+                    hist = df['MACD_HIST'] if 'MACD_HIST' in df.columns else None
+                    if hist is not None and len(hist) >= 3:
+                        if side == 'long' and hist.iloc[-1] < hist.iloc[-2] and hist.iloc[-2] > hist.iloc[-3] and not pos.get('partial_hist_done'):
+                            exit_partial = True; partial_ratio = 0.3
+                            pos['partial_hist_done'] = True
+                            log_message("INFO", f"{symbol} 多仓MACD柱峰回落 平30%")
+                        if side == 'short' and hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-2] < hist.iloc[-3] and not pos.get('partial_hist_done'):
+                            exit_partial = True; partial_ratio = 0.3
+                            pos['partial_hist_done'] = True
+                            log_message("INFO", f"{symbol} 空仓MACD柱峰回升 平30%")
+                except:
+                    pass
+
+                # DOGE高噪保护：多仓RSI<30立即全平
+                if symbol.startswith('DOGE') and side == 'long' and rsi is not None and rsi < 30:
+                    exit_now = True
+                    log_message("INFO", f"{symbol} DOGE 多仓RSI<30 噪声保护 全平")
+
+                # 执行退出
+                if exit_now or exit_partial:
+                    close_ratio = 1.0 if exit_now else partial_ratio
+                    close_size = max(size * close_ratio, 0)
+                    if close_size <= 0:
+                        continue
+                    side_out = 'sell' if side == 'long' else 'buy'
+                    try:
+                        order = exchange.create_order(
+                            symbol,
+                            'market',
+                            side_out,
+                            close_size,
+                            None,
+                            {'tdMode': TD_MODE, 'posSide': 'long' if side == 'long' else 'short'}
+                        )
+                        if order:
+                            exit_price = last_close
+                            pnl = (exit_price - entry_price) * close_size if side == 'long' else (entry_price - exit_price) * close_size
+                            log_message("SUCCESS", f"{symbol} 平仓成功: {side_out} {close_size} @ {exit_price:.4f}, PnL={pnl:.4f}")
+                            # 更新统计
+                            update_trade_stats(symbol, side, pnl, entry_price, exit_price)
+                            # 更新/移除持仓
+                            remain_size = size - close_size
+                            if remain_size <= 0:
+                                del position_tracker['positions'][symbol]
+                            else:
+                                position_tracker['positions'][symbol]['size'] = remain_size
+                                position_tracker['positions'][symbol]['entry_price'] = exit_price  # 重新计算基准
+                    except Exception as e:
+                        log_message("ERROR", f"{symbol} 平仓失败: {e}")
+
+            except Exception as e:
+                log_message("ERROR", f"{symbol} 检查持仓失败: {e}")
     except Exception as e:
-        log_message("ERROR", f"[EMA/BB] 运行单策略回测失败: {e}")
-        return None
+        log_message("ERROR", f"check_positions运行失败: {e}")
+
+# =================================
+# 回测模块（统一为5m，使用相同入场/平仓规则）
+# =================================
+def backtest_strategy(symbol, days=14):
+    """5m回测：VWAP+MACD+RSI 入场与平仓规则，返回交易记录与统计"""
+    try:
+        # 历史K线数量（5m，每天288根）
+        limit = max(300, days * 288)
+        ohlcv = get_klines(symbol, '5m', limit=limit)
+        if not ohlcv:
+            return {'symbol': symbol, 'trades': [], 'stats': {}}
+
+        df = process_klines(ohlcv)
+        if df is None or len(df) < 100:
+            return {'symbol': symbol, 'trades': [], 'stats': {}}
+
+        trades = []
+        position = None  # {'side','entry_price','size','entry_time'}
+        equity = 10000.0
+        size_per_trade = 1000.0  # 模拟每次名义资金
+        for i in range(20, len(df)):
+            row = df.iloc[i]
+            prev = df.iloc[i - 1]
+
+            # 指标
+            vwap = row['VWAP']
+            rsi = row['RSI']
+            macd = row['MACD']; macd_sig = row['MACD_SIGNAL']
+            vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
+            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.2 * vol_ma20)
+            close = row['close']; open_ = row['open']
+            is_bullish = close > open_; is_bearish = close < open_
+            atr = row['ATR_14'] if 'ATR_14' in df.columns else None
+
+            # 交叉
+            golden = (prev['MACD'] <= prev['MACD_SIGNAL']) and (macd > macd_sig)
+            death = (prev['MACD'] >= prev['MACD_SIGNAL']) and (macd < macd_sig)
+
+            # 平仓逻辑（若有持仓）
+            if position:
+                side = position['side']; entry_price = position['entry_price']
+                # VWAP反转
+                vwap_exit = (side == 'long' and close < vwap) or (side == 'short' and close > vwap)
+                # RSI极值
+                rsi_exit_full = (side == 'long' and rsi > 80) or (side == 'short' and rsi < 20)
+
+                # 简化MACD背离：比较最近3根
+                def bearish_div(i):
+                    try:
+                        p2 = df['close'].iloc[i]; p1 = df['close'].iloc[i-2]
+                        d2 = df['MACD'].iloc[i]; d1 = df['MACD'].iloc[i-2]
+                        return (p2 > p1) and (d2 < d1) and ((p2 - p1) / p1 >= 0.05)
+                    except: return False
+                def bullish_div(i):
+                    try:
+                        p2 = df['close'].iloc[i]; p1 = df['close'].iloc[i-2]
+                        d2 = df['MACD'].iloc[i]; d1 = df['MACD'].iloc[i-2]
+                        return (p2 < p1) and (d2 > d1) and ((p1 - p2) / p1 >= 0.05)
+                    except: return False
+
+                div_exit = (side == 'long' and bearish_div(i)) or (side == 'short' and bullish_div(i))
+
+                # ATR追踪：盈利>1x ATR后，回撤>0.5x ATR退出
+                trailing_exit = False
+                if atr and atr > 0:
+                    if side == 'long' and (close - entry_price) >= atr:
+                        recent_high = float(df['high'].iloc[max(0, i-12):i+1].max())
+                        trailing_exit = (recent_high - close) >= (0.5 * atr)
+                    if side == 'short' and (entry_price - close) >= atr:
+                        recent_low = float(df['low'].iloc[max(0, i-12):i+1].min())
+                        trailing_exit = (close - recent_low) >= (0.5 * atr)
+
+                if vwap_exit or rsi_exit_full or div_exit or trailing_exit:
+                    # 退出
+                    exit_price = close
+                    pnl = (exit_price - entry_price) if side == 'long' else (entry_price - exit_price)
+                    pnl *= DEFAULT_LEVERAGE  # 杠杆模拟
+                    fee_rate = 0.0005  # 每侧手续费（约0.05%）
+                    slippage_rate = 0.0005  # 滑点成本（约0.05%）
+                    net_ret = (pnl / entry_price) - (fee_rate * 2) - slippage_rate
+                    equity += net_ret * size_per_trade
+                    trades.append({'side': side, 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
+                    position = None
+                    continue
+
+            # 入场逻辑（仅在无持仓）
+            if not position and volume_ok:
+                if golden and (close > vwap) and (rsi > 50) and is_bullish:
+                    position = {'side': 'long', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
+                elif death and (close < vwap) and (rsi < 50) and is_bearish:
+                    position = {'side': 'short', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
+
+        # 统计
+        wins = sum(1 for t in trades if t['pnl'] > 0)
+        total_pnl = sum(t['pnl'] for t in trades)
+        win_rate = (wins / len(trades) * 100) if trades else 0.0
+        stats = {'symbol': symbol, 'trades_count': len(trades), 'win_rate': win_rate, 'total_pnl': total_pnl, 'equity': equity}
+        return {'symbol': symbol, 'trades': trades, 'stats': stats}
+    except Exception as e:
+        log_message("ERROR", f"{symbol} 回测失败: {e}")
+        return {'symbol': symbol, 'trades': [], 'stats': {}}
 
 # =================================
 # 主程序入口 - 增强版
 # =================================
-# 保留原有增强循环：改为仅运行单一策略（EMA5/EMA10）的综合回测与交易
-_orig_enhanced_trading_loop = enhanced_trading_loop
-
-def enhanced_trading_loop():
-    log_message("INFO", "正在运行单一策略综合回测（EMA5/EMA10），禁用多策略回测入口")
-    try:
-        # 直接继续原有增强循环（其内部已执行综合回测 run_comprehensive_backtest(None, ...)）
-        return _orig_enhanced_trading_loop()
-    except Exception as e:
-        log_message("WARNING", f"单策略综合回测阶段出错: {e}")
-        return _orig_enhanced_trading_loop()
-
-def backtest_ma50_sar(df, initial_balance=10000.0):
-    """MA50 + SAR 轻量策略回测核心：MA50上方 SAR<close 做多，SAR翻到上方立即平仓；MA50下方 SAR>close 做空，SAR翻到下方立即平仓"""
-    try:
-        if df is None or len(df) < 60:
-            return {'error': '数据不足'}
-
-        # 计算MA50
-        df['ma50'] = df['close'].rolling(window=50, min_periods=50).mean()
-
-        # 计算SAR（优先使用 pandas_ta，如果不可用则使用近似兜底）
-        try:
-            import pandas_ta as ta
-            psar = ta.psar(df['high'], df['low'], df['close'], af=0.02, max_af=0.2)
-            # 兼容不同列名
-            if hasattr(psar, 'columns') and len(psar.columns) > 0:
-                sar_series = psar.iloc[:, 0]
-            else:
-                # 某些版本返回 Series
-                sar_series = psar
-            df['sar'] = sar_series
-        except Exception:
-            # 兜底：用近似方法（非标准SAR，仅为在无库时也可运行）
-            prev_min = df['low'].rolling(window=5, min_periods=1).min()
-            prev_max = df['high'].rolling(window=5, min_periods=1).max()
-            df['sar'] = (prev_min + prev_max) / 2.0
-
-        position = None  # 'long' | 'short'
-        entry_price = 0.0
-        entry_time = None
-        size = 0.0
-        balance = initial_balance
-        trades = []
-
-        for i in range(len(df)):
-            row = df.iloc[i]
-            price = float(row['close'])
-            ma50 = row['ma50']
-            sar = row['sar']
-
-            # 平仓：SAR反转
-            if position == 'long' and sar >= price:
-                exit_price = price
-                pnl = (exit_price - entry_price) * size
-                balance += pnl
-                trades.append({'side': 'close_long', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl,
-                               'entry_time': entry_time, 'exit_time': row['timestamp']})
-                position = None; size = 0.0; entry_price = 0.0; entry_time = None
-            elif position == 'short' and sar <= price:
-                exit_price = price
-                pnl = (entry_price - exit_price) * size
-                balance += pnl
-                trades.append({'side': 'close_short', 'entry': entry_price, 'exit': exit_price, 'pnl': pnl,
-                               'entry_time': entry_time, 'exit_time': row['timestamp']})
-                position = None; size = 0.0; entry_price = 0.0; entry_time = None
-
-            # 开仓（无持仓时）
-            if position is None and pd.notna(ma50):
-                if price > ma50 and sar < price:
-                    position = 'long'
-                    entry_price = price
-                    entry_time = row['timestamp']
-                    size = (balance * 0.8) / price
-                    trades.append({'side': 'open_long', 'price': entry_price, 'timestamp': entry_time})
-                elif price < ma50 and sar > price:
-                    position = 'short'
-                    entry_price = price
-                    entry_time = row['timestamp']
-                    size = (balance * 0.8) / price
-                    trades.append({'side': 'open_short', 'price': entry_price, 'timestamp': entry_time})
-
-        # 收尾强平
-        if position == 'long':
-            last_price = float(df['close'].iloc[-1])
-            pnl = (last_price - entry_price) * size
-            balance += pnl
-            trades.append({'side': 'close_long', 'entry': entry_price, 'exit': last_price, 'pnl': pnl,
-                           'entry_time': entry_time, 'exit_time': df['timestamp'].iloc[-1]})
-        elif position == 'short':
-            last_price = float(df['close'].iloc[-1])
-            pnl = (entry_price - last_price) * size
-            balance += pnl
-            trades.append({'side': 'close_short', 'entry': entry_price, 'exit': last_price, 'pnl': pnl,
-                           'entry_time': entry_time, 'exit_time': df['timestamp'].iloc[-1]})
-
-        closed = [t for t in trades if t.get('pnl') is not None]
-        total_trades = len(closed)
-        wins = len([t for t in closed if t['pnl'] > 0])
-        win_rate = (wins / total_trades * 100.0) if total_trades > 0 else 0.0
-        total_return = ((balance - initial_balance) / initial_balance * 100.0) if initial_balance > 0 else 0.0
-
-        return {
-            'total_trades': total_trades,
-            'win_rate': win_rate,
-            'total_return': total_return,
-            'final_balance': balance,
-            'trades': closed
-        }
-    except Exception as e:
-        log_message("ERROR", f"[MA50/SAR] 回测计算失败: {e}")
-        return {'error': str(e)}
-
-def run_ma50_sar_backtest(symbols=None, days=7, timeframe='30m', initial_balance=10000.0):
-    """运行 MA50+SAR 轻量策略回测（公共行情，无需API密钥）"""
-    import ccxt
-    try:
-        if symbols is None:
-            symbols = ['FIL-USDT-SWAP', 'ZRO-USDT-SWAP', 'WIF-USDT-SWAP', 'WLD-USDT-SWAP']
-
-        # 选择公共行情交易所（优先OKX，失败回退Binance）
-        try:
-            ex = ccxt.okx()
-        except Exception:
-            ex = ccxt.binance()
-
-        # 符号归一化
-        def normalize_symbol(sym):
-            s = sym
-            if isinstance(ex, ccxt.binance):
-                if '-USDT-SWAP' in s: s = s.replace('-USDT-SWAP', '/USDT')
-                if ':' in s: s = s.replace(':USDT', '/USDT')
-                if '/USDT' not in s and '-' in s and s.endswith('-USDT'):
-                    s = s.split('-')[0] + '/USDT'
-            elif isinstance(ex, ccxt.okx):
-                if ':USDT' in s: s = s.replace(':USDT', '-USDT-SWAP')
-                if '/USDT' in s: s = s.split('/USDT')[0] + '-USDT-SWAP'
-                if not s.endswith('-USDT-SWAP'): s = s + '-USDT-SWAP'
-            return s
-
-        results = []
-        for sym in symbols:
-            try:
-                norm = normalize_symbol(sym)
-                limit = days * (48 if timeframe == '30m' else 24)
-                ohlcv = ex.fetch_ohlcv(norm, timeframe=timeframe, limit=limit)
-                if not ohlcv or len(ohlcv) == 0:
-                    raise Exception("公共行情返回为空")
-                df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
-                df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
-
-                r = backtest_ma50_sar(df, initial_balance)
-                r['symbol'] = sym
-                r['days'] = days
-            except Exception as e:
-                r = {'symbol': sym, 'days': days, 'error': str(e)}
-            results.append(r)
-
-        # 写报告（固定文件名与时间戳文件）
-        ts = datetime.now(timezone(timedelta(hours=8))).strftime("%Y%m%d_%H%M%S")
-        out_ts = f"backtest_results_ma50_sar_{ts}.txt"
-        lines = [
-            "=== MA50 + SAR 轻量策略回测报告 ===",
-            f"标的数量: {len(symbols)}",
-            f"周期: {days}天（{timeframe}）",
-            ""
-        ]
-        for r in results:
-            if 'error' in r:
-                lines.append(f"{r['symbol']}: 错误: {r['error']}")
-            else:
-                lines.append(f"{r['symbol']}: 交易 {r['total_trades']}, 胜率 {r['win_rate']:.1f}%, 收益率 {r['total_return']:.2f}%")
-
-        try:
-            with open(out_ts, "w", encoding="utf-8") as f:
-                f.write("
-".join(lines))
-            with open("backtest_results_ma50_sar_latest.txt", "w", encoding="utf-8") as f2:
-                f2.write("
-".join(lines))
-            log_message("SUCCESS", f"[MA50/SAR] 回测结果已保存到: {out_ts}")
-        except Exception as e:
-            log_message("ERROR", f"[MA50/SAR] 生成回测报告失败: {e}")
-
-        return results
-    except Exception as e:
-        log_message("ERROR", f"[MA50/SAR] 回测入口执行失败: {e}")
-        return None
-
 if __name__ == "__main__":
     # 使用增强版交易循环替代原版本
     try:
@@ -3000,13 +2498,13 @@ if __name__ == "__main__":
             log_message("ERROR", "交易所初始化失败")
             exit(1)
         
-        # 测试API连接
-        if not test_api_connection():
-            log_message("ERROR", "API连接测试失败，请检查配置")
-            exit(1)
+        # 启动不强制进行API连接测试，避免因短暂网络问题退出
+        # if not test_api_connection():
+        #     log_message("ERROR", "API连接测试失败，请检查配置")
+        #     exit(1)
         
         # 显示启动信息
-        log_message("SUCCESS", "MACD(6,16,9)策略交易系统启动成功")
+        log_message("SUCCESS", "VWAP+MACD(12,26,9)+RSI(14)策略交易系统启动成功")
         log_message("INFO", f"智能杠杆系统: BTC最大{MAX_LEVERAGE_BTC}x, ETH最大{MAX_LEVERAGE_ETH}x")
         log_message("INFO", f"交易对数量: {len(SYMBOLS)}")
         log_message("INFO", f"最大持仓数: {MAX_OPEN_POSITIONS}")
