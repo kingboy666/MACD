@@ -318,6 +318,8 @@ def process_klines(ohlcv):
             df['ATR_14'] = 0
         
         # 已移除ADX计算
+        # 占位以兼容旧代码路径，避免KeyError
+        df['ADX'] = 25
         
         return df
         
@@ -1315,7 +1317,7 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
                 max_drawdown = current_drawdown
             
             # 检查信号
-            if pd.notna(current['macd']) and pd.notna(current['adx']):
+            if pd.notna(current['macd']):
                 # 做多信号
                 if (prev['macd'] <= prev['macd_signal'] and 
                     current['macd'] > current['macd_signal'] and 
