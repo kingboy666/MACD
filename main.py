@@ -117,7 +117,7 @@ TIMEFRAME_CONFIRM = '15m'   # 确认
 
 # Bollinger Bands配置
 BB_PERIOD = 20
-BB_STD = 1.5  # 震荡更敏感
+BB_STD = 1.2  # 窄触多30% (原1.5 → 1.2)
 
 # ATR动态止盈止损配置
 USE_ATR_DYNAMIC_STOPS = True                 # 启用ATR动态止盈止损
@@ -617,8 +617,8 @@ def generate_signal(symbol):
                         now_ms = int(time.time() * 1000)
                         k1_completed = now_ms >= k1_end
 
-                        # Long：触BB下轨 + RSI<30
-                        if (c1 <= bb_l1 * 1.0000) and (r1 is not None and r1 < 30):
+                        # Long：触BB下轨 + RSI<35 (灰区优化)
+                        if (c1 <= bb_l1 * 1.0000) and (r1 is not None and r1 < 35):
                             if k1_completed:
                                 return {
                                     'symbol': symbol,
@@ -645,8 +645,8 @@ def generate_signal(symbol):
                                     'kline_end_time': k1_end / 1000.0
                                 }
 
-                        # Short：触BB上轨 + RSI>70
-                        if (c1 >= bb_u1 * 1.0000) and (r1 is not None and r1 > 70):
+                        # Short：触BB上轨 + RSI>65 (灰区优化)
+                        if (c1 >= bb_u1 * 1.0000) and (r1 is not None and r1 > 65):
                             if k1_completed:
                                 return {
                                     'symbol': symbol,
@@ -2802,7 +2802,7 @@ def check_positions():
 
                             # RSI极值反转：long RSI>70平，short RSI<30平
                             side = pos['side']
-                            rsi_revert = (side == 'long' and rsi_1m is not None and rsi_1m > 70) or (side == 'short' and rsi_1m is not None and rsi_1m < 30)
+                            rsi_revert = (side == 'long' and rsi_1m is not None and rsi_1m > 65) or (side == 'short' and rsi_1m is not None and rsi_1m < 35)
 
                             # 时间>3min强制平
                             force_time = False
@@ -2916,18 +2916,18 @@ def check_positions():
                         if rsi > 80:
                             exit_now = True
                             log_message("INFO", f"{symbol} 多仓RSI>80 全平")
-                        elif rsi > 70:
+                        elif rsi > 65:
                             exit_partial = True
                             partial_ratio = 0.5
-                            log_message("INFO", f"{symbol} 多仓RSI>70 平50%")
+                            log_message("INFO", f"{symbol} 多仓RSI>65 平50%")
                     else:
                         if rsi < 20:
                             exit_now = True
                             log_message("INFO", f"{symbol} 空仓RSI<20 全平")
-                        elif rsi < 30:
+                        elif rsi < 35:
                             exit_partial = True
                             partial_ratio = 0.5
-                            log_message("INFO", f"{symbol} 空仓RSI<30 平50%")
+                            log_message("INFO", f"{symbol} 空仓RSI<35 平50%")
 
                 # 3) MACD背离：幅度>5% 全平
                 if macd_diff is not None:
@@ -2992,10 +2992,10 @@ def check_positions():
                 except:
                     pass
 
-                # DOGE高噪保护：多仓RSI<30立即全平
-                if symbol.startswith('DOGE') and side == 'long' and rsi is not None and rsi < 30:
+                # DOGE高噪保护：多仓RSI<35立即全平
+                if symbol.startswith('DOGE') and side == 'long' and rsi is not None and rsi < 35:
                     exit_now = True
-                    log_message("INFO", f"{symbol} DOGE 多仓RSI<30 噪声保护 全平")
+                    log_message("INFO", f"{symbol} DOGE 多仓RSI<35 噪声保护 全平")
 
                 # 执行退出
                 if exit_now or exit_partial:
