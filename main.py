@@ -105,8 +105,8 @@ MIN_TRADE_AMOUNT = {
 }
 
 # MACD指标配置
-MACD_FAST = 12                            # MACD快线周期
-MACD_SLOW = 26                            # MACD慢线周期
+MACD_FAST = 8                             # MACD快线周期
+MACD_SLOW = 21                            # MACD慢线周期
 MACD_SIGNAL = 9                           # MACD信号线周期
 
 # ATR动态止盈止损配置
@@ -378,7 +378,7 @@ def generate_signal(symbol):
 
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.1 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
         # 周末低量避开：周六/周日或当前量低于均值则暂停入场
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
@@ -408,7 +408,7 @@ def generate_signal(symbol):
         current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
         current_rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.1 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
         # Funding过滤：正funding>0.03%时避免做多
         try:
             funding = exchange.fetch_funding_rate(symbol).get('fundingRate')
@@ -2529,7 +2529,7 @@ def backtest_strategy_5m(symbol, days=14):
             rsi = row['RSI']
             macd = row['MACD']; macd_sig = row['MACD_SIGNAL']
             vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
-            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.1 * vol_ma20)
+            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.0 * vol_ma20)
             close = row['close']; open_ = row['open']
             vwap_bias = abs(close - vwap) / vwap > 0.001
             is_bullish = close > open_; is_bearish = close < open_
@@ -2588,9 +2588,9 @@ def backtest_strategy_5m(symbol, days=14):
 
             # 入场逻辑（仅在无持仓）
             if not position and volume_ok:
-                if golden and (close > vwap) and (rsi > 45) and vwap_bias and is_bullish:
+                if golden and (close > vwap) and (rsi > 40) and vwap_bias and is_bullish:
                     position = {'side': 'long', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
-                elif death and (close < vwap) and (rsi < 55) and vwap_bias and is_bearish:
+                elif death and (close < vwap) and (rsi < 60) and vwap_bias and is_bearish:
                     position = {'side': 'short', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
 
         # 统计
