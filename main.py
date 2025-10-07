@@ -378,7 +378,7 @@ def generate_signal(symbol):
 
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.2 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.1 * vol_ma20)
         # 周末低量避开：周六/周日或当前量低于均值则暂停入场
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
@@ -408,7 +408,7 @@ def generate_signal(symbol):
         current_vwap = df['VWAP'].iloc[-1] if 'VWAP' in df.columns else None
         current_rsi = df['RSI'].iloc[-1] if 'RSI' in df.columns else None
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
-        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.2 * vol_ma20)
+        volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.1 * vol_ma20)
         # Funding过滤：正funding>0.03%时避免做多
         try:
             funding = exchange.fetch_funding_rate(symbol).get('fundingRate')
@@ -2122,6 +2122,65 @@ def check_risk_limits():
 # 增强版交易循环
 # =================================
 
+def report_symbols_status():
+    """输出每个交易对的详细状态：做多/做空/等待信号、价格、VWAP、RSI、未实现盈亏、SL/TP、敞口占比"""
+    try:
+        acct = get_account_info()
+        total_balance = acct['total_balance'] if acct else 0.0
+        for symbol in SYMBOLS:
+            try:
+                pos = position_tracker['positions'].get(symbol)
+                pending = position_tracker.get('pending_signals', {}).get(symbol)
+                status = 'idle'
+                if pending:
+                    status = f"pending({pending['signal']['side']})"
+                if pos:
+                    status = pos['side']
+
+                # 最新价格与5m指标
+                last = None; vwap = None; rsi = None
+                try:
+                    last = float(exchange.fetch_ticker(symbol)['last'])
+                    ohlcv = get_klines(symbol, '5m', limit=60)
+                    df = process_klines(ohlcv) if ohlcv else None
+                    if df is not None and len(df) >= 20:
+                        vwap = float(df['VWAP'].iloc[-1]) if 'VWAP' in df.columns else None
+                        rsi = float(df['RSI'].iloc[-1]) if 'RSI' in df.columns else None
+                except Exception:
+                    pass
+
+                # 未实现盈亏与敞口
+                upnl = 0.0; exposure_pct = 0.0
+                if pos and last is not None:
+                    size = float(pos.get('size', 0))
+                    entry = float(pos.get('entry_price', last))
+                    upnl = (last - entry) * size if pos['side'] == 'long' else (entry - last) * size
+                    if total_balance > 0:
+                        exposure_pct = (abs(size) * last) / total_balance * 100.0
+
+                # SL/TP（来自跟踪器或占位）
+                sl = None; tp = None
+                active = position_tracker.get('active_stop_orders', {}).get(symbol)
+                if active:
+                    sl = active.get('stop_loss'); tp = active.get('take_profit')
+
+                # 状态行
+                line = (
+                    f"{symbol}: status={status}"
+                    f", last={last:.4f}" if last is not None else f"{symbol}: status={status}, last=NA"
+                )
+                line += f", VWAP={vwap:.4f}" if vwap is not None else ", VWAP=NA"
+                line += f", RSI={rsi:.1f}" if rsi is not None else ", RSI=NA"
+                line += f", uPnL={upnl:.4f}"
+                line += f", SL={sl:.4f}" if sl is not None else ", SL=NA"
+                line += f", TP={tp:.4f}" if tp is not None else ", TP=NA"
+                line += f", exposure={exposure_pct:.2f}%"
+                log_message("INFO", line)
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 状态报告失败: {e}")
+    except Exception as e:
+        log_message("ERROR", f"生成状态报告失败: {e}")
+
 def enhanced_trading_loop():
     """增强版主交易循环"""
     try:
@@ -2168,6 +2227,9 @@ def enhanced_trading_loop():
                     log_message("INFO", f"当前交易统计 - 总交易: {trade_stats['total_trades']}, "
                               f"胜率: {trade_stats['win_rate']:.2f}%, "
                               f"总盈亏: {trade_stats['total_pnl']:.2f} USDT")
+
+                # 逐交易对状态报告
+                report_symbols_status()
                 
                 # 检查每个交易对
                 for symbol in SYMBOLS:
@@ -2467,7 +2529,7 @@ def backtest_strategy_5m(symbol, days=14):
             rsi = row['RSI']
             macd = row['MACD']; macd_sig = row['MACD_SIGNAL']
             vol_ma20 = df['vol_ma20'].iloc[i] if 'vol_ma20' in df.columns else None
-            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.2 * vol_ma20)
+            volume_ok = (vol_ma20 is None) or (row['volume'] >= 1.1 * vol_ma20)
             close = row['close']; open_ = row['open']
             is_bullish = close > open_; is_bearish = close < open_
             atr = row['ATR_14'] if 'ATR_14' in df.columns else None
@@ -2525,9 +2587,9 @@ def backtest_strategy_5m(symbol, days=14):
 
             # 入场逻辑（仅在无持仓）
             if not position and volume_ok:
-                if golden and (close > vwap) and (rsi > 50) and is_bullish:
+                if golden and (close > vwap) and (rsi > 45) and is_bullish:
                     position = {'side': 'long', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
-                elif death and (close < vwap) and (rsi < 50) and is_bearish:
+                elif death and (close < vwap) and (rsi < 55) and is_bearish:
                     position = {'side': 'short', 'entry_price': close, 'entry_time': df['timestamp'].iloc[i]}
 
         # 统计
