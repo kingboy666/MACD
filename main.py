@@ -11,7 +11,6 @@ import os
 import smtplib
 from email.message import EmailMessage
 import sys
-import numpy as np
 
 # 添加当前目录到Python路径
 sys.path.append(os.path.dirname(os.path.abspath(__file__)))
@@ -46,6 +45,11 @@ def calculate_ema(close, period):
 
 def calculate_adx(high, low, close, period=14):
     """计算ADX指标"""
+    # 确保输入是pandas Series
+    high = pd.Series(high) if not isinstance(high, pd.Series) else high
+    low = pd.Series(low) if not isinstance(low, pd.Series) else low
+    close = pd.Series(close) if not isinstance(close, pd.Series) else close
+    
     # 计算真实波幅
     tr1 = high - low
     tr2 = abs(high - close.shift())
@@ -68,7 +72,12 @@ def calculate_adx(high, low, close, period=14):
     dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
     adx = dx.ewm(span=period).mean()
     
-    return adx, plus_di, minus_di
+    # 确保返回与输入长度一致
+    if len(adx) < len(close):
+        # 填充缺失值
+        adx = adx.reindex(close.index, fill_value=25)  # 默认值25
+    
+    return adx
 
 def calculate_atr(high, low, close, period=14):
     """计算ATR指标"""
@@ -846,32 +855,21 @@ def generate_signal(symbol):
             high_close_prev = abs(df_30m['high'] - df_30m['close'].shift(1))
             low_close_prev = abs(df_30m['low'] - df_30m['close'].shift(1))
             true_range = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-            atr_30m = true_range.rolling(window=14).mean()
+            atr_30m_value = float(true_range.rolling(window=14).mean().iloc[-1]) if len(true_range) >= 14 else 0.0
             
-            # 计算ADX (Average Directional Index)
-            # 计算+DM和-DM
-            up_move = df_30m['high'] - df_30m['high'].shift(1)
-            down_move = df_30m['low'].shift(1) - df_30m['low']
-            
-            plus_dm = np.where((up_move > down_move) & (up_move > 0), up_move, 0)
-            minus_dm = np.where((down_move > up_move) & (down_move > 0), down_move, 0)
-            
-            # 计算TR
-            tr = pd.concat([high_low, high_close_prev, low_close_prev], axis=1).max(axis=1)
-            
-            # 计算+DI和-DI
-            plus_di = 100 * (plus_dm.rolling(window=14).mean() / tr.rolling(window=14).mean())
-            minus_di = 100 * (minus_dm.rolling(window=14).mean() / tr.rolling(window=14).mean())
-            
-            # 计算DX和ADX
-            dx = 100 * abs(plus_di - minus_di) / (plus_di + minus_di)
-            adx = dx.rolling(window=14).mean()
+            # 计算ADX (使用现有的calculate_adx函数)
+            try:
+                adx_result = calculate_adx(df_30m['high'], df_30m['low'], df_30m['close'], period=14)
+                adx = adx_result[0] if isinstance(adx_result, tuple) else adx_result
+            except Exception as e:
+                log_message("WARNING", f"ADX计算失败: {str(e)}")
+                adx = pd.Series([25] * len(df_30m))  # 默认值
             
             # 获取当前值
             ema5_current = ema5.iloc[-1] if not ema5.empty else None
             ema10_current = ema10.iloc[-1] if not ema10.empty else None
             ema20_current = ema20.iloc[-1] if not ema20.empty else None
-            atr_30m_current = atr_30m.iloc[-1] if not atr_30m.empty else None
+            atr_30m_current = atr_30m_value if atr_30m_value else None
             adx_current = adx.iloc[-1] if not adx.empty else None
             
             # 计算EMA斜率（趋势强度）
