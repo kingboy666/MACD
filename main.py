@@ -9,7 +9,22 @@ from dotenv import load_dotenv
 import os
 import smtplib
 from email.message import EmailMessage
-from smart_grid_strategy import SmartGridStrategy
+import sys
+import os
+
+# 添加当前目录到Python路径
+sys.path.append(os.path.dirname(os.path.abspath(__file__)))
+
+try:
+    from smart_grid_strategy import SmartGridStrategy
+except ImportError as e:
+    print(f"导入smart_grid_strategy失败: {e}")
+    # 如果导入失败，创建一个空的占位类
+    class SmartGridStrategy:
+        def __init__(self):
+            pass
+        def run_strategy(self, *args, **kwargs):
+            return {'action': 'hold', 'reason': '策略未加载'}
 
 # 加载环境变量
 load_dotenv()
