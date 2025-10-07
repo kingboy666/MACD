@@ -1501,10 +1501,10 @@ def close_position(symbol, reason="手动平仓"):
             try:
                 notify_email(
                     f"{symbol} 平仓成功",
-                    f"{'平多' if position['side']=='long' else '平空'} {size:.6f} @ {current_price:.4f}
-PnL: {pnl:.4f}
-策略: {position.get('strategy_type','NA')}"
+                    f"{'平多' if position['side']=='long' else '平空'} {size:.6f} @ {current_price:.4f}\nPnL: {pnl:.4f}\n策略: {position.get('strategy_type','NA')}"
                 )
+
+
             except Exception as e:
                 log_message("WARNING", f"平仓邮件通知失败: {e}")
             
