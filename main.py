@@ -1,5 +1,4 @@
 import ccxt
-import talib as ta
 import pandas as pd
 import traceback
 import numpy as np
@@ -21,19 +20,12 @@ try:
     from smart_grid_strategy import SmartGridStrategy
 except ImportError as e:
     print(f"导入smart_grid_strategy失败: {e}")
-    # 如果导入失败，创建一个占位类以保证接口兼容
+    # 如果导入失败，创建一个空的占位类
     class SmartGridStrategy:
         def __init__(self):
             pass
         def run_strategy(self, *args, **kwargs):
-            # 统一返回结构，避免调用方KeyError
-            return {
-                'side': None,
-                'price': None,
-                'signal_strength': 'hold',
-                'strategy_type': 'smart_grid',
-                'reason': '策略未加载'
-            }
+            return {'action': 'hold', 'reason': '策略未加载'}
 
 # 加载环境变量
 load_dotenv()
@@ -456,6 +448,10 @@ def get_account_info():
         return None
 
 
+        return adx
+    except Exception:
+        return pd.Series([np.nan] * len(close))
+
 def process_klines(ohlcv):
     """处理K线数据并计算技术指标（VWAP日内重置、MACD(12,26,9)、RSI(14)、VWAP±1SD、成交量均值）"""
     try:
@@ -752,8 +748,8 @@ def generate_signal(symbol):
                                 'kline_end_time': k1_end / 1000.0
                             })
                         signals.append(signal_data)
-    except Exception as e:
-        log_message("WARNING", f"{symbol} 1m BB+RSI策略执行失败: {str(e)}")
+        except Exception as e:
+            log_message("WARNING", f"{symbol} 1m BB+RSI策略执行失败: {str(e)}")
 
         # 策略2: 震荡市场布林带策略（任何市场状态都执行）
         try:
@@ -830,6 +826,8 @@ def generate_signal(symbol):
                         'time_remaining': time_remaining,
                         'kline_end_time': current_kline_end / 1000.0
                     })
+        except Exception as e:
+            log_message("WARNING", f"{symbol} 震荡市场布林带策略执行失败: {str(e)}")
 
         # M30 EMA交叉策略 - 完整结构化策略
         # 获取30分钟K线数据
@@ -922,8 +920,9 @@ def generate_signal(symbol):
                 'strategy_type': 'm30_ema_cross'
             })
             log_message("DEBUG", f"{symbol} M30 EMA交叉策略做空信号确认")
+    
     except Exception as e:
-        log_message("WARNING", f"{symbol} 震荡/30m策略执行失败: {str(e)}")
+        log_message("WARNING", f"{symbol} M30 EMA交叉策略执行失败: {str(e)}")
     
     # 返回所有收集到的信号
     if signals:
@@ -1002,6 +1001,10 @@ def calculate_position_size(symbol, price, total_balance):
         except Exception as e:
             log_message("ERROR", f"计算仓位大小错误: {str(e)}")
             return 0
+            
+    except Exception as e:
+        log_message("ERROR", f"获取智能杠杆错误: {str(e)}")
+        return 0
             
         position_size = min_amount
         # 如果调整后仍然不满足金额精度，则跳过交易
@@ -1774,14 +1777,11 @@ def trading_loop():
                         if len(position_tracker['positions']) >= MAX_OPEN_POSITIONS:
                             break
                         
-                        # 生成交易信号（可能返回单个信号或信号列表）
-                        signals = generate_signal(symbol)
-                        if signals:
-                            if isinstance(signals, dict):
-                                signals = [signals]
-                            for sig in signals:
-                                log_signal_overview(symbol, sig)
-                                execute_trade(symbol, sig, sig['signal_strength'])
+                        # 生成交易信号
+                        signal = generate_signal(symbol)
+                        if signal:
+                            log_signal_overview(symbol, signal)
+                            execute_trade(symbol, signal, signal['signal_strength'])
                         
                         time.sleep(1)  # 短暂延迟避免API限制
                         
@@ -2436,22 +2436,13 @@ def check_pending_signals():
             # K线已经收盘，重新检查信号
             log_message("DEBUG", f"{symbol} K线已收盘，重新检查信号")
             
-            # 重新生成信号（可能返回多个）
-            new_signals = generate_signal(symbol)
-            selected = None
-            if new_signals:
-                if isinstance(new_signals, dict):
-                    new_signals = [new_signals]
-                # 选择最强的信号
-                strength_rank = {'strong': 3, 'medium': 2, 'weak': 1, 'pending': 0}
-                new_signals = [s for s in new_signals if s.get('signal_strength') in strength_rank]
-                if new_signals:
-                    new_signals.sort(key=lambda s: strength_rank.get(s.get('signal_strength'), 0), reverse=True)
-                    selected = new_signals[0]
-
-            if selected:
-                confirmed_signals.append((symbol, selected))
-                log_message("INFO", f"{symbol} pending信号确认: {selected['side']} @ {selected['price']:.4f}")
+            # 重新生成信号
+            new_signal = generate_signal(symbol)
+            
+            if new_signal and new_signal.get('signal_strength') in ['strong', 'medium', 'weak']:
+                # 信号确认，添加到确认列表
+                confirmed_signals.append((symbol, new_signal))
+                log_message("INFO", f"{symbol} pending信号确认: {new_signal['side']} @ {new_signal['price']:.4f}")
             else:
                 # 信号不再有效，清除pending信号
                 log_message("DEBUG", f"{symbol} pending信号失效，已清除")
@@ -3057,12 +3048,9 @@ def enhanced_trading_loop():
                         if len(position_tracker['positions']) >= MAX_OPEN_POSITIONS:
                             break
                         
-                        # 生成交易信号（可能返回单个信号或信号列表）
-                        signals = generate_signal(symbol)
-                        if signals:
-                            if isinstance(signals, dict):
-                                signals = [signals]
-                            for signal in signals:
+                        # 生成交易信号
+                        signal = generate_signal(symbol)
+                        if signal:
                             # 检查信号状态
                             if signal.get('signal_strength') == 'pending':
                                 # 信号处于pending状态，等待K线收盘
@@ -3074,16 +3062,20 @@ def enhanced_trading_loop():
                                     'timestamp': datetime.now(timezone(timedelta(hours=8))),
                                     'kline_end_time': signal.get('kline_end_time', 0)
                                 }
+                                
                             elif signal.get('signal_strength') in ['strong', 'medium', 'weak']:
                                 # 确认信号，执行交易
                                 log_signal_overview(symbol, signal)
+                                
                                 # 如果之前有pending信号，清除它
                                 if symbol in position_tracker['pending_signals']:
                                     del position_tracker['pending_signals'][symbol]
+                                
                                 # 执行交易
                                 if execute_trade(symbol, signal, signal['signal_strength']):
                                     # 更新每日统计
                                     position_tracker['daily_stats']['trades_count'] += 1
+                                    
                                     # 设置止盈止损
                                     time.sleep(2)  # 等待订单确认
                                     if symbol in position_tracker['positions']:
