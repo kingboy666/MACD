@@ -201,9 +201,14 @@ def log_message(level, message):
     # 使用UTC+8时区
     utc8_timezone = timezone(timedelta(hours=8))
     timestamp = datetime.now(utc8_timezone).strftime('%Y-%m-%d %H:%M:%S')
-    print(f"[{timestamp}] {level}: {message}")
+    
+    # 确保level和message都不是None
+    safe_level = str(level) if level is not None else "UNKNOWN"
+    safe_message = str(message) if message is not None else "No message provided"
+    
+    print(f"[{timestamp}] {safe_level}: {safe_message}")
 
-def notify_email(subject: str, body: str, to_addr: str = None):
+def notify_email(subject: str, body: str, to_addr: str | None = None):
     """发送邮件通知（默认QQ SMTP），需在环境变量配置 SMTP_HOST/PORT/USER/PASS/SSL/EMAIL_TO"""
     try:
         host = os.getenv('SMTP_HOST', 'smtp.qq.com')
@@ -211,7 +216,7 @@ def notify_email(subject: str, body: str, to_addr: str = None):
         user = os.getenv('SMTP_USER')
         pwd = os.getenv('SMTP_PASS')
         use_ssl = os.getenv('SMTP_SSL', 'true').lower() in ['true','1','yes']
-        to = to_addr or os.getenv('EMAIL_TO') or user
+        to = to_addr or os.getenv('EMAIL_TO') or user or ""
         if not all([host, port, user, pwd, to]):
             log_message("WARNING", "邮件通知未配置完整，跳过")
             return
@@ -269,8 +274,11 @@ def log_signal_overview(symbol, signal):
 def test_api_connection():
     """测试交易所API连接"""
     try:
-        exchange.fetch_balance()
-        return True
+        if exchange is None:
+            log_message("ERROR", "交易所连接未初始化")
+            return False
+        balance = exchange.fetch_balance()
+        return balance is not None
     except Exception as e:
         log_message("ERROR", f"API连接测试失败: {str(e)}")
         return False
@@ -278,12 +286,18 @@ def test_api_connection():
 def get_klines(symbol, timeframe, limit=100):
     """获取K线数据"""
     try:
-        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit)
+        if exchange is None:
+            log_message("ERROR", f"交易所连接未初始化，无法获取 {symbol} K线数据")
+            return None
+            
+        # 确保exchange对象有效
+        ohlcv = exchange.fetch_ohlcv(symbol, timeframe, limit=limit) if exchange else None
         if not ohlcv:
             return None
         return ohlcv
     except Exception as e:
-        log_message("ERROR", f"获取 {symbol} K线数据失败: {str(e)}")
+        error_msg = str(e) if e else "未知错误"
+        log_message("ERROR", f"获取 {symbol} K线数据失败: {error_msg}")
         return None
 
 def get_klines_data(symbol, timeframe='5m', limit=100):
@@ -364,9 +378,34 @@ def get_smart_leverage(symbol, account_balance, atr_percentage=None):
 def get_account_info():
     """获取账户信息"""
     try:
+        if exchange is None:
+            log_message("ERROR", "交易所连接未初始化，无法获取账户信息")
+            return None
+            
         balance = exchange.fetch_balance()
-        total_balance = balance['total']['USDT'] if 'USDT' in balance['total'] else 0
-        available_balance = balance['free']['USDT'] if 'USDT' in balance['free'] else 0
+        if balance is None:
+            log_message("WARNING", "获取账户余额返回None")
+            return None
+            
+        # 安全地获取余额信息
+        total_balance = 0.0
+        available_balance = 0.0
+        
+        if isinstance(balance, dict) and 'total' in balance and isinstance(balance['total'], dict):
+            usdt_total = balance['total'].get('USDT')
+            if usdt_total is not None:
+                try:
+                    total_balance = float(usdt_total)
+                except (ValueError, TypeError):
+                    total_balance = 0.0
+        
+        if isinstance(balance, dict) and 'free' in balance and isinstance(balance['free'], dict):
+            usdt_free = balance['free'].get('USDT')
+            if usdt_free is not None:
+                try:
+                    available_balance = float(usdt_free)
+                except (ValueError, TypeError):
+                    available_balance = 0.0
         
         return {
             'total_balance': total_balance,
@@ -524,12 +563,12 @@ def calculate_bb_rsi_1m_stops(symbol: str, entry_price: float, side: str):
         if side == 'long':
             stop_loss = max(0.0, bb_lower - (close * 0.005))
             # 高频止盈：中轨1-2%范围
-            take_profit_range = 0.01 + (abs(entry_price - bb_mid) / bb_mid) * 0.01
+            take_profit_range = 0.01 + (abs(float(entry_price) - float(bb_mid)) / float(bb_mid)) * 0.01 if entry_price and bb_mid else 0.01
             take_profit = bb_mid * (1 + take_profit_range)
         else:
             stop_loss = bb_upper + (close * 0.005)
             # 高频止盈：中轨1-2%范围
-            take_profit_range = 0.01 + (abs(entry_price - bb_mid) / bb_mid) * 0.01
+            take_profit_range = 0.01 + (abs(float(entry_price) - float(bb_mid)) / float(bb_mid)) * 0.01 if entry_price and bb_mid else 0.01
             take_profit = bb_mid * (1 - take_profit_range)
 
         return {'stop_loss': stop_loss, 'take_profit': take_profit}
@@ -803,6 +842,8 @@ def generate_signal(symbol):
         volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.0 * vol_ma20)
         # Funding过滤：正funding>0.03%时避免做多
         try:
+            if not exchange:
+                return None
             funding = exchange.fetch_funding_rate(symbol).get('fundingRate')
             if funding is not None and funding > 0.0003 and golden_cross:
                 return None
@@ -824,7 +865,7 @@ def generate_signal(symbol):
             h1_ok = True  # 兜底：若获取失败不阻断
         
         if current_vwap is not None and current_rsi is not None and volume_ok and h1_ok:
-            vwap_bias = abs(current_price - current_vwap) / current_vwap > 0.002
+            vwap_bias = abs(float(current_price) - float(current_vwap)) / float(current_vwap) > 0.002 if current_price and current_vwap else False
             if golden_cross and (current_close > current_vwap) and vwap_bias and (current_rsi > 50) and is_bullish:
                 if kline_completed:
                     return {
@@ -1010,9 +1051,9 @@ def calculate_position_size(symbol, price, total_balance):
             price = float(price)
             
             if total_balance < 10:  # 小额资金（小于10U）
-                position_fund = [0.95, 0.80, 0.60][min(open_positions, 2)] * total_trading_fund
+                position_fund = [0.98, 0.85, 0.70][min(open_positions, 2)] * total_trading_fund
             elif total_balance < 100:  # 中等资金（10-100U）
-                position_fund = [0.85, 0.65, 0.45][min(open_positions, 2)] * total_trading_fund
+                position_fund = [0.90, 0.75, 0.55][min(open_positions, 2)] * total_trading_fund
             else:  # 大额资金（100U以上）
                 position_fund = [0.80, 0.60, 0.40, 0.30][min(open_positions, 3)] * total_trading_fund
             
@@ -1048,7 +1089,7 @@ def calculate_position_size(symbol, price, total_balance):
                 log_message("WARNING", f"{symbol} 调整到最小交易量 {position_size:.6f}")
             
             # 检查交易金额精度
-            min_trade_value = 0.1 if total_balance < 10 else (0.5 if total_balance < 100 else 1.0)
+            min_trade_value = 0.01 if total_balance < 10 else (0.1 if total_balance < 100 else 1.0)
             if (position_size * price) < min_trade_value:
                 position_size = max(min_trade_value / price, min_amount)
                 log_message("WARNING", f"{symbol} 调整到最小金额精度 {min_trade_value} USDT")
@@ -1095,6 +1136,8 @@ def execute_trade(symbol, signal, signal_strength):
             if exchange:
                 for sym, pos in position_tracker['positions'].items():
                     try:
+                        if not exchange:
+                            continue
                         ticker_data = exchange.fetch_ticker(sym)
                         if ticker_data and 'last' in ticker_data:
                             px = float(ticker_data['last'])
@@ -1104,8 +1147,8 @@ def execute_trade(symbol, signal, signal_strength):
                     except Exception:
                         pass
             new_exposure = current_exposure + (abs(position_size) * price)
-            if total_balance > 0 and (new_exposure / total_balance) > 10.0:
-                log_message("WARNING", f"{symbol} 下单将使总敞口超1000%（{new_exposure/total_balance:.2%}），跳过本次交易")
+            if total_balance > 0 and (new_exposure / total_balance) > 3.0:
+                log_message("WARNING", f"{symbol} 下单将使总敞口超300%（{new_exposure/total_balance:.2%}），跳过本次交易")
                 return False
         except Exception as e:
             log_message("WARNING", f"{symbol} 敞口检查异常，继续但建议关注风险: {e}")
@@ -1163,6 +1206,8 @@ def execute_trade(symbol, signal, signal_strength):
             try:
                 retries = 3
                 for attempt in range(1, retries + 1):
+                    if not exchange:
+                        return False
                     orders = exchange.fetch_open_orders(symbol)
                     has_sl = False; has_tp = False
                     for o in orders:
@@ -1315,7 +1360,10 @@ def execute_trade(symbol, signal, signal_strength):
 def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
     """计算止损止盈价格（静态规则：VWAP保护 + 入场K线极值±0.5% + ATR固定倍数；BNB使用1.5x ATR TP）"""
     try:
-        current_price = float(exchange.fetch_ticker(symbol)['last'])
+        if not exchange:
+            return None
+        ticker = exchange.fetch_ticker(symbol) if exchange else None
+        current_price = float(ticker['last']) if ticker and 'last' in ticker else None
         ohlcv = get_klines(symbol, '5m', limit=2)
         df_last = process_klines(ohlcv)
         last_vwap = df_last['VWAP'].iloc[-1] if df_last is not None and 'VWAP' in df_last.columns else None
@@ -1360,14 +1408,14 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
                 take_profit = price * 1.02
             if stop_loss >= price:
                 stop_loss = price * 0.99
-            if take_profit <= current_price:
+            if current_price and take_profit <= current_price:
                 take_profit = max(current_price * 1.02, price * 1.02)
         else:
             if take_profit >= price:
                 take_profit = price * 0.98
             if stop_loss <= price:
                 stop_loss = price * 1.01
-            if take_profit >= current_price:
+            if current_price and take_profit >= current_price:
                 take_profit = min(current_price * 0.98, price * 0.98)
 
         # 震荡模式SL/TP收紧：SL=1.5x ATR, TP=1.2x ATR（若有ATR）
@@ -1385,7 +1433,7 @@ def calculate_stop_loss_take_profit(symbol, price, signal, atr_value):
         log_message("DEBUG", f"{symbol} {signal} SL/TP: entry={price:.4f}, vwap={last_vwap if last_vwap else 0:.4f}, atr={atr_used:.4f}, SL={stop_loss:.4f}, TP={take_profit:.4f}")
         return {'stop_loss': stop_loss, 'take_profit': take_profit}
     except Exception as e:
-        log_message("ERROR", f"计算止损止盈失败: {str(e)}")
+        log_message("ERROR", f"计算止损止盈失败: {str(e) if e is not None else 'Unknown error'}")
         return None
 
 def sync_exchange_positions():
@@ -1393,15 +1441,62 @@ def sync_exchange_positions():
     try:
         log_message("INFO", "正在同步交易所持仓...")
         
+        if exchange is None:
+            log_message("ERROR", "交易所连接未初始化，无法同步持仓")
+            return []
+            
         positions = exchange.fetch_positions()
-        active_positions = [pos for pos in positions if float(pos['contracts']) != 0]
+        if positions is None:
+            log_message("WARNING", "获取持仓信息返回None，跳过同步")
+            return []
+            
+        active_positions = []
+        for pos in positions:
+            if isinstance(pos, dict) and 'contracts' in pos:
+                try:
+                    contracts_val = pos['contracts']
+                    if contracts_val is not None:
+                        size = float(contracts_val)
+                        if size != 0:
+                            active_positions.append(pos)
+                except (TypeError, ValueError):
+                    continue
         
         for position in active_positions:
-            symbol = position['symbol']
-            size = float(position['contracts'])
+            # 安全地获取持仓信息
+            symbol = position.get('symbol') if isinstance(position, dict) else None
+            if symbol is None:
+                continue
+                
+            contracts = position.get('contracts')
+            if contracts is None:
+                continue
+                
+            try:
+                size = float(contracts)
+            except (TypeError, ValueError):
+                continue
+                
             side = 'long' if size > 0 else 'short'
-            # entry price fallback: use entryPrice or avgPrice or last ticker
-            entry_price = float(position.get('entryPrice') or position.get('avgPrice') or exchange.fetch_ticker(symbol)['last'])
+            
+            # 获取入场价格，添加None值检查
+            entry_price_value = position.get('entryPrice') or position.get('avgPrice')
+            if entry_price_value is None:
+                # 如果持仓信息中没有价格，尝试获取最新价格
+                ticker = exchange.fetch_ticker(symbol)
+                if ticker is None:
+                    log_message("WARNING", f"无法获取{symbol}的价格信息，跳过该持仓")
+                    continue
+                entry_price_value = ticker.get('last')
+                if entry_price_value is None:
+                    log_message("WARNING", f"无法获取{symbol}的最新价格，跳过该持仓")
+                    continue
+            
+            try:
+                entry_price = float(entry_price_value)
+            except (TypeError, ValueError):
+                log_message("WARNING", f"无法转换{symbol}的入场价格，跳过该持仓")
+                continue
 
             # 写入本地持仓跟踪
             position_tracker['positions'][symbol] = {
@@ -1416,9 +1511,11 @@ def sync_exchange_positions():
             try:
                 setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
             except Exception as e:
-                log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {e}")
+                error_msg = str(e) if e is not None else "Unknown error"
+                log_message("WARNING", f"同步设置止盈止损失败 {symbol}: {error_msg}")
     except Exception as e:
-        log_message("ERROR", f"同步交易所持仓失败: {str(e)}")
+        error_msg = str(e) if e is not None else "Unknown error"
+        log_message("ERROR", f"同步交易所持仓失败: {error_msg}")
     return
 
 def update_trade_stats(symbol, side, pnl, entry_price, exit_price):
@@ -1550,11 +1647,15 @@ def close_position(symbol, reason="手动平仓"):
         side = 'sell' if position['side'] == 'long' else 'buy'
         size = abs(position['size'])
         
+        if not exchange:
+            return None
         ticker = exchange.fetch_ticker(symbol)
         current_price = ticker['last']
 
         # 取消该交易对的所有未成交订单，避免与平仓冲突
         try:
+            if not exchange:
+                return
             open_orders = exchange.fetch_open_orders(symbol)
             for o in open_orders:
                 try:
@@ -1582,11 +1683,11 @@ def close_position(symbol, reason="手动平仓"):
             log_message("SUCCESS", f"平仓成功: {symbol} {reason}")
             
             # 计算盈亏
-            entry_price = position['entry_price']
+            entry_price = float(position['entry_price']) if position['entry_price'] else 0
             if position['side'] == 'long':
-                pnl = (current_price - entry_price) * size
+                pnl = (current_price - entry_price) * size if current_price and entry_price else 0
             else:
-                pnl = (entry_price - current_price) * size
+                pnl = (entry_price - current_price) * size if current_price and entry_price else 0
             
             # 更新交易统计
             update_trade_stats(symbol, position['side'], pnl, entry_price, current_price)
@@ -1724,16 +1825,33 @@ def start_trading_system():
 def get_historical_data(symbol, days=30):
     """获取历史数据用于回测"""
     try:
+        if exchange is None:
+            log_message("ERROR", f"交易所连接未初始化，无法获取 {symbol} 历史数据")
+            return None
+            
         # 计算需要获取的K线数量
         limit = days * 24 * 12  # 5分钟K线，每天288根
         
-        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=limit)
+        if not exchange:
+            return None
+            
+        # 确保exchange对象有效
+        ohlcv = exchange.fetch_ohlcv(symbol, '5m', limit=limit) if exchange else None
+        if ohlcv is None or len(ohlcv) == 0:
+            log_message("WARNING", f"获取{symbol}历史数据返回空值")
+            return None
+            
+        # 确保数据格式正确
+        if not isinstance(ohlcv, list) or len(ohlcv) == 0:
+            return None
+            
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
         
         return df
     except Exception as e:
-        log_message("ERROR", f"获取历史数据失败 {symbol}: {e}")
+        error_msg = str(e) if e else "未知错误"
+        log_message("ERROR", f"获取历史数据失败 {symbol}: {error_msg}")
         return None
 
 def backtest_strategy(symbol, days=7, initial_balance=10000):
@@ -1791,7 +1909,7 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
                     
                     if position == 'short':
                         # 平空仓
-                        pnl = (entry_price - current['close']) / entry_price * balance * 0.8
+                        pnl = (float(entry_price) - float(current['close'])) / float(entry_price) * balance * 0.8 if entry_price and current and current.get('close') else 0
                         trades.append({
                             'type': 'close_short',
                             'price': current['close'],
@@ -1988,6 +2106,8 @@ def check_trailing_stop(symbol, position_info):
             return False
         
         # 获取K线数据，检查当前K线是否已收盘
+        if not exchange:
+            return None
         ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=2)
         if len(ohlcv) < 2:
             return False
@@ -2004,7 +2124,12 @@ def check_trailing_stop(symbol, position_info):
             current_price = prev_kline[4]  # 使用前一K线的收盘价
             log_message("DEBUG", f"{symbol} 当前K线未收盘，使用前一K线收盘价: {current_price}")
         else:
-            current_price = float(exchange.fetch_ticker(symbol)['last'])
+            if not exchange:
+                return
+            if not exchange:
+                return
+            ticker = exchange.fetch_ticker(symbol) if exchange else None
+            current_price = float(ticker['last']) if ticker and 'last' in ticker else None
         
         entry_price = float(position_info['entry_price'])
         side = position_info['side']
@@ -2019,7 +2144,7 @@ def check_trailing_stop(symbol, position_info):
         if strategy_type == 'oscillation':
             # 震荡策略：更早启用动态止损，更紧的保护
             if side == 'long':
-                unrealized_pnl = (current_price - entry_price) / entry_price
+                unrealized_pnl = (float(current_price) - float(entry_price)) / float(entry_price) if current_price and entry_price else 0
                 profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
                 
                 if unrealized_pnl > profit_threshold:
@@ -2027,7 +2152,7 @@ def check_trailing_stop(symbol, position_info):
                     profit_protection = unrealized_pnl * 0.4
                     new_stop_loss = entry_price * (1 + profit_protection)
             else:  # short position for oscillation strategy
-                unrealized_pnl = (entry_price - current_price) / entry_price
+                unrealized_pnl = (float(entry_price) - float(current_price)) / float(entry_price) if entry_price and current_price else 0
                 profit_threshold = atr * 1.0 / entry_price  # 1.0倍ATR开始启用动态止损（更早）
                 
                 if unrealized_pnl > profit_threshold:
@@ -2036,7 +2161,7 @@ def check_trailing_stop(symbol, position_info):
         else:
             # 趋势策略：原有参数
             if side == 'long':
-                unrealized_pnl = (current_price - entry_price) / entry_price
+                unrealized_pnl = (float(current_price) - float(entry_price)) / float(entry_price) if current_price and entry_price else 0
                 profit_threshold = atr * 1.5 / entry_price  # 1.5倍ATR开始启用动态止损
                 
                 if unrealized_pnl > profit_threshold:
@@ -2044,7 +2169,7 @@ def check_trailing_stop(symbol, position_info):
                     profit_protection = unrealized_pnl * 0.5
                     new_stop_loss = entry_price * (1 + profit_protection)
             else:  # short position for trend strategy
-                unrealized_pnl = (entry_price - current_price) / entry_price
+                unrealized_pnl = (float(entry_price) - float(current_price)) / float(entry_price) if entry_price and current_price else 0
                 profit_threshold = atr * 1.5 / entry_price
                 
                 if unrealized_pnl > profit_threshold:
@@ -2052,6 +2177,8 @@ def check_trailing_stop(symbol, position_info):
                     new_stop_loss = entry_price * (1 - profit_protection)
         
         # 检查是否需要更新止损（修复：检查条件单而不是stop类型）
+        if not exchange:
+            return []
         current_orders = exchange.fetch_open_orders(symbol)
         stop_orders = [o for o in current_orders if o['type'] == 'conditional' and 'slTriggerPx' in o.get('info', {}).get('params', {})]
         
@@ -2178,6 +2305,8 @@ def setup_missing_stop_orders(position, symbol):
                 return False
         
         # 获取ATR
+        if not exchange:
+            return None
         ohlcv = exchange.fetch_ohlcv(symbol, '30m', limit=50)
         df = pd.DataFrame(ohlcv, columns=['timestamp', 'open', 'high', 'low', 'close', 'volume'])
         atr = calculate_atr(df['high'], df['low'], df['close']).iloc[-1]
@@ -2199,11 +2328,11 @@ def setup_missing_stop_orders(position, symbol):
                 atr_tp_multiplier = max(ATR_MIN_MULTIPLIER, min(ATR_MAX_MULTIPLIER, ATR_TAKE_PROFIT_MULTIPLIER * 0.6))  # 减少40%
                 
                 if side == 'long':
-                    stop_loss = max(entry_price * 0.96, entry_price - (atr * atr_sl_multiplier))  # 至少4%止损
+                    stop_loss = max(float(entry_price) * 0.96, float(entry_price) - (float(atr) * atr_sl_multiplier)) if entry_price and atr else float(entry_price) * 0.96  # 至少4%止损
                     take_profit = entry_price + (atr * atr_tp_multiplier)
                 else:  # short
-                    stop_loss = min(entry_price * 1.04, entry_price + (atr * atr_sl_multiplier))  # 至少4%止损
-                    take_profit = max(entry_price * 0.95, entry_price - (atr * atr_tp_multiplier))  # 至少5%止盈
+                    stop_loss = min(float(entry_price) * 1.04, float(entry_price) + (float(atr) * atr_sl_multiplier)) if entry_price and atr else float(entry_price) * 1.04  # 至少4%止损
+                    take_profit = max(float(entry_price) * 0.95, float(entry_price) - (float(atr) * atr_tp_multiplier)) if entry_price and atr else float(entry_price) * 0.95  # 至少5%止盈
             else:
                 # 固定百分比止损止盈（震荡策略更紧）
                 if side == 'long':
@@ -2313,7 +2442,7 @@ def setup_missing_stop_orders(position, symbol):
                 if take_profit <= current_price:
                     log_message("WARNING", f"止盈价{take_profit:.4f}低于当前价{current_price:.4f}，重新计算止盈价")
                     # 确保止盈价高于当前价至少2%
-                    take_profit = max(current_price * 1.02, entry_price * 1.06)
+                    take_profit = max(current_price * 1.02, entry_price * 1.06) if current_price else entry_price * 1.06
                 if take_profit <= entry_price:
                     log_message("WARNING", f"止盈价{take_profit:.4f}低于入场价{entry_price:.4f}，重新计算止盈价")
                     take_profit = entry_price * 1.06
@@ -2321,16 +2450,16 @@ def setup_missing_stop_orders(position, symbol):
                 # 做空：止盈必须低于当前价格和入场价
                 if take_profit >= current_price:
                     log_message("WARNING", f"止盈价{take_profit:.4f}高于当前价{current_price:.4f}，重新计算止盈价")
-                    take_profit = min(current_price * 0.98, entry_price * 0.94)
+                    take_profit = min(current_price * 0.98, entry_price * 0.94) if current_price else entry_price * 0.94
                 if take_profit >= entry_price:
                     log_message("WARNING", f"止盈价{take_profit:.4f}高于入场价{entry_price:.4f}，重新计算止盈价")
                     take_profit = entry_price * 0.94
             
             # 最终验证：确保止盈价与当前价有足够差距
-            if side == 'long' and take_profit <= current_price * 1.01:
+            if current_price and side == 'long' and take_profit <= current_price * 1.01:
                 take_profit = current_price * 1.03
                 log_message("DEBUG", f"最终调整止盈价: {take_profit:.4f}")
-            elif side == 'short' and take_profit >= current_price * 0.99:
+            elif current_price and side == 'short' and take_profit >= current_price * 0.99:
                 take_profit = current_price * 0.97
                 log_message("DEBUG", f"最终调整止盈价: {take_profit:.4f}")
             
@@ -2625,7 +2754,10 @@ def report_symbols_status():
                 # 最新价格与5m指标
                 last = None; vwap = None; rsi = None
                 try:
-                    last = float(exchange.fetch_ticker(symbol)['last'])
+                    if not exchange:
+                        return
+                    ticker = exchange.fetch_ticker(symbol) if exchange else None
+                    last = float(ticker['last']) if ticker and 'last' in ticker else None
                     ohlcv = get_klines(symbol, '5m', limit=60)
                     df = process_klines(ohlcv) if ohlcv else None
                     if df is not None and len(df) >= 20:
@@ -2906,7 +3038,7 @@ def check_positions():
                 entry_time = pos.get('timestamp')
 
                 # 计算未实现盈亏与追踪阈值
-                unrealized_pnl = (last_close - entry_price) * size if side == 'long' else (entry_price - last_close) * size
+                unrealized_pnl = (float(last_close) - float(entry_price)) * size if side == 'long' and last_close and entry_price else (float(entry_price) - float(last_close)) * size if last_close and entry_price else 0
                 trailing_trigger = (atr if atr and atr > 0 else 0)  # >=1x ATR 启用追踪
                 trailing_distance = 0.5 * atr if atr and atr > 0 else None
 
@@ -2966,15 +3098,15 @@ def check_positions():
                 # Breakeven: 盈利达到0.5%后，回落到入场价则全平
                 try:
                     if side == 'long':
-                        if (last_close - entry_price) / entry_price >= 0.005 and not pos.get('breakeven_active'):
+                        if last_close and entry_price and (float(last_close) - float(entry_price)) / float(entry_price) >= 0.005 and (isinstance(pos, dict) and not pos.get('breakeven_active')):
                             pos['breakeven_active'] = True
-                        if pos.get('breakeven_active') and last_close <= entry_price:
+                        if (isinstance(pos, dict) and pos.get('breakeven_active')) and last_close and entry_price and last_close <= entry_price:
                             exit_now = True
                             log_message("INFO", f"{symbol} 多仓回落至保本位 全平")
                     else:
-                        if (entry_price - last_close) / entry_price >= 0.005 and not pos.get('breakeven_active'):
+                        if entry_price and last_close and (float(entry_price) - float(last_close)) / float(entry_price) >= 0.005 and not pos.get('breakeven_active'):
                             pos['breakeven_active'] = True
-                        if pos.get('breakeven_active') and last_close >= entry_price:
+                        if (isinstance(pos, dict) and pos.get('breakeven_active')) and last_close and entry_price and last_close >= entry_price:
                             exit_now = True
                             log_message("INFO", f"{symbol} 空仓回升至保本位 全平")
                 except:
@@ -2982,11 +3114,11 @@ def check_positions():
 
                 # 分批TP：盈利达到1x ATR先平50%
                 if atr and atr > 0:
-                    if side == 'long' and (last_close - entry_price) >= atr and not pos.get('partial1_done'):
+                    if side == 'long' and last_close and entry_price and (float(last_close) - float(entry_price)) >= float(atr) and (isinstance(pos, dict) and not pos.get('partial1_done')):
                         exit_partial = True; partial_ratio = 0.5
                         pos['partial1_done'] = True
                         log_message("INFO", f"{symbol} 多仓达到1x ATR 盈利 先平50%")
-                    if side == 'short' and (entry_price - last_close) >= atr and not pos.get('partial1_done'):
+                    if side == 'short' and entry_price and last_close and (float(entry_price) - float(last_close)) >= float(atr) and (isinstance(pos, dict) and not pos.get('partial1_done')):
                         exit_partial = True; partial_ratio = 0.5
                         pos['partial1_done'] = True
                         log_message("INFO", f"{symbol} 空仓达到1x ATR 盈利 先平50%")
@@ -2995,11 +3127,11 @@ def check_positions():
                 try:
                     hist = df['MACD_HIST'] if 'MACD_HIST' in df.columns else None
                     if hist is not None and len(hist) >= 3:
-                        if side == 'long' and hist.iloc[-1] < hist.iloc[-2] and hist.iloc[-2] > hist.iloc[-3] and not pos.get('partial_hist_done'):
+                        if side == 'long' and hist is not None and len(hist) >= 3 and hist.iloc[-1] < hist.iloc[-2] and hist.iloc[-2] > hist.iloc[-3] and (isinstance(pos, dict) and not pos.get('partial_hist_done')):
                             exit_partial = True; partial_ratio = 0.3
                             pos['partial_hist_done'] = True
                             log_message("INFO", f"{symbol} 多仓MACD柱峰回落 平30%")
-                        if side == 'short' and hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-2] < hist.iloc[-3] and not pos.get('partial_hist_done'):
+                        if side == 'short' and hist is not None and len(hist) >= 3 and hist.iloc[-1] > hist.iloc[-2] and hist.iloc[-2] < hist.iloc[-3] and (isinstance(pos, dict) and not pos.get('partial_hist_done')):
                             exit_partial = True; partial_ratio = 0.3
                             pos['partial_hist_done'] = True
                             log_message("INFO", f"{symbol} 空仓MACD柱峰回升 平30%")
@@ -3029,7 +3161,7 @@ def check_positions():
                         )
                         if order:
                             exit_price = last_close
-                            pnl = (exit_price - entry_price) * close_size if side == 'long' else (entry_price - exit_price) * close_size
+                            pnl = (float(exit_price) - float(entry_price)) * close_size if side == 'long' and exit_price and entry_price else (float(entry_price) - float(exit_price)) * close_size if exit_price and entry_price else 0
                             log_message("SUCCESS", f"{symbol} 平仓成功: {side_out} {close_size} @ {exit_price:.4f}, PnL={pnl:.4f}")
                             # 更新统计
                             update_trade_stats(symbol, side, pnl, entry_price, exit_price)
@@ -3117,14 +3249,14 @@ def backtest_strategy_5m(symbol, days=14):
                     if side == 'long' and (close - entry_price) >= atr:
                         recent_high = float(df['high'].iloc[max(0, i-12):i+1].max())
                         trailing_exit = (recent_high - close) >= (0.5 * atr)
-                    if side == 'short' and (entry_price - close) >= atr:
+                    if side == 'short' and entry_price and close and (float(entry_price) - float(close)) >= float(atr):
                         recent_low = float(df['low'].iloc[max(0, i-12):i+1].min())
                         trailing_exit = (close - recent_low) >= (0.5 * atr)
 
                 if vwap_exit or rsi_exit_full or div_exit or trailing_exit:
                     # 退出
                     exit_price = close
-                    pnl = (exit_price - entry_price) if side == 'long' else (entry_price - exit_price)
+                    pnl = (float(exit_price) - float(entry_price)) if side == 'long' and exit_price and entry_price else (float(entry_price) - float(exit_price)) if exit_price and entry_price else 0
 
                     # Funding费用模拟：0.01%/8h，按持仓时长线性扣减
                     try:
@@ -3142,7 +3274,7 @@ def backtest_strategy_5m(symbol, days=14):
                     pnl *= DEFAULT_LEVERAGE  # 杠杆模拟
                     fee_rate = 0.0005  # 每侧手续费（约0.05%）
                     slippage_rate = 0.0005  # 滑点成本（约0.05%）
-                    net_ret = (pnl / entry_price) - (fee_rate * 2) - slippage_rate
+                    net_ret = (float(pnl) / float(entry_price)) - (fee_rate * 2) - slippage_rate if pnl is not None and entry_price is not None else -(fee_rate * 2) - slippage_rate
                     equity += net_ret * size_per_trade
                     trades.append({'side': side, 'entry': entry_price, 'exit': exit_price, 'pnl': pnl})
                     position = None
