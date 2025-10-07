@@ -289,11 +289,16 @@ def process_klines(ohlcv):
         # 计算VWAP(日内重置)与RSI(14) + VWAP标准差带 + 成交量均值
         try:
             typical_price = (df['high'] + df['low'] + df['close']) / 3.0
-            vwap_value = typical_price * df['volume']
+            # 明确生成列，避免使用 Series.name=None 造成 KeyError
+            df['vwap_value'] = typical_price * df['volume']
             df['day'] = df['timestamp'].dt.date
-            df['cum_vwap'] = df.groupby('day')[vwap_value.name].cumsum()
+            # 日内累加
+            df['cum_vwap'] = df.groupby('day')['vwap_value'].cumsum()
             df['cum_volume'] = df.groupby('day')['volume'].cumsum()
-            df['VWAP'] = df['cum_vwap'] / df['cum_volume']
+            # 安全计算VWAP（避免除零），并前向填充保证列存在
+            safe_cum_volume = df['cum_volume'].replace(0, np.nan)
+            df['VWAP'] = (df['cum_vwap'] / safe_cum_volume).ffill()
+            # RSI计算
             df['RSI'] = calculate_rsi(df['close'], period=14)
             # VWAP标准差带（按日内重置）
             df['vwap_diff'] = (typical_price - df['VWAP'])
@@ -372,6 +377,20 @@ def generate_signal(symbol):
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
         volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 1.2 * vol_ma20)
+        # 周末低量避开：周六/周日或当前量低于均值则暂停入场
+        try:
+            now_utc8 = datetime.now(timezone(timedelta(hours=8)))
+            is_weekend = now_utc8.weekday() >= 5  # 5=周六,6=周日
+            if is_weekend or (vol_ma20 is not None and df['volume'].iloc[-1] < vol_ma20):
+                return None
+        except Exception:
+            pass
+        # 手动停（新闻事件）：环境变量 NEWS_PAUSE=true 时暂停
+        try:
+            if os.getenv('NEWS_PAUSE','').lower() in ['true', '1', 'yes']:
+                return None
+        except Exception:
+            pass
 
 
         
@@ -395,7 +414,22 @@ def generate_signal(symbol):
                 return None
         except Exception:
             pass
-        if current_vwap is not None and current_rsi is not None and volume_ok:
+        # 1h框架确认：多单需1小时MACD>0，空单需<0
+        h1_ok = True
+        try:
+            ohlcv_1h = get_klines(symbol, '1h', limit=100)
+            if ohlcv_1h:
+                df1h = pd.DataFrame(ohlcv_1h, columns=['timestamp','open','high','low','close','volume'])
+                macd_h, sig_h, _ = calculate_macd(df1h['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
+                macd_h_last = macd_h.iloc[-1]
+                if golden_cross:
+                    h1_ok = macd_h_last > 0
+                elif death_cross:
+                    h1_ok = macd_h_last < 0
+        except Exception:
+            h1_ok = True  # 兜底：若获取失败不阻断
+        
+        if current_vwap is not None and current_rsi is not None and volume_ok and h1_ok:
             vwap_bias = abs(current_price - current_vwap) / current_vwap > 0.002
             if golden_cross and (current_close > current_vwap) and vwap_bias and (current_rsi > 50) and is_bullish:
                 if kline_completed:
@@ -634,6 +668,22 @@ def execute_trade(symbol, signal, signal_strength):
         price = signal['price']
         position_size = calculate_position_size(symbol, price, account_info['total_balance'])
         position_size = position_size * 0.999  # 0.1%滑点缓冲
+        # 总敞口限制：不超过余额的30%
+        try:
+            total_balance = account_info['total_balance']
+            current_exposure = 0.0
+            for sym, pos in position_tracker['positions'].items():
+                try:
+                    px = float(exchange.fetch_ticker(sym)['last'])
+                    current_exposure += abs(pos.get('size',0)) * px
+                except:
+                    pass
+            new_exposure = current_exposure + (abs(position_size) * price)
+            if total_balance > 0 and (new_exposure / total_balance) > 0.30:
+                log_message("WARNING", f"{symbol} 下单将使总敞口超30%（{new_exposure/total_balance:.2%}），跳过本次交易")
+                return False
+        except Exception as e:
+            log_message("WARNING", f"{symbol} 敞口检查异常，继续但建议关注风险: {e}")
         
         if position_size <= 0:
             log_message("WARNING", f"{symbol} 计算仓位大小为0，跳过交易")
