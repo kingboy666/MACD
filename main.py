@@ -1903,15 +1903,15 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
             
             # 检查信号
             if pd.notna(current['macd']):
-                # 做多信号
-                if (prev['macd'] <= prev['macd_signal'] and 
-                    current['macd'] > current['macd_signal'] and 
-                    current['close'] > current['VWAP'] and 
-                    current['RSI'] > 50 and position != 'long'):
+                # 做多信号 - 修复Series布尔判断错误
+                if (float(prev['macd']) <= float(prev['macd_signal']) and 
+                    float(current['macd']) > float(current['macd_signal']) and 
+                    float(current['close']) > float(current['VWAP']) and 
+                    float(current['RSI']) > 50 and position != 'long'):
                     
                     if position == 'short':
                         # 平空仓
-                        pnl = (float(entry_price) - float(current['close'])) / float(entry_price) * balance * 0.8 if entry_price and current and current.get('close') else 0
+                        pnl = (float(entry_price) - float(current['close'])) / float(entry_price) * balance * 0.8 if entry_price and current is not None and current.get('close') is not None else 0
                         trades.append({
                             'type': 'close_short',
                             'price': current['close'],
@@ -1941,15 +1941,15 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
                         'timestamp': current['timestamp']
                     })
                 
-                # 做空信号
-                elif (prev['macd'] >= prev['macd_signal'] and 
-                      current['macd'] < current['macd_signal'] and 
-                      current['close'] < current['VWAP'] and 
-                      current['RSI'] < 50 and position != 'short'):
+                # 做空信号 - 修复Series布尔判断错误
+                elif (float(prev['macd']) >= float(prev['macd_signal']) and 
+                      float(current['macd']) < float(current['macd_signal']) and 
+                      float(current['close']) < float(current['VWAP']) and 
+                      float(current['RSI']) < 50 and position != 'short'):
                     
                     if position == 'long':
                         # 平多仓
-                        pnl = (current['close'] - entry_price) / entry_price * balance * 0.8
+                        pnl = (float(current['close']) - float(entry_price)) / float(entry_price) * balance * 0.8
                         trades.append({
                             'type': 'close_long',
                             'price': current['close'],
