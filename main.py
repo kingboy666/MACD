@@ -9,6 +9,7 @@ from dotenv import load_dotenv
 import os
 import smtplib
 from email.message import EmailMessage
+from smart_grid_strategy import SmartGridStrategy
 
 # 加载环境变量
 load_dotenv()
@@ -497,8 +498,23 @@ def calculate_bb_rsi_1m_stops(symbol: str, entry_price: float, side: str):
         return None
 
 def generate_signal(symbol):
-    """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）"""
+    """基于VWAP+MACD(12,26,9)+RSI(14)的日内策略生成交易信号（仅收盘确认，含成交量过滤）
+    同时包含智能网格策略"""
     try:
+        # 首先检查是否为BTC/ETH，如果是则优先使用智能网格策略
+        if symbol in ['BTC-USDT-SWAP', 'ETH-USDT-SWAP']:
+            try:
+                # 需要先初始化exchange对象
+                exchange = initialize_exchange()
+                if exchange:
+                    grid_strategy = SmartGridStrategy(exchange, symbol)
+                    grid_signal = grid_strategy.run_strategy()
+                    if grid_signal:
+                        log_message("INFO", f"{symbol} 智能网格策略生成信号: {grid_signal}")
+                        return grid_signal
+            except Exception as e:
+                log_message("WARNING", f"{symbol} 智能网格策略执行失败: {str(e)}")
+        
         ohlcv = get_klines(symbol, TIMEFRAME_MAIN, limit=100)
         if not ohlcv:
             return None
@@ -529,12 +545,10 @@ def generate_signal(symbol):
         atr_value = df['ATR_14'].iloc[-1]
         
         # 指标数据（RSI与成交量过滤）
-
-
-
         current_rsi = df['RSI'].iloc[-1]
         vol_ma20 = df['vol_ma20'].iloc[-1] if 'vol_ma20' in df.columns else None
         volume_ok = (vol_ma20 is None) or (df['volume'].iloc[-1] >= 0.7 * vol_ma20)
+        
         # 周末低量避开：周六/周日或当前量低于均值则暂停入场
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
@@ -543,14 +557,13 @@ def generate_signal(symbol):
                 return None
         except Exception:
             pass
+        
         # 手动停（新闻事件）：环境变量 NEWS_PAUSE=true 时暂停
         try:
             if os.getenv('NEWS_PAUSE','').lower() in ['true', '1', 'yes']:
                 return None
         except Exception:
             pass
-
-
         
         # 检查MACD金叉死叉（主图）
         golden_cross = prev_macd <= prev_signal and current_macd > current_signal
@@ -945,106 +958,66 @@ def calculate_position_size(symbol, price, total_balance):
         # 智能分配仓位资金 - 优化小额资金分配
         open_positions = len(position_tracker['positions'])
         
+        # 确保exchange对象存在
+        if exchange is None:
+            log_message("ERROR", "Exchange对象未初始化")
+            return 0
+
         # 根据账户资金大小动态调整分配比例
-        if total_balance < 10:  # 小额资金（小于10U）
-            if open_positions == 0:
-                position_fund = total_trading_fund * 0.95  # 第一个仓位使用95%资金
-            elif open_positions == 1:
-                position_fund = total_trading_fund * 0.80  # 第二个仓位使用80%资金
-            else:
-                position_fund = total_trading_fund * 0.60  # 后续仓位使用60%资金
-        elif total_balance < 100:  # 中等资金（10-100U）
-            if open_positions == 0:
-                position_fund = total_trading_fund * 0.85  # 第一个仓位使用85%资金
-            elif open_positions == 1:
-                position_fund = total_trading_fund * 0.65  # 第二个仓位使用65%资金
-            else:
-                position_fund = total_trading_fund * 0.45  # 后续仓位使用45%资金
-        else:  # 大额资金（100U以上）
-            if open_positions == 0:
-                position_fund = total_trading_fund * 0.80  # 第一个仓位使用80%资金
-            elif open_positions == 1:
-                position_fund = total_trading_fund * 0.60  # 第二个仓位使用60%资金
-            elif open_positions == 2:
-                position_fund = total_trading_fund * 0.40  # 第三个仓位使用40%资金
-            else:
-                position_fund = total_trading_fund * 0.30  # 后续仓位使用30%资金
-        
-        # 计算仓位大小
-        position_value_with_leverage = position_fund * smart_leverage
-        position_size = position_value_with_leverage / price
-        
-        # 确保仓位大小不低于交易对的最小数量限制
-        min_amount = MIN_TRADE_AMOUNT.get(symbol, 0.001)  # 默认最小数量
-        
-        # 计算购买最小数量所需的资金
-        required_fund_with_leverage = min_amount * price / smart_leverage
-        
-        # 检查用户是否有足够资金购买最小数量
-        if required_fund_with_leverage > position_fund:
-            # 对于小额资金，采用更灵活的处理方式
-            if position_fund > 0.01:  # 如果资金大于0.01U，尝试多种调整方案
-                # 方案1：尝试使用最小杠杆
-                min_leverage = max(LEVERAGE_MIN, 1)
-                required_fund_min_leverage = min_amount * price / min_leverage
-                
-                # 方案2：尝试使用更低的最小交易量（如果交易所允许）
-                min_amount_flexible = min_amount * 0.5  # 尝试使用一半的最小交易量
-                required_fund_flexible = min_amount_flexible * price / smart_leverage
-                
-                if required_fund_min_leverage <= position_fund:
-                    # 使用最小杠杆
-                    smart_leverage = min_leverage
-                    position_value_with_leverage = position_fund * smart_leverage
-                    position_size = position_value_with_leverage / price
-                    log_message("INFO", f"{symbol} 资金不足，已调整为最小杠杆 {min_leverage}x 进行交易")
-                elif required_fund_flexible <= position_fund and min_amount_flexible >= min_amount * 0.1:
-                    # 使用灵活的最小交易量
-                    min_amount = min_amount_flexible
-                    position_size = min_amount
-                    log_message("INFO", f"{symbol} 资金不足，已调整为灵活最小交易量 {min_amount:.6f} 进行交易")
-                else:
-                    # 如果以上方案都不行，尝试使用可用资金的90%进行交易
-                    max_position_size = (position_fund * smart_leverage) / price
-                    if max_position_size >= min_amount * 0.1:  # 确保至少是原最小交易量的10%
-                        position_size = max_position_size
-                        log_message("INFO", f"{symbol} 资金不足，已使用可用资金 {position_fund:.4f} U 的90%进行交易")
-                    else:
-                        log_message("WARNING", f"{symbol} 资金不足，需要 {required_fund_with_leverage:.4f} U，但仅有 {position_fund:.4f} U 可用于本交易")
-                        return 0
-            else:
-                log_message("WARNING", f"{symbol} 资金过少（{position_fund:.4f} U），无法满足最小交易要求")
-                return 0
-        
-        if position_size < min_amount:
-            # 如果仓位大小低于最小数量，尝试使用最小杠杆重新计算
-            min_leverage = max(LEVERAGE_MIN, 1)
-            position_value_with_leverage = position_fund * min_leverage
+        try:
+            total_balance = float(total_balance)
+            total_trading_fund = float(total_trading_fund)
+            price = float(price)
+            
+            if total_balance < 10:  # 小额资金（小于10U）
+                position_fund = [0.95, 0.80, 0.60][min(open_positions, 2)] * total_trading_fund
+            elif total_balance < 100:  # 中等资金（10-100U）
+                position_fund = [0.85, 0.65, 0.45][min(open_positions, 2)] * total_trading_fund
+            else:  # 大额资金（100U以上）
+                position_fund = [0.80, 0.60, 0.40, 0.30][min(open_positions, 3)] * total_trading_fund
+            
+            # 计算仓位大小
+            smart_leverage = float(smart_leverage)
+            position_value_with_leverage = position_fund * smart_leverage
             position_size = position_value_with_leverage / price
             
+            # 获取最小交易量
+            min_amount = float(MIN_TRADE_AMOUNT.get(symbol, 0.001))
+            required_fund = min_amount * price / smart_leverage
+            
+            # 资金不足处理
+            if required_fund > position_fund:
+                if position_fund > 0.01:  # 小额资金灵活处理
+                    min_leverage = max(float(LEVERAGE_MIN), 1.0)
+                    required_fund_min = min_amount * price / min_leverage
+                    
+                    if required_fund_min <= position_fund:
+                        smart_leverage = min_leverage
+                        position_size = (position_fund * smart_leverage) / price
+                        log_message("INFO", f"{symbol} 使用最小杠杆 {min_leverage}x")
+                    else:
+                        position_size = max((position_fund * smart_leverage * 0.9) / price, min_amount * 0.1)
+                        log_message("WARNING", f"{symbol} 资金不足，使用可用资金90%")
+                else:
+                    log_message("WARNING", f"{symbol} 资金过少（{position_fund:.4f} U）")
+                    return 0
+            
+            # 检查最小交易量
             if position_size < min_amount:
-                log_message("WARNING", f"{symbol} 计算的仓位大小 {position_size:.6f} 低于最小数量 {min_amount}，已调整为最小数量")
-                position_size = min_amount
-            else:
-                log_message("INFO", f"{symbol} 仓位大小调整为最小杠杆 {min_leverage}x 下的 {position_size:.6f}")
-        
-        # 检查金额精度：根据账户资金大小动态调整最小金额要求
-        trade_value = position_size * price
-        
-        # 根据账户资金大小设置不同的最小金额要求
-        if total_balance < 10:  # 小额账户：降低最小金额要求
-            min_trade_value = 0.1  # 0.1 USDT
-        elif total_balance < 100:  # 中等账户：中等要求
-            min_trade_value = 0.5  # 0.5 USDT
-        else:  # 大额账户：标准要求
-            min_trade_value = 1.0  # 1.0 USDT
-        
-        if trade_value < min_trade_value:
-            log_message("WARNING", f"{symbol} 交易金额 {trade_value:.4f} USDT 低于最小金额精度 {min_trade_value} USDT，已调整")
-            # 调整到最小金额精度
-            position_size = min_trade_value / price
-            # 再次检查调整后的数量是否满足最小数量要求
-            if position_size < min_amount:
+                position_size = max(min_amount, (position_fund * max(float(LEVERAGE_MIN), 1.0)) / price)
+                log_message("WARNING", f"{symbol} 调整到最小交易量 {position_size:.6f}")
+            
+            # 检查交易金额精度
+            min_trade_value = 0.1 if total_balance < 10 else (0.5 if total_balance < 100 else 1.0)
+            if (position_size * price) < min_trade_value:
+                position_size = max(min_trade_value / price, min_amount)
+                log_message("WARNING", f"{symbol} 调整到最小金额精度 {min_trade_value} USDT")
+            
+            return float(position_size)
+            
+        except Exception as e:
+            log_message("ERROR", f"计算仓位大小错误: {str(e)}")
+            return 0
                 position_size = min_amount
                 # 如果调整后仍然不满足金额精度，则跳过交易
                 trade_value = position_size * price
