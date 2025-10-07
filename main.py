@@ -1284,11 +1284,13 @@ def backtest_strategy(symbol, days=7, initial_balance=10000):
         # VWAP(日内) + MACD(12,26,9) + RSI(14)
         df['macd'], df['macd_signal'], df['macd_histogram'] = calculate_macd(df['close'], fast=MACD_FAST, slow=MACD_SLOW, signal=MACD_SIGNAL)
         typical_price = (df['high'] + df['low'] + df['close']) / 3.0
-        vwap_value = typical_price * df['volume']
+        # 修复：明确生成列，避免使用 Series.name(None) 导致 KeyError
+        df['vwap_value'] = typical_price * df['volume']
         df['day'] = df['timestamp'].dt.date
-        df['cum_vwap'] = df.groupby('day')[vwap_value.name].cumsum()
+        df['cum_vwap'] = df.groupby('day')['vwap_value'].cumsum()
         df['cum_volume'] = df.groupby('day')['volume'].cumsum()
-        df['VWAP'] = df['cum_vwap'] / df['cum_volume']
+        safe_cum_volume = df['cum_volume'].replace(0, np.nan)
+        df['VWAP'] = (df['cum_vwap'] / safe_cum_volume).ffill()
         df['RSI'] = calculate_rsi(df['close'], period=14)
         
         # 回测变量
@@ -1440,11 +1442,11 @@ def generate_backtest_report(backtest_results):
         
         report_lines = ["=== 策略回测报告 ===", ""]
         
-        # 汇总统计
+        # 汇总统计（容错）
         total_symbols = len(backtest_results)
-        total_trades = sum([r['total_trades'] for r in backtest_results if r])
-        total_return = sum([r['total_return'] for r in backtest_results if r])
-        avg_win_rate = sum([r['win_rate'] for r in backtest_results if r]) / total_symbols if total_symbols > 0 else 0
+        total_trades = sum([r.get('total_trades', 0) for r in backtest_results if r])
+        total_return = sum([r.get('total_return', 0.0) for r in backtest_results if r])
+        avg_win_rate = (sum([r.get('win_rate', 0.0) for r in backtest_results if r]) / total_symbols) if total_symbols > 0 else 0.0
         
         report_lines.extend([
             f"回测标的数量: {total_symbols}",
