@@ -457,9 +457,6 @@ def get_account_info():
         return None
 
 
-        return adx
-    except Exception:
-        return pd.Series([np.nan] * len(close))
 
 def process_klines(ohlcv):
     """处理K线数据并计算技术指标（VWAP日内重置、MACD(12,26,9)、RSI(14)、VWAP±1SD、成交量均值）"""
@@ -656,7 +653,8 @@ def generate_signal(symbol):
         try:
             now_utc8 = datetime.now(timezone(timedelta(hours=8)))
             is_weekend = now_utc8.weekday() >= 5  # 5=周六,6=周日
-            if is_weekend or (vol_ma20 is not None and df['volume'].iloc[-1] < vol_ma20):
+            # 加密市场7x24交易，放宽过滤：仅当成交量显著低于均值的50%时跳过
+            if (vol_ma20 is not None and df['volume'].iloc[-1] < 0.5 * vol_ma20):
                 return None
         except Exception:
             pass
@@ -1786,8 +1784,9 @@ def trading_loop():
                     if execute_trade(symbol, signal, signal['signal_strength']):
                         position_tracker['daily_stats']['trades_count'] += 1
                         time.sleep(2)
-                        if symbol in position_tracker['positions']:
-                            setup_missing_stop_orders(position_tracker['positions'][symbol], symbol)
+                        position_key = f"{symbol}_{signal['side']}"
+                        if position_key in position_tracker['positions']:
+                            setup_missing_stop_orders(position_tracker['positions'][position_key], symbol)
                 
                 # 检查每个交易对
                 for symbol in SYMBOLS:
@@ -1800,11 +1799,20 @@ def trading_loop():
                         if len(position_tracker['positions']) >= MAX_OPEN_POSITIONS:
                             break
                         
-                        # 生成交易信号
-                        signal = generate_signal(symbol)
-                        if signal:
-                            log_signal_overview(symbol, signal)
-                            execute_trade(symbol, signal, signal['signal_strength'])
+                        # 生成交易信号（可能返回单个信号或信号列表）
+                        signals = generate_signal(symbol)
+                        if not signals:
+                            pass
+                        elif isinstance(signals, dict):
+                            log_signal_overview(symbol, signals)
+                            execute_trade(symbol, signals, signals.get('signal_strength'))
+                        else:
+                            for sig in signals:
+                                try:
+                                    log_signal_overview(symbol, sig)
+                                    execute_trade(symbol, sig, sig.get('signal_strength'))
+                                except Exception as ie:
+                                    log_message("WARNING", f"处理信号失败 {symbol}: {ie}")
                         
                         time.sleep(1)  # 短暂延迟避免API限制
                         
@@ -3458,26 +3466,27 @@ def backtest_strategy_5m(symbol, days=14):
                 # ATR追踪：盈利>1x ATR后，回撤>0.5x ATR退出
                 trailing_exit = False
                 if atr and atr > 0:
-                    if side == 'long' and (close - entry_price) >= atr:
+                    if side == 'long' and (float(close) - float(entry_price)) >= float(atr):
                         recent_high = float(df['high'].iloc[max(0, i-12):i+1].max())
-                        trailing_exit = (recent_high - close) >= (0.5 * atr)
+                        trailing_exit = (recent_high - float(close)) >= (0.5 * float(atr))
                     if side == 'short' and entry_price and close and (float(entry_price) - float(close)) >= float(atr):
                         recent_low = float(df['low'].iloc[max(0, i-12):i+1].min())
-                        trailing_exit = (close - recent_low) >= (0.5 * atr)
+                        trailing_exit = (float(close) - recent_low) >= (0.5 * float(atr))
 
                 if vwap_exit or rsi_exit_full or div_exit or trailing_exit:
                     # 退出
-                    exit_price = close
+                    exit_price = float(close)
                     pnl = (float(exit_price) - float(entry_price)) if side == 'long' and exit_price and entry_price else (float(entry_price) - float(exit_price)) if exit_price and entry_price else 0
 
                     # Funding费用模拟：0.01%/8h，按持仓时长线性扣减
                     try:
                         funding_rate = 0.0001  # 0.01%
                         # 计算持仓时长（小时）
-                        et = entry_time
+                        et = position.get('entry_time')
                         if not isinstance(et, (pd.Timestamp, datetime)):
-                            et = pd.to_datetime(et) if et is not None else current['timestamp']
-                        hold_hours = (current['timestamp'] - et).total_seconds() / 3600.0 if et else 0.0
+                            et = pd.to_datetime(et) if et is not None else pd.to_datetime(df['timestamp'].iloc[i])
+                        current_ts = pd.to_datetime(df['timestamp'].iloc[i])
+                        hold_hours = (current_ts - et).total_seconds() / 3600.0 if et is not None else 0.0
                         size = 1.0  # 简化按单位仓位扣减，可根据实际 size/equity 替换
                         pnl -= funding_rate * (hold_hours / 8.0) * size
                     except Exception:
