@@ -278,6 +278,16 @@ class MACDStrategy:
         # SL/TP 状态缓存
         self.sl_tp_state: Dict[str, Dict[str, float]] = {}
         self.okx_tp_sl_placed: Dict[str, bool] = {}
+        # TP/SL重挂冷却与阈值
+        self.tp_sl_last_placed: Dict[str, float] = {}
+        try:
+            self.tp_sl_refresh_interval = int((os.environ.get('TP_SL_REFRESH_INTERVAL') or '300').strip())
+        except Exception:
+            self.tp_sl_refresh_interval = 300
+        try:
+            self.tp_sl_min_delta_ticks = int((os.environ.get('TP_SL_MIN_DELTA_TICKS') or '2').strip())
+        except Exception:
+            self.tp_sl_min_delta_ticks = 2
         
         # ===== 每币种配置(用于追踪止损) =====
         self.symbol_cfg: Dict[str, Dict[str, float | str]] = {
@@ -320,6 +330,53 @@ class MACDStrategy:
         # 处理启动前已有的持仓和挂单
         self.handle_existing_positions_and_orders()
     
+    # ===== 限频节流与退避封装 =====
+    def _sleep_with_throttle(self):
+        """满足最小调用间隔，加入轻微抖动"""
+        try:
+            now = time.time()
+            delta = now - float(self._last_api_ts or 0.0)
+            min_int = float(self._min_api_interval or 0.2)
+            if delta < min_int:
+                jitter = float(np.random.uniform(0, min_int * 0.1))
+                time.sleep(min_int - delta + jitter)
+            self._last_api_ts = time.time()
+        except Exception:
+            # 回退：固定最小sleep
+            time.sleep(float(self._min_api_interval or 0.2))
+
+    def _safe_call(self, func, *args, **kwargs):
+        """
+        包装API调用：先节流；遇到50011(Too Many Requests)执行指数退避重试。
+        可通过环境变量调整：MAX_RETRIES, BACKOFF_BASE, BACKOFF_MAX
+        """
+        try:
+            retries = int((os.environ.get('MAX_RETRIES') or '3').strip() or 3)
+        except Exception:
+            retries = 3
+        try:
+            base = float((os.environ.get('BACKOFF_BASE') or '0.8').strip() or 0.8)
+        except Exception:
+            base = 0.8
+        try:
+            max_wait = float((os.environ.get('BACKOFF_MAX') or '3.0').strip() or 3.0)
+        except Exception:
+            max_wait = 3.0
+
+        for i in range(retries + 1):
+            try:
+                self._sleep_with_throttle()
+                return func(*args, **kwargs)
+            except Exception as e:
+                msg = str(e)
+                is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
+                if not is_rate or i >= retries:
+                    raise
+                wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
+                logger.warning(f"⏳ 限频(50011) 第{i+1}次重试，等待 {wait:.2f}s")
+                time.sleep(wait)
+        return None
+
     def _setup_exchange(self):
         """设置交易所配置"""
         try:
@@ -438,7 +495,7 @@ class MACDStrategy:
         """获取未成交订单"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
-            resp = self.exchange.privateGetTradeOrdersPending({'instType': 'SWAP', 'instId': inst_id})
+            resp = self._safe_call(self.exchange.privateGetTradeOrdersPending, {'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
             results = []
             for o in (data or []):
@@ -681,7 +738,7 @@ class MACDStrategy:
                 return self.positions_cache[symbol]
             
             inst_id = self.symbol_to_inst_id(symbol)
-            resp = self.exchange.privateGetAccountPositions({'instType': 'SWAP', 'instId': inst_id})
+            resp = self._safe_call(self.exchange.privateGetAccountPositions, {'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
             for p in (data or []):
                 if p.get('instId') == inst_id and float(p.get('pos', 0) or 0) != 0:
@@ -1247,6 +1304,7 @@ class MACDStrategy:
             if ok:
                 logger.info(f"📌 交易所侧TP/SL已挂 {symbol}: size={size:.6f} TP@{tp_trigger:.6f} SL@{sl_trigger:.6f}")
                 self.okx_tp_sl_placed[symbol] = True
+                self.tp_sl_last_placed[symbol] = time.time()
                 return True
             else:
                 logger.warning(f"⚠️ 交易所侧TP/SL挂单失败 {symbol}: {resp}")
@@ -1484,10 +1542,17 @@ class MACDStrategy:
                                 except Exception:
                                     pass
                                 try:
-                                    self.okx_tp_sl_placed[symbol] = False
-                                    self.cancel_symbol_tp_sl(symbol)
-                                    self.place_okx_tp_sl(symbol, entry_px, current_position.get('side', 'long'), atr_val)
-                                    logger.info(f"🔄 更新追踪止盈：已撤旧单并重挂 {symbol}")
+                                    # 仅在超过冷却时间时重挂TP/SL，避免频繁撤销/重挂
+                                    last_ts = self.tp_sl_last_placed.get(symbol, 0.0)
+                                    if (time.time() - last_ts) >= float(self.tp_sl_refresh_interval):
+                                        try:
+                                            self.cancel_symbol_tp_sl(symbol)
+                                        except Exception:
+                                            pass
+                                        self.place_okx_tp_sl(symbol, entry_px, current_position.get('side', 'long'), atr_val)
+                                        logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
+                                    else:
+                                        logger.debug(f"⏳ 距上次挂单未达冷却({self.tp_sl_refresh_interval}s)，跳过重挂 {symbol}")
                                 except Exception as _e:
                                     logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}: {_e}")
                                 if current_position.get('side') == 'long':
