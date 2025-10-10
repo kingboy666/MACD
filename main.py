@@ -261,6 +261,17 @@ class MACDStrategy:
             self._min_api_interval: float = float((os.environ.get('OKX_API_MIN_INTERVAL') or '0.2').strip())
         except Exception:
             self._min_api_interval = 0.2
+
+        # 每币种微延时，降低瞬时调用密度
+        try:
+            self.symbol_loop_delay = float((os.environ.get('SYMBOL_LOOP_DELAY') or '0.3').strip())
+        except Exception:
+            self.symbol_loop_delay = 0.3
+        # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
+        try:
+            self.set_leverage_on_start = (os.environ.get('SET_LEVERAGE_ON_START', 'true').strip().lower() in ('1', 'true', 'yes'))
+        except Exception:
+            self.set_leverage_on_start = True
         
         # 交易统计
         self.stats = TradingStats()
@@ -401,22 +412,23 @@ class MACDStrategy:
             except Exception as e:
                 logger.warning(f"⚠️ 预加载市场数据失败，将使用安全回退: {e}")
             
-            # 按交易对设置杠杆
-            for symbol in self.symbols:
-                try:
-                    lev = self.symbol_leverage.get(symbol, 20)
-                    inst_id = self.symbol_to_inst_id(symbol)
+            # 按交易对设置杠杆（可选）
+            if self.set_leverage_on_start:
+                for symbol in self.symbols:
                     try:
-                        self.exchange.privatePostAccountSetLeverage({'instId': inst_id, 'lever': str(lev), 'mgnMode': 'cross', 'posSide': 'long'})
-                    except Exception:
-                        pass
-                    try:
-                        self.exchange.privatePostAccountSetLeverage({'instId': inst_id, 'lever': str(lev), 'mgnMode': 'cross', 'posSide': 'short'})
-                    except Exception:
-                        pass
-                    logger.info(f"✅ 设置{symbol}杠杆为{lev}倍")
-                except Exception as e:
-                    logger.warning(f"⚠️ 设置{symbol}杠杆失败（可能已设置）: {e}")
+                        lev = self.symbol_leverage.get(symbol, 20)
+                        inst_id = self.symbol_to_inst_id(symbol)
+                        try:
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id, 'lever': str(lev), 'mgnMode': 'cross', 'posSide': 'long'})
+                        except Exception:
+                            pass
+                        try:
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id, 'lever': str(lev), 'mgnMode': 'cross', 'posSide': 'short'})
+                        except Exception:
+                            pass
+                        logger.info(f"✅ 设置{symbol}杠杆为{lev}倍")
+                    except Exception as e:
+                        logger.warning(f"⚠️ 设置{symbol}杠杆失败（可能已设置）: {e}")
             
             try:
                 self.exchange.set_position_mode(True)
@@ -1510,6 +1522,11 @@ class MACDStrategy:
                     status_line += f", 挂单={len(open_orders)}个"
                 
                 logger.info(status_line)
+                # 每币种之间加入微延时，降低瞬时并发
+                try:
+                    time.sleep(self.symbol_loop_delay)
+                except Exception:
+                    time.sleep(0.2)
             
             logger.info("-" * 70)
             logger.info("⚡ 执行交易操作...")
@@ -1684,7 +1701,14 @@ def main():
         )
         
         logger.info("✅ 策略初始化成功")
-        
+
+        # 环境变量生效情况打印
+        def _get(k, default=''):
+            v = os.environ.get(k, '')
+            return v if (v is not None and str(v).strip() != '') else default
+        logger.info(f"🔧 变量: SCAN_INTERVAL={_get('SCAN_INTERVAL','2')} OKX_API_MIN_INTERVAL={_get('OKX_API_MIN_INTERVAL','0.2')} SYMBOL_LOOP_DELAY={_get('SYMBOL_LOOP_DELAY','0.3')} SET_LEVERAGE_ON_START={_get('SET_LEVERAGE_ON_START','true')}")
+        logger.info(f"🔧 变量: MAX_RETRIES={_get('MAX_RETRIES','3')} BACKOFF_BASE={_get('BACKOFF_BASE','0.8')} BACKOFF_MAX={_get('BACKOFF_MAX','3.0')} TP_SL_REFRESH_INTERVAL={_get('TP_SL_REFRESH_INTERVAL','300')}")
+
         try:
             scan_interval_env = os.environ.get('SCAN_INTERVAL', '').strip()
             scan_interval = int(scan_interval_env) if scan_interval_env else 2
