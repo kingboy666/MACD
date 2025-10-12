@@ -1694,30 +1694,7 @@ class MACDStrategy:
             
             balance = self.get_account_balance()
             logger.info(f"💰 当前账户余额: {balance:.2f} USDT")
-            # 账户熔断检测
-            try:
-                if (not self.circuit_breaker_triggered) and self.starting_balance > 0:
-                    dd = max(0.0, (self.starting_balance - balance) / self.starting_balance)
-                    if dd >= float(self.account_dd_limit_pct or 0.0):
-                        self.circuit_breaker_triggered = True
-                        logger.error(f"🧯 账户熔断触发：回撤 {dd:.2%} ≥ 阈值 {self.account_dd_limit_pct:.2%}")
-                        if self.cb_close_all:
-                            logger.error("🧯 执行熔断清仓：撤销TP/SL并市价平掉全部持仓")
-                            for s in self.symbols:
-                                try:
-                                    self.cancel_symbol_tp_sl(s)
-                                except Exception:
-                                    pass
-                                try:
-                                    pos = self.get_position(s, force_refresh=True)
-                                    if pos.get('size', 0) > 0:
-                                        self.close_position(s, open_reverse=False)
-                                except Exception:
-                                    pass
-                        else:
-                            logger.error("🧯 熔断后停止新开仓（但不主动清仓）")
-            except Exception:
-                pass
+            # 熔断机制已移除
             
             logger.info(self.stats.get_summary())
             
@@ -1813,9 +1790,6 @@ class MACDStrategy:
                     pass
                 
                 if signal == 'buy':
-                    if self.circuit_breaker_triggered:
-                        logger.warning(f"🧯 熔断中，禁止新开仓：{symbol} buy 已跳过")
-                        continue
                     if current_position['size'] > 0 and current_position['side'] == 'long':
                         logger.info(f"ℹ️ {symbol}已有多头持仓，跳过重复开仓")
                         continue
@@ -1827,9 +1801,6 @@ class MACDStrategy:
                             self.last_position_state[symbol] = 'long'
                 
                 elif signal == 'sell':
-                    if self.circuit_breaker_triggered:
-                        logger.warning(f"🧯 熔断中，禁止新开仓：{symbol} sell 已跳过")
-                        continue
                     if current_position['size'] > 0 and current_position['side'] == 'short':
                         logger.info(f"ℹ️ {symbol}已有空头持仓，跳过重复开仓")
                         continue
