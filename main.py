@@ -542,30 +542,57 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（OCO）条件单"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。按 ordType 分组逐类撤销，避免51000。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
-            algo_ids = []
+            # 收集该 inst 的所有相关 algo 单，记录 algoId 与其 ordType
+            groups: Dict[str, List[str]] = {}
             for it in (data or []):
                 try:
-                    if (it.get('ordType') or '').lower() == 'oco':
+                    otype = str(it.get('ordType') or '').lower()
+                    # 兼容不同写法：oco/tp_sl/conditional
+                    if otype in ('oco', 'tp_sl', 'conditional', 'trigger'):
                         aid = it.get('algoId') or it.get('algoID') or it.get('id')
                         if aid:
-                            algo_ids.append({'algoId': str(aid), 'instId': inst_id})
+                            groups.setdefault(otype, []).append(str(aid))
                 except Exception:
                     continue
-            if not algo_ids:
+            if not groups:
                 return True
-            try:
-                self.exchange.privatePostTradeCancelAlgos({'algoIds': algo_ids})
-            except Exception:
-                self.exchange.privatePostTradeCancelAlgos({'algoIds': [x['algoId'] for x in algo_ids], 'instId': inst_id})
-            logger.info(f"✅ 撤销 {symbol} 已挂 OCO 条件单数量: {len(algo_ids)}")
-            return True
+            total = 0
+            for otype, ids in groups.items():
+                # OKX 推荐格式：algoIds 为对象数组，或简单字符串数组也可
+                payload_listobj = {'algoIds': [{'algoId': x} for x in ids], 'ordType': otype}
+                payload_list = {'algoIds': ids, 'ordType': otype}
+                ok_this = False
+                try:
+                    self.exchange.privatePostTradeCancelAlgos(payload_listobj)
+                    ok_this = True
+                except Exception:
+                    try:
+                        self.exchange.privatePostTradeCancelAlgos(payload_list)
+                        ok_this = True
+                    except Exception:
+                        # 兜底：逐条取消
+                        for aid in ids:
+                            try:
+                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'ordType': otype})
+                                ok_this = True
+                            except Exception:
+                                continue
+                if ok_this:
+                    total += len(ids)
+                else:
+                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={otype}")
+            if total > 0:
+                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
+                return True
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
+            return False
         except Exception as e:
             logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
             return False
@@ -1238,7 +1265,7 @@ class MACDStrategy:
             pass
     
     def place_okx_tp_sl(self, symbol: str, entry_price: float, side: str, atr_val: float) -> bool:
-        """在OKX侧同时挂TP/SL条件单"""
+        """在OKX侧同时挂TP/SL条件单。优先 oco，失败(51000)回退 tp_sl；严格以 sCode 判定成功。"""
         try:
             if self.okx_tp_sl_placed.get(symbol):
                 return True
@@ -1293,34 +1320,66 @@ class MACDStrategy:
             except Exception:
                 pass
 
-            params = {
-                'instId': inst_id,
-                'tdMode': 'cross',
-                'posSide': pos_side,
-                'side': ord_side,
-                'ordType': 'oco',
-                'reduceOnly': True,
-                'sz': f"{size}",
-                'tpTriggerPx': f"{tp_trigger}",
-                'tpOrdPx': '-1',
-                'slTriggerPx': f"{sl_trigger}",
-                'slOrdPx': '-1',
-            }
-            resp = self.exchange.privatePostTradeOrderAlgo(params)
-            ok = False
-            if isinstance(resp, dict):
-                code = str(resp.get('code', ''))
-                ok = (code == '0' or code == '200' or (resp.get('data') and not code or code == '0'))
-            else:
-                ok = bool(resp)
-            if ok:
-                logger.info(f"📌 交易所侧TP/SL已挂 {symbol}: size={size:.6f} TP@{tp_trigger:.6f} SL@{sl_trigger:.6f}")
+            def _post_algo(ord_type: str):
+                payload = {
+                    'instId': inst_id,
+                    'tdMode': 'cross',
+                    'posSide': pos_side,
+                    'side': ord_side,
+                    'ordType': ord_type,
+                    'reduceOnly': True,
+                    'sz': f"{size}",
+                    'tpTriggerPx': f"{tp_trigger}",
+                    'tpOrdPx': '-1',
+                    'slTriggerPx': f"{sl_trigger}",
+                    'slOrdPx': '-1',
+                }
+                return self.exchange.privatePostTradeOrderAlgo(payload)
+
+            def _is_success(resp_obj: Any) -> bool:
+                try:
+                    if not isinstance(resp_obj, dict):
+                        return False
+                    if str(resp_obj.get('code', '')) not in ('0', '200', '0.0'):
+                        return False
+                    data = resp_obj.get('data') or []
+                    if isinstance(data, list) and data:
+                        # 任一条 sCode == '0' 视为成功
+                        return any(str(x.get('sCode', '')) == '0' for x in data if isinstance(x, dict))
+                    # 没有 data 时，也不视为成功，避免误判
+                    return False
+                except Exception:
+                    return False
+
+            # 先试 oco
+            resp = _post_algo('oco')
+            if _is_success(resp):
+                logger.info(f"📌 交易所侧TP/SL已挂 {symbol}: size={size:.6f} TP@{tp_trigger:.6f} SL@{sl_trigger:.6f} (ordType=oco)")
                 self.okx_tp_sl_placed[symbol] = True
                 self.tp_sl_last_placed[symbol] = time.time()
                 return True
-            else:
-                logger.warning(f"⚠️ 交易所侧TP/SL挂单失败 {symbol}: {resp}")
-                return False
+
+            # 如出现 51000 等参数问题，回退尝试 tp_sl
+            try:
+                msg = str(resp)
+            except Exception:
+                msg = ''
+            if '51000' in msg or 'ordType' in msg.lower():
+                try:
+                    resp2 = _post_algo('tp_sl')
+                    if _is_success(resp2):
+                        logger.info(f"📌 交易所侧TP/SL已挂 {symbol}: size={size:.6f} TP@{tp_trigger:.6f} SL@{sl_trigger:.6f} (ordType=tp_sl)")
+                        self.okx_tp_sl_placed[symbol] = True
+                        self.tp_sl_last_placed[symbol] = time.time()
+                        return True
+                    logger.warning(f"⚠️ 交易所侧TP/SL挂单失败 {symbol} 回退tp_sl: {resp2}")
+                    return False
+                except Exception as _e2:
+                    logger.warning(f"⚠️ 交易所侧TP/SL挂单异常(回退tp_sl) {symbol}: {_e2}")
+                    return False
+
+            logger.warning(f"⚠️ 交易所侧TP/SL挂单失败 {symbol}: {resp}")
+            return False
         except Exception as e:
             logger.warning(f"⚠️ 交易所侧TP/SL挂单异常 {symbol}: {e}")
             return False
@@ -1566,8 +1625,11 @@ class MACDStrategy:
                                             self.cancel_symbol_tp_sl(symbol)
                                         except Exception:
                                             pass
-                                        self.place_okx_tp_sl(symbol, entry_px, current_position.get('side', 'long'), atr_val)
-                                        logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
+                                        okx_ok = self.place_okx_tp_sl(symbol, entry_px, current_position.get('side', 'long'), atr_val)
+                                        if okx_ok:
+                                            logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
+                                        else:
+                                            logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}")
                                     else:
                                         logger.debug(f"⏳ 距上次挂单未达冷却({self.tp_sl_refresh_interval}s)，跳过重挂 {symbol}")
                                 except Exception as _e:
