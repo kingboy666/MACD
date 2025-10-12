@@ -574,52 +574,53 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。按 ordType 分组逐类撤销，避免51000。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
-            # 收集该 inst 的所有相关 algo 单，记录 algoId 与其 ordType
-            groups: Dict[str, List[str]] = {}
+            groups: Dict[str, List[Dict[str, str]]] = {}
             for it in (data or []):
                 try:
-                    otype = str(it.get('ordType') or '').lower()
-                    # 兼容不同写法：oco/tp_sl/conditional
-                    if otype in ('oco', 'tp_sl', 'conditional', 'trigger'):
-                        aid = it.get('algoId') or it.get('algoID') or it.get('id')
-                        if aid:
-                            groups.setdefault(otype, []).append(str(aid))
+                    ord_type = str(it.get('ordType') or '')
+                    if not ord_type:
+                        continue
+                    clid = str(it.get('clOrdId') or '')
+                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
+                        continue
+                    aid = it.get('algoId') or it.get('algoID') or it.get('id')
+                    if aid:
+                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
                 except Exception:
                     continue
             if not groups:
                 return True
             total = 0
-            for otype, ids in groups.items():
-                # OKX 推荐格式：algoIds 为对象数组，或简单字符串数组也可
-                payload_listobj = {'algoIds': [{'algoId': x} for x in ids], 'ordType': otype}
-                payload_list = {'algoIds': ids, 'ordType': otype}
+            for ord_type, items in groups.items():
+                ids = [x['algoId'] for x in items]
+                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'ordType': ord_type, 'instId': inst_id}
+                payload_arr = {'algoIds': ids, 'ordType': ord_type, 'instId': inst_id}
                 ok_this = False
                 try:
-                    self.exchange.privatePostTradeCancelAlgos(payload_listobj)
+                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
                     ok_this = True
                 except Exception:
                     try:
-                        self.exchange.privatePostTradeCancelAlgos(payload_list)
+                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
                         ok_this = True
                     except Exception:
-                        # 兜底：逐条取消
                         for aid in ids:
                             try:
-                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'ordType': otype})
+                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'ordType': ord_type, 'instId': inst_id})
                                 ok_this = True
                             except Exception:
                                 continue
                 if ok_this:
                     total += len(ids)
                 else:
-                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={otype}")
+                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
             if total > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
                 return True
@@ -1465,6 +1466,7 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
+                    'clOrdId': f"{self.tpsl_cl_prefix}{inst_id}_{int(time.time()*1000)}",
                 }
                 return self.exchange.privatePostTradeOrderAlgo(payload)
 
