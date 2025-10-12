@@ -928,7 +928,7 @@ class MACDStrategy:
             return False
     
     def calculate_order_amount(self, symbol: str, active_count: Optional[int] = None) -> float:
-        """计算下单金额 - 方案A: 平均分配"""
+        """计算下单金额 - 支持 equal(平均) 与 signal(仅按有信号的数量平均)"""
         try:
             # 1) 固定目标名义金额（最高优先）
             target_str = os.environ.get('TARGET_NOTIONAL_USDT', '').strip()
@@ -940,15 +940,21 @@ class MACDStrategy:
                 except Exception:
                     logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
 
-            # 2) 基于余额分配 - 方案A: 平均分配到11个币种
+            # 2) 基于余额分配
             balance = self.get_account_balance()
             if balance <= 0:
                 logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
                 return 0.0
 
-            # 平均分配：总余额 / 11个币种
-            num_symbols = len(self.symbols)  # 11个币种
-            allocated_amount = balance / max(1, num_symbols)
+            allocation_mode = (os.environ.get('ALLOCATION_MODE', 'equal').strip().lower() or 'equal')  # equal|signal
+            if allocation_mode == 'signal' and active_count and active_count > 0:
+                denom = active_count
+                mode_desc = f"按信号({active_count})"
+            else:
+                denom = len(self.symbols)
+                mode_desc = f"平均({denom})"
+
+            allocated_amount = balance / max(1, denom)
 
             # 3) 放大因子
             factor_str = os.environ.get('ORDER_NOTIONAL_FACTOR', '50').strip()
@@ -974,7 +980,7 @@ class MACDStrategy:
             if max_cap > 0 and allocated_amount > max_cap:
                 allocated_amount = max_cap
 
-            logger.info(f"💵 资金分配: 模式=平均分配, 总余额={balance:.4f}U, 币种数={num_symbols}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
+            logger.info(f"💵 资金分配: 模式={allocation_mode}({mode_desc}), 总余额={balance:.4f}U, 分母={denom}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
             if allocated_amount <= 0:
                 logger.warning(f"⚠️ {symbol}最终分配金额为0，跳过")
                 return 0.0
@@ -1071,6 +1077,44 @@ class MACDStrategy:
             except Exception:
                 pass
 
+            # 预检最大可开数量并裁剪，避免 51008（保证金不足）
+            try:
+                inst_id = self.symbol_to_inst_id(symbol)
+                raw = self.exchange.privateGetAccountMaxAvailSize({
+                    'instId': inst_id,
+                    'tdMode': 'cross',
+                    'ccy': 'USDT',
+                    'posSide': ('long' if side == 'buy' else 'short')
+                })
+                max_avail_size = 0.0
+                if isinstance(raw, dict):
+                    data_arr = raw.get('data') or []
+                    if isinstance(data_arr, list) and data_arr:
+                        max_avail_size = float(data_arr[0].get('maxAvailSize') or 0.0)
+                # 按 lotSz 向下取整裁剪
+                if max_avail_size > 0:
+                    step_sz = None
+                    try:
+                        if lot_sz:
+                            step_sz = float(lot_sz)
+                    except Exception:
+                        step_sz = None
+                    if step_sz and step_sz > 0:
+                        clipped = math.floor(max_avail_size / step_sz) * step_sz
+                    else:
+                        # 回退：按 amount_precision
+                        step_sz = 10 ** (-amount_precision)
+                        clipped = math.floor(max_avail_size / step_sz) * step_sz
+                    if clipped < contract_size:
+                        logger.info(f"✂️ 按可开额度裁剪数量: 原={contract_size:.8f} -> 新={clipped:.8f} (maxAvailSize={max_avail_size:.8f})")
+                        contract_size = round(clipped, amount_precision)
+                # 裁剪后仍低于最小下单量则放弃
+                if contract_size < min_amount or contract_size <= 0:
+                    logger.error(f"❌ 可用保证金不足：maxAvailSize={max_avail_size:.8f}，小于最小下单量 minSz={min_amount}. 跳过 {symbol} 下单")
+                    return False
+            except Exception as _e_max:
+                logger.warning(f"⚠️ 预检 max-avail-size 失败，继续按计算数量尝试下单: {_e_max}")
+
             pos_side = 'long' if side == 'buy' else 'short'
             order_id = None
             last_err = None
@@ -1143,6 +1187,15 @@ class MACDStrategy:
                     last_err = e3
                     logger.error(f"❌ OKX原生下单异常: {e3}")
                     logger.debug(traceback.format_exc())
+
+            # 若仍失败且为 51008，提示降低名义金额
+            if not order_id and last_err:
+                try:
+                    msg = str(last_err)
+                except Exception:
+                    msg = ""
+                if "51008" in msg:
+                    logger.error("🛑 下单被拒(51008 保证金不足)。建议：降低 TARGET_NOTIONAL_USDT 或设置 MAX_PER_SYMBOL_USDT≤0.9，或先划转更多USDT。")
 
             if order_id:
                 time.sleep(2)
@@ -1841,6 +1894,9 @@ class MACDStrategy:
             logger.info("⚡ 执行交易操作...")
             logger.info("")
             
+            # 本轮活跃信号数量（buy/sell），用于按信号分配资金
+            active_count = sum(1 for s in signals.values() if s and s.get('signal') in ('buy', 'sell'))
+            
             for symbol, signal_info in signals.items():
                 signal = signal_info['signal']
                 reason = signal_info['reason']
@@ -1911,7 +1967,7 @@ class MACDStrategy:
                         logger.info(f"ℹ️ {symbol}已有多头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol)
+                    amount = self.calculate_order_amount(symbol, active_count=active_count)
                     if amount > 0:
                         if self.create_order(symbol, 'buy', amount):
                             logger.info(f"🚀 开多{symbol}成功 - {reason}")
@@ -1922,7 +1978,7 @@ class MACDStrategy:
                         logger.info(f"ℹ️ {symbol}已有空头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol)
+                    amount = self.calculate_order_amount(symbol, active_count=active_count)
                     if amount > 0:
                         if self.create_order(symbol, 'sell', amount):
                             logger.info(f"📉 开空{symbol}成功 - {reason}")
