@@ -163,6 +163,23 @@ class MACDStrategy:
         
         # 时间周期 - 15分钟
         self.timeframe = '15m'
+        # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
+        self.timeframe_map = {
+            # 15m：波动惯性强的主流币
+            'BTC/USDT:USDT': '15m',
+            'ETH/USDT:USDT': '15m',
+            'FIL/USDT:USDT': '15m',
+            'WLD/USDT:USDT': '15m',
+            # 5m：高频波动，短周期更有效
+            'SOL/USDT:USDT': '5m',
+            'WIF/USDT:USDT': '5m',
+            'ZRO/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '5m',
+            'PEPE/USDT:USDT': '5m',
+            # 10m：中等波动
+            'DOGE/USDT:USDT': '10m',
+            'XRP/USDT:USDT': '10m',
+        }
         
         # MACD参数
         self.fast_period = 10
@@ -310,13 +327,13 @@ class MACDStrategy:
         
         # ATR 止盈止损参数
         try:
-            self.atr_sl_n = float((os.environ.get('ATR_SL_N') or '2.0').strip())
+            self.atr_sl_n = float((os.environ.get('ATR_SL_N') or '1.8').strip())
         except Exception:
-            self.atr_sl_n = 2.0
+            self.atr_sl_n = 1.8
         try:
-            self.atr_tp_m = float((os.environ.get('ATR_TP_M') or '3.0').strip())
+            self.atr_tp_m = float((os.environ.get('ATR_TP_M') or '2.2').strip())
         except Exception:
-            self.atr_tp_m = 3.0
+            self.atr_tp_m = 2.2
         
         # SL/TP 状态缓存
         self.sl_tp_state: Dict[str, Dict[str, float]] = {}
@@ -786,7 +803,8 @@ class MACDStrategy:
         """获取K线数据"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
-            params = {'instId': inst_id, 'bar': self.timeframe, 'limit': str(limit)}
+            tf = self.timeframe_map.get(symbol, None) or (self.timeframe if self.timeframe else '5m')
+            params = {'instId': inst_id, 'bar': tf, 'limit': str(limit)}
             resp = self.exchange.publicGetMarketCandles(params)
             rows = resp.get('data') if isinstance(resp, dict) else resp
             result: List[Dict] = []
@@ -1306,7 +1324,8 @@ class MACDStrategy:
             if side == 'long':
                 peak = max(self.trailing_peak.get(symbol, entry), basis_price)
                 self.trailing_peak[symbol] = peak
-                activated = (basis_price >= entry * (1 + trigger_pct))
+                # 当价格偏离入场 ≥1.2×ATR 时也启动锁盈
+                activated = (basis_price >= entry * (1 + trigger_pct)) or ((basis_price - entry) >= (1.2 * atr_val))
                 atr_sl = basis_price - n * atr_val
                 percent_sl = peak * (1 - trail_pct) if activated else st['sl']
                 new_sl = max(st['sl'], atr_sl, percent_sl)
@@ -1316,7 +1335,8 @@ class MACDStrategy:
                 trough_prev = self.trailing_trough.get(symbol, entry)
                 trough = min(trough_prev, basis_price) if trough_prev else basis_price
                 self.trailing_trough[symbol] = trough
-                activated = (basis_price <= entry * (1 - trigger_pct))
+                # 当价格偏离入场 ≥1.2×ATR 时也启动锁盈（空头）
+                activated = (basis_price <= entry * (1 - trigger_pct)) or ((entry - basis_price) >= (1.2 * atr_val))
                 atr_sl = basis_price + n * atr_val
                 percent_sl = trough * (1 + trail_pct) if activated else st['sl']
                 new_sl = min(st['sl'], atr_sl, percent_sl)
@@ -1606,7 +1626,7 @@ class MACDStrategy:
             try:
                 adx_min_trend = float((os.environ.get('ADX_MIN_TREND') or '25').strip())
             except Exception:
-                adx_min_trend = 25.0
+                adx_min_trend = 18.0
 
             close_price = float(closes[-1])
             atr_val = self.calculate_atr(klines, atr_period)
