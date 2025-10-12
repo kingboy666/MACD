@@ -293,8 +293,20 @@ class MACDStrategy:
             self.cb_close_all = (os.environ.get('CB_CLOSE_ALL', 'true').strip().lower() in ('1', 'true', 'yes'))
         except Exception:
             self.cb_close_all = True
+        # 强制彻底关闭账户熔断
+        self.cb_enabled = False
         self.circuit_breaker_triggered = False
         self.partial_tp_done: Dict[str, set] = {}
+        # 撤单/标记 安全控制
+        try:
+            self.allow_cancel_pending = (os.environ.get('ALLOW_CANCEL_PENDING', 'true').strip().lower() in ('1','true','yes'))
+        except Exception:
+            self.allow_cancel_pending = True
+        try:
+            self.safe_cancel_only_our_tpsl = (os.environ.get('SAFE_CANCEL_ONLY_OUR_TPSL', 'true').strip().lower() in ('1','true','yes'))
+        except Exception:
+            self.safe_cancel_only_our_tpsl = True
+        self.tpsl_cl_prefix = os.environ.get('TPSL_CL_PREFIX', 'MACD_TPSL_').strip() or 'MACD_TPSL_'
         
         # ATR 止盈止损参数
         try:
