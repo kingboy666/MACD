@@ -161,24 +161,27 @@ class MACDStrategy:
             'ARB/USDT:USDT'     # Arbitrum
         ]
         
-        # 时间周期 - 统一使用 5分钟
+        # 时间周期 - 15分钟
         self.timeframe = '5m'
-        # 全部交易对统一使用 5m
+        # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
         self.timeframe_map = {
-            'FIL/USDT:USDT': '5m',
-            'ZRO/USDT:USDT': '5m',
-            'WIF/USDT:USDT': '5m',
-            'WLD/USDT:USDT': '5m',
+            # 15m：波动惯性强的主流币
             'BTC/USDT:USDT': '5m',
             'ETH/USDT:USDT': '5m',
+            'FIL/USDT:USDT': '5m',
+            'WLD/USDT:USDT': '5m',
+            # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '5m',
+            'WIF/USDT:USDT': '5m',
+            'ZRO/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '5m',
+            'PEPE/USDT:USDT': '5m',
+            # 10m：中等波动
             'DOGE/USDT:USDT': '5m',
             'XRP/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
-            'ARB/USDT:USDT': '5m',
         }
         
-        # MACD参数（统一：10,40,15）
+        # MACD参数
         self.fast_period = 10
         self.slow_period = 40
         self.signal_period = 15
@@ -397,7 +400,7 @@ class MACDStrategy:
         except Exception:
             self.long_body_pct = 0.6
         try:
-            self.cooldown_candles = int((os.environ.get('COOLDOWN_CANDLES') or '1').strip())
+            self.cooldown_candles = int((os.environ.get('COOLDOWN_CANDLES') or '3').strip())
         except Exception:
             self.cooldown_candles = 3
         # 三阶段追踪与最小阈值
@@ -719,7 +722,11 @@ class MACDStrategy:
                     self.last_position_state[symbol] = position['side']
                     try:
                         kl = self.get_klines(symbol, 50)
-                        atr_p = int((os.environ.get('ATR_PERIOD') or '10').strip())
+                        ps = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+                        if isinstance(ps, dict) and ps.get('atr_period'):
+                            atr_p = int(ps.get('atr_period'))
+                        else:
+                            atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
                         atr_val = self.calculate_atr(kl, atr_p) if kl else 0.0
                         entry = float(position.get('entry_price', 0) or 0)
                         if atr_val > 0 and entry > 0:
@@ -925,7 +932,7 @@ class MACDStrategy:
             return False
     
     def calculate_order_amount(self, symbol: str, active_count: Optional[int] = None) -> float:
-        """计算下单金额 - 支持 equal(平均) 与 signal(仅按有信号的数量平均)"""
+        """计算下单金额 - 方案A: 平均分配"""
         try:
             # 1) 固定目标名义金额（最高优先）
             target_str = os.environ.get('TARGET_NOTIONAL_USDT', '').strip()
@@ -937,21 +944,15 @@ class MACDStrategy:
                 except Exception:
                     logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
 
-            # 2) 基于余额分配
+            # 2) 基于余额分配 - 方案A: 平均分配到11个币种
             balance = self.get_account_balance()
             if balance <= 0:
                 logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
                 return 0.0
 
-            allocation_mode = (os.environ.get('ALLOCATION_MODE', 'equal').strip().lower() or 'equal')  # equal|signal
-            if allocation_mode == 'signal' and active_count and active_count > 0:
-                denom = active_count
-                mode_desc = f"按信号({active_count})"
-            else:
-                denom = len(self.symbols)
-                mode_desc = f"平均({denom})"
-
-            allocated_amount = balance / max(1, denom)
+            # 平均分配：总余额 / 11个币种
+            num_symbols = len(self.symbols)  # 11个币种
+            allocated_amount = balance / max(1, num_symbols)
 
             # 3) 放大因子
             factor_str = os.environ.get('ORDER_NOTIONAL_FACTOR', '50').strip()
@@ -977,7 +978,7 @@ class MACDStrategy:
             if max_cap > 0 and allocated_amount > max_cap:
                 allocated_amount = max_cap
 
-            logger.info(f"💵 资金分配: 模式={allocation_mode}({mode_desc}), 总余额={balance:.4f}U, 分母={denom}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
+            logger.info(f"💵 资金分配: 模式=平均分配, 总余额={balance:.4f}U, 币种数={num_symbols}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
             if allocated_amount <= 0:
                 logger.warning(f"⚠️ {symbol}最终分配金额为0，跳过")
                 return 0.0
@@ -1074,44 +1075,6 @@ class MACDStrategy:
             except Exception:
                 pass
 
-            # 预检最大可开数量并裁剪，避免 51008（保证金不足）
-            try:
-                inst_id = self.symbol_to_inst_id(symbol)
-                raw = self.exchange.privateGetAccountMaxAvailSize({
-                    'instId': inst_id,
-                    'tdMode': 'cross',
-                    'ccy': 'USDT',
-                    'posSide': ('long' if side == 'buy' else 'short')
-                })
-                max_avail_size = 0.0
-                if isinstance(raw, dict):
-                    data_arr = raw.get('data') or []
-                    if isinstance(data_arr, list) and data_arr:
-                        max_avail_size = float(data_arr[0].get('maxAvailSize') or 0.0)
-                # 按 lotSz 向下取整裁剪
-                if max_avail_size > 0:
-                    step_sz = None
-                    try:
-                        if lot_sz:
-                            step_sz = float(lot_sz)
-                    except Exception:
-                        step_sz = None
-                    if step_sz and step_sz > 0:
-                        clipped = math.floor(max_avail_size / step_sz) * step_sz
-                    else:
-                        # 回退：按 amount_precision
-                        step_sz = 10 ** (-amount_precision)
-                        clipped = math.floor(max_avail_size / step_sz) * step_sz
-                    if clipped < contract_size:
-                        logger.info(f"✂️ 按可开额度裁剪数量: 原={contract_size:.8f} -> 新={clipped:.8f} (maxAvailSize={max_avail_size:.8f})")
-                        contract_size = round(clipped, amount_precision)
-                # 裁剪后仍低于最小下单量则放弃
-                if contract_size < min_amount or contract_size <= 0:
-                    logger.error(f"❌ 可用保证金不足：maxAvailSize={max_avail_size:.8f}，小于最小下单量 minSz={min_amount}. 跳过 {symbol} 下单")
-                    return False
-            except Exception as _e_max:
-                logger.warning(f"⚠️ 预检 max-avail-size 失败，继续按计算数量尝试下单: {_e_max}")
-
             pos_side = 'long' if side == 'buy' else 'short'
             order_id = None
             last_err = None
@@ -1185,27 +1148,18 @@ class MACDStrategy:
                     logger.error(f"❌ OKX原生下单异常: {e3}")
                     logger.debug(traceback.format_exc())
 
-            # 若仍失败且为 51008，提示降低名义金额
-            if not order_id and last_err:
-                try:
-                    msg = str(last_err)
-                except Exception:
-                    msg = ""
-                if "51008" in msg:
-                    logger.error("🛑 下单被拒(51008 保证金不足)。建议：降低 TARGET_NOTIONAL_USDT 或设置 MAX_PER_SYMBOL_USDT≤0.9，或先划转更多USDT。")
-
             if order_id:
                 time.sleep(2)
                 pos = self.get_position(symbol, force_refresh=True)
                 try:
                     kl = self.get_klines(symbol, 50)
-                    atr_p = int((os.environ.get('ATR_PERIOD') or '10').strip())
+                    atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
                     atr_val = self.calculate_atr(kl, atr_p) if kl else 0.0
                     if pos and pos.get('size', 0) > 0 and atr_val > 0:
                         self._set_initial_sl_tp(symbol, float(pos.get('entry_price', 0) or 0), atr_val, pos.get('side', 'long'))
                         st = self.sl_tp_state.get(symbol)
                         if st:
-                            logger.info(f"🎯 初始化SL/TP {symbol}: SL={st['sl']:.6f}, TP={st['tp']:.6f} (N={self.atr_sl_n}, M={self.atr_tp_m}, ATR={atr_val:.6f})")
+                            logger.info(f"🎯 初始化SL/TP {symbol}: SL={st['sl']:.6f}, TP={st['tp']:.6f} (N={self.get_symbol_cfg(symbol).get('n')}, M={self.get_symbol_cfg(symbol).get('m')}, ATR={atr_val:.6f})")
                             okx_ok = self.place_okx_tp_sl(symbol, float(pos.get('entry_price', 0) or 0), pos.get('side', 'long'), atr_val)
                             if okx_ok:
                                 logger.info(f"📌 已在交易所侧挂TP/SL {symbol}")
@@ -1386,14 +1340,29 @@ class MACDStrategy:
         }
     
     def get_symbol_cfg(self, symbol: str) -> Dict[str, float | str]:
-        """返回币种配置"""
+        """返回币种配置，允许 per_symbol_params 覆盖 n/m（sl_n/tp_m）"""
         try:
-            cfg = self.symbol_cfg.get(symbol)
-            if cfg:
-                return cfg
+            base = dict(self.symbol_cfg.get(symbol, {}))
+        except Exception:
+            base = {}
+        if not base:
+            base = {"period": 20, "n": 2.0, "m": 3.0, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"}
+        try:
+            p = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+            if isinstance(p, dict):
+                if 'sl_n' in p:
+                    try:
+                        base['n'] = float(p['sl_n'])
+                    except Exception:
+                        pass
+                if 'tp_m' in p:
+                    try:
+                        base['m'] = float(p['tp_m'])
+                    except Exception:
+                        pass
         except Exception:
             pass
-        return {"period": 20, "n": 2.0, "m": 3.0, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"}
+        return base
 
     def _set_initial_sl_tp(self, symbol: str, entry_price: float, atr_val: float, side: str):
         """设置初始 SL/TP"""
@@ -1582,7 +1551,8 @@ class MACDStrategy:
             except Exception:
                 pass
 
-            n = float(self.atr_sl_n); m = float(self.atr_tp_m)
+            cfg = self.get_symbol_cfg(symbol)
+            n = float(cfg.get('n', self.atr_sl_n)); m = float(cfg.get('m', self.atr_tp_m))
             if side == 'long':
                 sl_trigger = entry_price - n * atr_val
                 tp_trigger = entry_price + m * atr_val
@@ -1757,7 +1727,14 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
 
             try:
-                atr_period = int((os.environ.get('ATR_PERIOD') or '10').strip())
+                ps = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+            except Exception:
+                ps = {}
+            try:
+                if isinstance(ps, dict) and ps.get('atr_period'):
+                    atr_period = int(ps.get('atr_period'))
+                else:
+                    atr_period = int((os.environ.get('ATR_PERIOD') or '14').strip())
             except Exception:
                 atr_period = 14
             try:
@@ -1765,7 +1742,10 @@ class MACDStrategy:
             except Exception:
                 atr_ratio_thresh = 0.004
             try:
-                adx_period = int((os.environ.get('ADX_PERIOD') or '14').strip())
+                if isinstance(ps, dict) and ps.get('adx_period'):
+                    adx_period = int(ps.get('adx_period'))
+                else:
+                    adx_period = int((os.environ.get('ADX_PERIOD') or '14').strip())
             except Exception:
                 adx_period = 14
             try:
@@ -1785,10 +1765,8 @@ class MACDStrategy:
             if adx_val > 0 and adx_val < adx_min_trend:
                 logger.debug(f"ADX滤波提示：趋势不足（ADX={adx_val:.1f} < {adx_min_trend}），不拦截信号")
 
-            # 统一使用全局 MACD 参数（忽略 per_symbol_params 的个别覆盖）
-            f, s, si = int(self.fast_period), int(self.slow_period), int(self.signal_period)
-            macd_current = self.calculate_macd_with_params(closes, f, s, si)
-            macd_prev = self.calculate_macd_with_params(closes[:-1], f, s, si)
+            macd_current = self.calculate_macd(closes)
+            macd_prev = self.calculate_macd(closes[:-1])
             
             position = self.get_position(symbol, force_refresh=True)
             try:
@@ -1886,9 +1864,6 @@ class MACDStrategy:
             logger.info("⚡ 执行交易操作...")
             logger.info("")
             
-            # 本轮活跃信号数量（buy/sell），用于按信号分配资金
-            active_count = sum(1 for s in signals.values() if s and s.get('signal') in ('buy', 'sell'))
-            
             for symbol, signal_info in signals.items():
                 signal = signal_info['signal']
                 reason = signal_info['reason']
@@ -1899,7 +1874,11 @@ class MACDStrategy:
                     kl = self.get_klines(symbol, 50)
                     if kl:
                         close_price = float(kl[-1]['close'])
-                        atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
+                        ps = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+                        if isinstance(ps, dict) and ps.get('atr_period'):
+                            atr_p = int(ps.get('atr_period'))
+                        else:
+                            atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
                         atr_val = self.calculate_atr(kl, atr_p)
                         if current_position and current_position.get('size', 0) > 0 and atr_val > 0:
                             side_now = current_position.get('side', 'long')
@@ -1959,7 +1938,7 @@ class MACDStrategy:
                         logger.info(f"ℹ️ {symbol}已有多头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol, active_count=active_count)
+                    amount = self.calculate_order_amount(symbol)
                     if amount > 0:
                         if self.create_order(symbol, 'buy', amount):
                             logger.info(f"🚀 开多{symbol}成功 - {reason}")
@@ -1970,7 +1949,7 @@ class MACDStrategy:
                         logger.info(f"ℹ️ {symbol}已有空头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol, active_count=active_count)
+                    amount = self.calculate_order_amount(symbol)
                     if amount > 0:
                         if self.create_order(symbol, 'sell', amount):
                             logger.info(f"📉 开空{symbol}成功 - {reason}")
