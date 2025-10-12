@@ -584,7 +584,7 @@ class MACDStrategy:
             groups: Dict[str, List[Dict[str, str]]] = {}
             for it in (data or []):
                 try:
-                    ord_type = str(it.get('ordType') or '')
+                    ord_type = str(it.get('ordType') or '').lower()
                     if not ord_type:
                         continue
                     clid = str(it.get('clOrdId') or '')
@@ -1466,7 +1466,7 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
-                    'clOrdId': f"{self.tpsl_cl_prefix}{inst_id}_{int(time.time()*1000)}",
+
                 }
                 return self.exchange.privatePostTradeOrderAlgo(payload)
 
