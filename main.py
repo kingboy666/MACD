@@ -161,30 +161,27 @@ class MACDStrategy:
             'ARB/USDT:USDT'     # Arbitrum
         ]
         
-        # 时间周期 - 15分钟
-        self.timeframe = '15m'
-        # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
+        # 时间周期 - 统一使用 5分钟
+        self.timeframe = '5m'
+        # 全部交易对统一使用 5m
         self.timeframe_map = {
-            # 15m：波动惯性强的主流币
-            'BTC/USDT:USDT': '15m',
-            'ETH/USDT:USDT': '15m',
-            'FIL/USDT:USDT': '15m',
-            'WLD/USDT:USDT': '15m',
-            # 5m：高频波动，短周期更有效
-            'SOL/USDT:USDT': '5m',
-            'WIF/USDT:USDT': '5m',
+            'FIL/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '5m',
-            'ARB/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
-            # 10m：中等波动
+            'WIF/USDT:USDT': '5m',
+            'WLD/USDT:USDT': '5m',
+            'BTC/USDT:USDT': '5m',
+            'ETH/USDT:USDT': '5m',
+            'SOL/USDT:USDT': '5m',
             'DOGE/USDT:USDT': '5m',
             'XRP/USDT:USDT': '5m',
+            'PEPE/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '5m',
         }
         
-        # MACD参数（按要求：6,16,9）
-        self.fast_period = 6
-        self.slow_period = 16
-        self.signal_period = 9
+        # MACD参数（统一：10,40,15）
+        self.fast_period = 10
+        self.slow_period = 40
+        self.signal_period = 15
         
         # ===== 杠杆配置 - 根据币种风险分级 =====
         self.symbol_leverage: Dict[str, int] = {
@@ -1788,15 +1785,10 @@ class MACDStrategy:
             if adx_val > 0 and adx_val < adx_min_trend:
                 logger.debug(f"ADX滤波提示：趋势不足（ADX={adx_val:.1f} < {adx_min_trend}），不拦截信号")
 
-            _p = getattr(self, 'per_symbol_params', {}).get(symbol, {})
-            _macd = _p.get('macd') if isinstance(_p, dict) else None
-            if isinstance(_macd, tuple) and len(_macd) == 3:
-                f, s, si = int(_macd[0]), int(_macd[1]), int(_macd[2])
-                macd_current = self.calculate_macd_with_params(closes, f, s, si)
-                macd_prev = self.calculate_macd_with_params(closes[:-1], f, s, si)
-            else:
-                macd_current = self.calculate_macd(closes)
-                macd_prev = self.calculate_macd(closes[:-1])
+            # 统一使用全局 MACD 参数（忽略 per_symbol_params 的个别覆盖）
+            f, s, si = int(self.fast_period), int(self.slow_period), int(self.signal_period)
+            macd_current = self.calculate_macd_with_params(closes, f, s, si)
+            macd_prev = self.calculate_macd_with_params(closes[:-1], f, s, si)
             
             position = self.get_position(symbol, force_refresh=True)
             try:
