@@ -181,10 +181,10 @@ class MACDStrategy:
             'XRP/USDT:USDT': '5m',
         }
         
-        # MACD参数
-        self.fast_period = 10
-        self.slow_period = 40
-        self.signal_period = 15
+        # MACD参数（按要求：6,16,9）
+        self.fast_period = 6
+        self.slow_period = 16
+        self.signal_period = 9
         
         # ===== 杠杆配置 - 根据币种风险分级 =====
         self.symbol_leverage: Dict[str, int] = {
@@ -400,7 +400,7 @@ class MACDStrategy:
         except Exception:
             self.long_body_pct = 0.6
         try:
-            self.cooldown_candles = int((os.environ.get('COOLDOWN_CANDLES') or '3').strip())
+            self.cooldown_candles = int((os.environ.get('COOLDOWN_CANDLES') or '1').strip())
         except Exception:
             self.cooldown_candles = 3
         # 三阶段追踪与最小阈值
@@ -722,7 +722,7 @@ class MACDStrategy:
                     self.last_position_state[symbol] = position['side']
                     try:
                         kl = self.get_klines(symbol, 50)
-                        atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
+                        atr_p = int((os.environ.get('ATR_PERIOD') or '10').strip())
                         atr_val = self.calculate_atr(kl, atr_p) if kl else 0.0
                         entry = float(position.get('entry_price', 0) or 0)
                         if atr_val > 0 and entry > 0:
@@ -1149,7 +1149,7 @@ class MACDStrategy:
                 pos = self.get_position(symbol, force_refresh=True)
                 try:
                     kl = self.get_klines(symbol, 50)
-                    atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
+                    atr_p = int((os.environ.get('ATR_PERIOD') or '10').strip())
                     atr_val = self.calculate_atr(kl, atr_p) if kl else 0.0
                     if pos and pos.get('size', 0) > 0 and atr_val > 0:
                         self._set_initial_sl_tp(symbol, float(pos.get('entry_price', 0) or 0), atr_val, pos.get('side', 'long'))
@@ -1707,7 +1707,7 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
 
             try:
-                atr_period = int((os.environ.get('ATR_PERIOD') or '14').strip())
+                atr_period = int((os.environ.get('ATR_PERIOD') or '10').strip())
             except Exception:
                 atr_period = 14
             try:
