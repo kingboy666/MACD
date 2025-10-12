@@ -177,8 +177,8 @@ class MACDStrategy:
             'ARB/USDT:USDT': '5m',
             'PEPE/USDT:USDT': '5m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '10m',
-            'XRP/USDT:USDT': '10m',
+            'DOGE/USDT:USDT': '5m',
+            'XRP/USDT:USDT': '5m',
         }
         
         # MACD参数
