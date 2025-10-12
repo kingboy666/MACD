@@ -276,6 +276,26 @@ class MACDStrategy:
         # 交易统计
         self.stats = TradingStats()
         
+        # 启动基线余额与风控参数
+        try:
+            self.starting_balance = float(self.get_account_balance() or 0.0)
+        except Exception:
+            self.starting_balance = 0.0
+        try:
+            self.hard_sl_max_loss_pct = float((os.environ.get('HARD_SL_MAX_LOSS_PCT') or '0.03').strip())  # 3%
+        except Exception:
+            self.hard_sl_max_loss_pct = 0.03
+        try:
+            self.account_dd_limit_pct = float((os.environ.get('ACCOUNT_DD_LIMIT_PCT') or '0.20').strip())  # 20%
+        except Exception:
+            self.account_dd_limit_pct = 0.20
+        try:
+            self.cb_close_all = (os.environ.get('CB_CLOSE_ALL', 'true').strip().lower() in ('1', 'true', 'yes'))
+        except Exception:
+            self.cb_close_all = True
+        self.circuit_breaker_triggered = False
+        self.partial_tp_done: Dict[str, set] = {}
+        
         # ATR 止盈止损参数
         try:
             self.atr_sl_n = float((os.environ.get('ATR_SL_N') or '2.0').strip())
@@ -1066,6 +1086,35 @@ class MACDStrategy:
             logger.debug(_tb.format_exc())
             return False
     
+    def reduce_only_market(self, symbol: str, side: str, size: float, pos_side: str) -> bool:
+        """以 reduceOnly 市价减仓，避免反向开仓"""
+        try:
+            if size <= 0:
+                return True
+            inst_id = self.symbol_to_inst_id(symbol)
+            raw_params = {
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': side,             # 对应平仓方向：long->sell, short->buy
+                'posSide': pos_side,      # 'long' 或 'short'
+                'reduceOnly': True,
+                'ordType': 'market',
+                'sz': f"{size}"
+            }
+            resp = self.exchange.privatePostTradeOrder(raw_params)
+            # 简单成功判断
+            if isinstance(resp, dict):
+                code = str(resp.get('code', ''))
+                if code in ('0', '200'):
+                    return True
+                data = resp.get('data') or []
+                if isinstance(data, list) and data:
+                    return str(data[0].get('sCode', '')) == '0'
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ reduceOnly 市价减仓异常 {symbol}: {e}")
+            return False
+
     def close_position(self, symbol: str, open_reverse: bool = False) -> bool:
         """平仓"""
         try:
@@ -1263,6 +1312,77 @@ class MACDStrategy:
             self.sl_tp_state[symbol] = st
         except Exception:
             pass
+
+    def _check_hard_stop(self, symbol: str, current_price: float, side: str) -> bool:
+        """硬止损：当亏损超过阈值(按入场价百分比)立即市价平仓。返回是否已执行平仓。"""
+        try:
+            st = self.sl_tp_state.get(symbol)
+            if not st:
+                return False
+            entry = float(st.get('entry', 0) or 0)
+            if entry <= 0 or current_price <= 0:
+                return False
+            max_loss_pct = float(self.hard_sl_max_loss_pct or 0.0)
+            if max_loss_pct <= 0:
+                return False
+            if side == 'long':
+                loss_pct = max(0.0, (entry - current_price) / entry)
+            else:
+                loss_pct = max(0.0, (current_price - entry) / entry)
+            if loss_pct >= max_loss_pct:
+                logger.warning(f"🛑 硬止损触发 {symbol}: 亏损比例={loss_pct:.4%} ≥ 阈值={max_loss_pct:.2%}，立即平仓")
+                self.close_position(symbol, open_reverse=False)
+                return True
+            return False
+        except Exception as e:
+            logger.warning(f"⚠️ 硬止损检查异常 {symbol}: {e}")
+            return False
+
+    def _maybe_partial_take_profit(self, symbol: str, current_price: float, atr_val: float, side: str):
+        """分批止盈：基于 ATR 阶梯，达到阈值即按比例减仓"""
+        try:
+            tiers_str = os.environ.get('PARTIAL_TP_TIERS', '').strip()  # 例如: "1.5:0.3,3.0:0.3"
+            if not tiers_str or atr_val <= 0:
+                return
+            st = self.sl_tp_state.get(symbol)
+            pos = self.get_position(symbol, force_refresh=True)
+            size = float(pos.get('size', 0) or 0)
+            if size <= 0 or not st:
+                return
+            entry = float(st.get('entry', 0) or 0)
+            if entry <= 0 or current_price <= 0:
+                return
+            # 计算浮盈(以 ATR 倍数)
+            profit = (current_price - entry) if side == 'long' else (entry - current_price)
+            atr_mult = profit / atr_val if atr_val > 0 else 0.0
+            done = self.partial_tp_done.setdefault(symbol, set())
+            for seg in tiers_str.split(','):
+                seg = seg.strip()
+                if not seg or ':' not in seg:
+                    continue
+                th_s, ratio_s = seg.split(':', 1)
+                try:
+                    th = float(th_s); ratio = float(ratio_s)
+                except Exception:
+                    continue
+                key = f"{th:.3f}"
+                if atr_mult >= th and key not in done and 0 < ratio < 1:
+                    # 执行部分减仓
+                    qty = max(0.0, min(size * ratio, size))
+                    if qty <= 0:
+                        continue
+                    side_reduce = 'sell' if side == 'long' else 'buy'
+                    if self.reduce_only_market(symbol, side_reduce, qty, side):
+                        done.add(key)
+                        logger.info(f"✅ 分批止盈 {symbol}: 触发 {th}×ATR，减仓比例 {ratio:.2f}，数量 {qty:.6f}")
+                        # 更新剩余持仓尺寸
+                        size -= qty
+                        if size <= 0:
+                            break
+                    else:
+                        logger.warning(f"⚠️ 分批止盈下单失败 {symbol}: 阶梯 {th}×ATR, 比例 {ratio:.2f}")
+        except Exception as e:
+            logger.warning(f"⚠️ 分批止盈异常 {symbol}: {e}")
     
     def place_okx_tp_sl(self, symbol: str, entry_price: float, side: str, atr_val: float) -> bool:
         """在OKX侧同时挂TP/SL条件单。优先 oco，失败(51000)回退 tp_sl；严格以 sCode 判定成功。"""
@@ -1562,6 +1682,30 @@ class MACDStrategy:
             
             balance = self.get_account_balance()
             logger.info(f"💰 当前账户余额: {balance:.2f} USDT")
+            # 账户熔断检测
+            try:
+                if (not self.circuit_breaker_triggered) and self.starting_balance > 0:
+                    dd = max(0.0, (self.starting_balance - balance) / self.starting_balance)
+                    if dd >= float(self.account_dd_limit_pct or 0.0):
+                        self.circuit_breaker_triggered = True
+                        logger.error(f"🧯 账户熔断触发：回撤 {dd:.2%} ≥ 阈值 {self.account_dd_limit_pct:.2%}")
+                        if self.cb_close_all:
+                            logger.error("🧯 执行熔断清仓：撤销TP/SL并市价平掉全部持仓")
+                            for s in self.symbols:
+                                try:
+                                    self.cancel_symbol_tp_sl(s)
+                                except Exception:
+                                    pass
+                                try:
+                                    pos = self.get_position(s, force_refresh=True)
+                                    if pos.get('size', 0) > 0:
+                                        self.close_position(s, open_reverse=False)
+                                except Exception:
+                                    pass
+                        else:
+                            logger.error("🧯 熔断后停止新开仓（但不主动清仓）")
+            except Exception:
+                pass
             
             logger.info(self.stats.get_summary())
             
@@ -1604,7 +1748,14 @@ class MACDStrategy:
                         atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
                         atr_val = self.calculate_atr(kl, atr_p)
                         if current_position and current_position.get('size', 0) > 0 and atr_val > 0:
-                            self._update_trailing_stop(symbol, close_price, atr_val, current_position.get('side', 'long'))
+                            side_now = current_position.get('side', 'long')
+                            self._update_trailing_stop(symbol, close_price, atr_val, side_now)
+                            # 硬止损兜底
+                            if self._check_hard_stop(symbol, close_price, side_now):
+                                current_position = self.get_position(symbol, force_refresh=True)
+                                continue
+                            # 分批止盈
+                            self._maybe_partial_take_profit(symbol, close_price, atr_val, side_now)
                             st = self.sl_tp_state.get(symbol)
                             if st:
                                 try:
@@ -1650,6 +1801,9 @@ class MACDStrategy:
                     pass
                 
                 if signal == 'buy':
+                    if self.circuit_breaker_triggered:
+                        logger.warning(f"🧯 熔断中，禁止新开仓：{symbol} buy 已跳过")
+                        continue
                     if current_position['size'] > 0 and current_position['side'] == 'long':
                         logger.info(f"ℹ️ {symbol}已有多头持仓，跳过重复开仓")
                         continue
@@ -1661,6 +1815,9 @@ class MACDStrategy:
                             self.last_position_state[symbol] = 'long'
                 
                 elif signal == 'sell':
+                    if self.circuit_breaker_triggered:
+                        logger.warning(f"🧯 熔断中，禁止新开仓：{symbol} sell 已跳过")
+                        continue
                     if current_position['size'] > 0 and current_position['side'] == 'short':
                         logger.info(f"ℹ️ {symbol}已有空头持仓，跳过重复开仓")
                         continue
