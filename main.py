@@ -374,6 +374,64 @@ class MACDStrategy:
         # 跟踪峰值/谷值
         self.trailing_peak: Dict[str, float] = {}
         self.trailing_trough: Dict[str, float] = {}
+        # 交易执行冷却与阶段追踪状态
+        self.last_trade_candle_index: Dict[str, int] = {}
+        self.stage3_done: Dict[str, bool] = {}
+        # 信号增强配置（可用环境变量覆盖）
+        self.ma_type = (os.environ.get('MA_TYPE', 'sma').strip().lower() or 'sma')  # sma|ema
+        try:
+            self.ma_fast = int((os.environ.get('MA_FAST') or '5').strip())
+        except Exception:
+            self.ma_fast = 5
+        try:
+            self.ma_slow = int((os.environ.get('MA_SLOW') or '20').strip())
+        except Exception:
+            self.ma_slow = 20
+        try:
+            self.vol_ma_period = int((os.environ.get('VOL_MA_PERIOD') or '20').strip())
+        except Exception:
+            self.vol_ma_period = 20
+        try:
+            self.vol_boost = float((os.environ.get('VOL_BOOST') or '1.2').strip())
+        except Exception:
+            self.vol_boost = 1.2
+        try:
+            self.long_body_pct = float((os.environ.get('LONG_BODY_PCT') or '0.6').strip())
+        except Exception:
+            self.long_body_pct = 0.6
+        try:
+            self.cooldown_candles = int((os.environ.get('COOLDOWN_CANDLES') or '3').strip())
+        except Exception:
+            self.cooldown_candles = 3
+        # 三阶段追踪与最小阈值
+        try:
+            self.trail_stage_1 = float((os.environ.get('TRAIL_STAGE_1') or '1.0').strip())
+        except Exception:
+            self.trail_stage_1 = 1.0
+        try:
+            self.trail_stage_2 = float((os.environ.get('TRAIL_STAGE_2') or '1.75').strip())
+        except Exception:
+            self.trail_stage_2 = 1.75
+        try:
+            self.trail_stage_3 = float((os.environ.get('TRAIL_STAGE_3') or '2.5').strip())
+        except Exception:
+            self.trail_stage_3 = 2.5
+        try:
+            self.trail_stage2_offset = float((os.environ.get('TRAIL_STAGE2_OFFSET') or '0.8').strip())
+        except Exception:
+            self.trail_stage2_offset = 0.8
+        try:
+            self.trail_sl_min_delta_atr = float((os.environ.get('TRAIL_SL_MIN_DELTA_ATR') or '0.2').strip())
+        except Exception:
+            self.trail_sl_min_delta_atr = 0.2
+        try:
+            self.partial_tp_ratio_stage3 = float((os.environ.get('PARTIAL_TP_RATIO_STAGE3') or '0.3').strip())
+        except Exception:
+            self.partial_tp_ratio_stage3 = 0.3
+        try:
+            self.allow_strong_pa_override = (os.environ.get('ALLOW_STRONG_PA_OVERRIDE', 'true').strip().lower() in ('1','true','yes'))
+        except Exception:
+            self.allow_strong_pa_override = True
         
         # 记录上次持仓状态
         self.last_position_state: Dict[str, str] = {}
@@ -1329,7 +1387,8 @@ class MACDStrategy:
                 atr_sl = basis_price - n * atr_val
                 percent_sl = peak * (1 - trail_pct) if activated else st['sl']
                 new_sl = max(st['sl'], atr_sl, percent_sl)
-                if new_sl > st['sl']:
+                # 仅当新SL更有利且至少提升最小阈值(×ATR)才更新
+                if new_sl > st['sl'] and (new_sl - st['sl']) >= (self.trail_sl_min_delta_atr * atr_val):
                     st['sl'] = float(new_sl)
             else:
                 trough_prev = self.trailing_trough.get(symbol, entry)
@@ -1340,8 +1399,44 @@ class MACDStrategy:
                 atr_sl = basis_price + n * atr_val
                 percent_sl = trough * (1 + trail_pct) if activated else st['sl']
                 new_sl = min(st['sl'], atr_sl, percent_sl)
-                if new_sl < st['sl']:
+                # 仅当新SL更有利且至少提升最小阈值(×ATR)才更新（空头）
+                if new_sl < st['sl'] and (st['sl'] - new_sl) >= (self.trail_sl_min_delta_atr * atr_val):
                     st['sl'] = float(new_sl)
+            # 三阶段追踪：锁本 -> 锁小利 -> 分批止盈/平仓
+            try:
+                entry = float(st.get('entry', 0) or 0)
+                if entry > 0 and atr_val > 0:
+                    profit = (basis_price - entry) if side == 'long' else (entry - basis_price)
+                    atr_mult = profit / atr_val if atr_val > 0 else 0.0
+                    # Stage1: 锁本
+                    if atr_mult >= self.trail_stage_1:
+                        if side == 'long':
+                            st['sl'] = max(st['sl'], entry)
+                        else:
+                            st['sl'] = min(st['sl'], entry)
+                    # Stage2: 锁小利（entry ± 0.8×ATR）
+                    if atr_mult >= self.trail_stage_2:
+                        if side == 'long':
+                            st['sl'] = max(st['sl'], entry + self.trail_stage2_offset * atr_val)
+                        else:
+                            st['sl'] = min(st['sl'], entry - self.trail_stage2_offset * atr_val)
+                    # Stage3: 分批止盈（默认减仓30%，仅执行一次）
+                    if atr_mult >= self.trail_stage_3 and (not self.stage3_done.get(symbol, False)):
+                        try:
+                            pos = self.get_position(symbol, force_refresh=True)
+                            sz = float(pos.get('size', 0) or 0)
+                            if sz > 0 and 0 < self.partial_tp_ratio_stage3 < 1:
+                                cut = max(0.0, min(sz, sz * self.partial_tp_ratio_stage3))
+                                if cut > 0:
+                                    reduce_side = 'sell' if side == 'long' else 'buy'
+                                    pos_side = 'long' if side == 'long' else 'short'
+                                    if self.reduce_only_market(symbol, reduce_side, cut, pos_side):
+                                        logger.info(f"✅ Stage3分批止盈 {symbol}: 减仓 {cut:.6f} ({self.partial_tp_ratio_stage3:.2f})")
+                                        self.stage3_done[symbol] = True
+                        except Exception as _e:
+                            logger.warning(f"⚠️ Stage3 分批止盈异常 {symbol}: {_e}")
+            except Exception:
+                pass
             self.sl_tp_state[symbol] = st
         except Exception:
             pass
