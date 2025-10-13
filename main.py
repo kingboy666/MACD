@@ -166,19 +166,19 @@ class MACDStrategy:
         # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
         self.timeframe_map = {
             # 15m：波动惯性强的主流币
-            'BTC/USDT:USDT': '5m',
-            'ETH/USDT:USDT': '5m',
-            'FIL/USDT:USDT': '5m',
-            'WLD/USDT:USDT': '5m',
+            'BTC/USDT:USDT': '15m',
+            'ETH/USDT:USDT': '15m',
+            'FIL/USDT:USDT': '15m',
+            'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
-            'SOL/USDT:USDT': '5m',
+            'SOL/USDT:USDT': '15m',
             'WIF/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '5m',
             'ARB/USDT:USDT': '5m',
             'PEPE/USDT:USDT': '5m',
             # 10m：中等波动
             'DOGE/USDT:USDT': '5m',
-            'XRP/USDT:USDT': '5m',
+            'XRP/USDT:USDT': '15m',
         }
         
         # MACD参数
@@ -209,19 +209,19 @@ class MACDStrategy:
         self.per_symbol_params: Dict[str, Dict[str, Any]] = {
             # 原有小币种
             'FIL/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 12,
+                'macd': (8, 32, 12), 'atr_period': 14, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             'ZRO/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
+                'macd': (6, 20, 9), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 25, 'sl_n': 2.2, 'tp_m': 3.0, 'allow_reverse': True
             },
             'WIF/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
+                'macd': (6, 18, 9), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 25, 'sl_n': 2.5, 'tp_m': 4.0, 'allow_reverse': True
             },
             'WLD/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 12,
+                'macd': (9, 34, 13), 'atr_period': 14, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             
@@ -231,31 +231,31 @@ class MACDStrategy:
                 'adx_min_trend': 25, 'sl_n': 1.5, 'tp_m': 3.0, 'allow_reverse': True
             },
             'ETH/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 18, 'adx_period': 14,
+                'macd': (9, 35, 14), 'atr_period': 18, 'adx_period': 14,
                 'adx_min_trend': 25, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             'SOL/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 12,
+                'macd': (8, 30, 12), 'atr_period': 16, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 4.0, 'allow_reverse': True
             },
             'XRP/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 14,
+                'macd': (10, 36, 14), 'atr_period': 16, 'adx_period': 14,
                 'adx_min_trend': 24, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             
             # 新增Meme币
             'DOGE/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 12,
+                'macd': (6, 16, 9), 'atr_period': 16, 'adx_period': 12,
                 'adx_min_trend': 22, 'sl_n': 2.5, 'tp_m': 5.0, 'allow_reverse': True
             },
             'PEPE/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
+                'macd': (5, 13, 8), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 20, 'sl_n': 3.0, 'tp_m': 6.0, 'allow_reverse': True
             },
             
             # 新增L2币
             'ARB/USDT:USDT': {
-                'macd': (10, 40, 15), 'atr_period': 15, 'adx_period': 12,
+                'macd': (7, 22, 10), 'atr_period': 15, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.2, 'tp_m': 3.8, 'allow_reverse': True
             }
         }
@@ -1765,8 +1765,18 @@ class MACDStrategy:
             if adx_val > 0 and adx_val < adx_min_trend:
                 logger.debug(f"ADX滤波提示：趋势不足（ADX={adx_val:.1f} < {adx_min_trend}），不拦截信号")
 
-            macd_current = self.calculate_macd(closes)
-            macd_prev = self.calculate_macd(closes[:-1])
+            _p = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+            _macd_params = _p.get('macd') if isinstance(_p, dict) else None
+            if isinstance(_macd_params, (list, tuple)) and len(_macd_params) == 3:
+                macd_current = self.calculate_macd_with_params(closes, int(_macd_params[0]), int(_macd_params[1]), int(_macd_params[2]))
+            else:
+                macd_current = self.calculate_macd(closes)
+            _p = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+            _macd_params = _p.get('macd') if isinstance(_p, dict) else None
+            if isinstance(_macd_params, (list, tuple)) and len(_macd_params) == 3:
+                macd_prev = self.calculate_macd_with_params(closes[:-1], int(_macd_params[0]), int(_macd_params[1]), int(_macd_params[2]))
+            else:
+                macd_prev = self.calculate_macd(closes[:-1])
             
             position = self.get_position(symbol, force_refresh=True)
             try:
