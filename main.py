@@ -209,53 +209,53 @@ class MACDStrategy:
         self.per_symbol_params: Dict[str, Dict[str, Any]] = {
             # 原有小币种
             'FIL/USDT:USDT': {
-                'macd': (10, 38, 14), 'atr_period': 14, 'adx_period': 12,
+                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             'ZRO/USDT:USDT': {
-                'macd': (9, 32, 12), 'atr_period': 14, 'adx_period': 10,
+                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 25, 'sl_n': 2.2, 'tp_m': 3.0, 'allow_reverse': True
             },
             'WIF/USDT:USDT': {
-                'macd': (9, 30, 12), 'atr_period': 14, 'adx_period': 10,
+                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 25, 'sl_n': 2.5, 'tp_m': 4.0, 'allow_reverse': True
             },
             'WLD/USDT:USDT': {
-                'macd': (10, 38, 14), 'atr_period': 14, 'adx_period': 12,
+                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             
             # 新增主流币
             'BTC/USDT:USDT': {
-                'macd': (12, 45, 16), 'atr_period': 20, 'adx_period': 14,
+                'macd': (10, 40, 15), 'atr_period': 20, 'adx_period': 14,
                 'adx_min_trend': 25, 'sl_n': 1.5, 'tp_m': 3.0, 'allow_reverse': True
             },
             'ETH/USDT:USDT': {
-                'macd': (12, 42, 15), 'atr_period': 18, 'adx_period': 14,
+                'macd': (10, 40, 15), 'atr_period': 18, 'adx_period': 14,
                 'adx_min_trend': 25, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             'SOL/USDT:USDT': {
-                'macd': (10, 38, 14), 'atr_period': 16, 'adx_period': 12,
+                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 4.0, 'allow_reverse': True
             },
             'XRP/USDT:USDT': {
-                'macd': (11, 40, 15), 'atr_period': 16, 'adx_period': 14,
+                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 14,
                 'adx_min_trend': 24, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             
             # 新增Meme币
             'DOGE/USDT:USDT': {
-                'macd': (9, 32, 12), 'atr_period': 16, 'adx_period': 12,
+                'macd': (10, 40, 15), 'atr_period': 16, 'adx_period': 12,
                 'adx_min_trend': 22, 'sl_n': 2.5, 'tp_m': 5.0, 'allow_reverse': True
             },
             'PEPE/USDT:USDT': {
-                'macd': (8, 28, 10), 'atr_period': 14, 'adx_period': 10,
+                'macd': (10, 40, 15), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 20, 'sl_n': 3.0, 'tp_m': 6.0, 'allow_reverse': True
             },
             
             # 新增L2币
             'ARB/USDT:USDT': {
-                'macd': (10, 36, 13), 'atr_period': 15, 'adx_period': 12,
+                'macd': (10, 40, 15), 'atr_period': 15, 'adx_period': 12,
                 'adx_min_trend': 23, 'sl_n': 2.2, 'tp_m': 3.8, 'allow_reverse': True
             }
         }
