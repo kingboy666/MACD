@@ -624,8 +624,18 @@ class MACDStrategy:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
-            resp = self._safe_call(self.exchange.privateGetTradeOrdersAlgoPending, {'instType': 'SWAP', 'instId': inst_id})
-            data = resp.get('data', [])
+            # OKX v5 要求 ordType 必填；为兼容策略中使用的 oco/trigger（以及部分场景的 conditional），循环查询合并
+            data = []
+            for _ord in ('oco', 'trigger', 'conditional'):
+                try:
+                    resp = self._safe_call(
+                        self.exchange.privateGetTradeOrdersAlgoPending,
+                        {'instType': 'SWAP', 'instId': inst_id, 'ordType': _ord}
+                    )
+                    data.extend(resp.get('data', []))
+                except Exception as _e:
+                    # 若某 ordType 不支持或无数据，忽略即可
+                    continue
             groups: Dict[str, List[Dict[str, str]]] = {}
             for it in data:
                 ord_type = str(it.get('ordType', '')).lower()
@@ -954,6 +964,8 @@ class MACDStrategy:
             min_amount = market_info.get('min_amount', 0.001)
             amount_precision = market_info.get('amount_precision', 8)
             lot_sz = market_info.get('lot_size')
+            # 修复: 确保 step 在后续任何分支使用前已定义，避免 UnboundLocalError
+            step = float(lot_sz) if lot_sz else 0.0
 
             inst_id = self.symbol_to_inst_id(symbol)
             tkr = self._safe_call(self.exchange.publicGetMarketTicker, {'instId': inst_id})
