@@ -955,7 +955,7 @@ class MACDStrategy:
             allocated_amount = balance / max(1, num_symbols)
 
             # 3) 放大因子
-            factor_str = os.environ.get('ORDER_NOTIONAL_FACTOR', '50').strip()
+            factor_str = os.environ.get('ORDER_NOTIONAL_FACTOR', '1').strip()
             try:
                 factor = max(1.0, float(factor_str or '1'))
             except Exception:
@@ -970,7 +970,7 @@ class MACDStrategy:
                 except Exception:
                     return default
 
-            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.0))
+            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.1))
             max_cap = max(0.0, _to_float('MAX_PER_SYMBOL_USDT', 0.0))
 
             if min_floor > 0 and allocated_amount < min_floor:
@@ -1236,6 +1236,98 @@ class MACDStrategy:
                                     last_err = _e3
                                     logger.error(f"❌ 51202缩量重试 OKX原生下单异常: {_e3}")
 
+                            if order_id:
+                                break
+                    except Exception:
+                        pass
+
+            # 若因 51008(保证金不足) 导致失败，则自适应缩量重试最多3次
+            if not order_id and last_err is not None:
+                try:
+                    msg2 = str(last_err)
+                except Exception:
+                    msg2 = ""
+                if ('51008' in msg2) or ('insufficient' in msg2.lower()) or ('margin' in msg2.lower()):
+                    try:
+                        max_retry2 = 3
+                        for _ in range(max_retry2):
+                            try:
+                                contract_size = contract_size / 2.0
+                                # 对齐步进与精度
+                                if lot_sz:
+                                    try:
+                                        stepx = float(lot_sz)
+                                        if stepx and stepx > 0:
+                                            contract_size = math.ceil(contract_size / stepx) * stepx
+                                    except Exception:
+                                        pass
+                                contract_size = round(contract_size, amount_precision)
+                                if contract_size <= 0 or contract_size < min_amount:
+                                    contract_size = max(min_amount, 10 ** (-amount_precision))
+                                    if lot_sz:
+                                        try:
+                                            stepy = float(lot_sz)
+                                            if stepy and stepy > 0:
+                                                contract_size = math.ceil(contract_size / stepy) * stepy
+                                        except Exception:
+                                            pass
+                                    contract_size = round(contract_size, amount_precision)
+                                logger.warning(f"↘️ 51008 缩量重试: 新数量={contract_size:.8f}")
+                            except Exception:
+                                pass
+
+                            order_id = None
+                            # 依次重试三种下单方式
+                            try:
+                                params = {'tdMode': 'cross', 'posSide': pos_side}
+                                resp = self.exchange.create_order(symbol, 'market', side, contract_size, None, params)
+                                if isinstance(resp, dict):
+                                    order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                                elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                    order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                                if order_id:
+                                    logger.info(f"✅ 51008缩量重试成功(create_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                            except Exception as _g1:
+                                last_err = _g1
+                                logger.error(f"❌ 51008缩量重试 create_order 异常: {_g1}")
+
+                            if not order_id:
+                                try:
+                                    params = {'tdMode': 'cross', 'posSide': pos_side}
+                                    resp = self.exchange.create_market_order(symbol, side, contract_size, None, params)  # type: ignore[arg-type]
+                                    if isinstance(resp, dict):
+                                        order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                                    elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                        order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                                    if order_id:
+                                        logger.info(f"✅ 51008缩量重试成功(create_market_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                                except Exception as _g2:
+                                    last_err = _g2
+                                    logger.error(f"❌ 51008缩量重试 create_market_order 异常: {_g2}")
+
+                            if not order_id:
+                                try:
+                                    inst_id = self.symbol_to_inst_id(symbol)
+                                    raw_params = {
+                                        'instId': inst_id,
+                                        'tdMode': 'cross',
+                                        'side': side,
+                                        'posSide': pos_side,
+                                        'ordType': 'market',
+                                        'sz': str(contract_size)
+                                    }
+                                    resp = self.exchange.privatePostTradeOrder(raw_params)
+                                    if isinstance(resp, dict):
+                                        data = resp.get('data') or []
+                                        if isinstance(data, list) and data:
+                                            order_id = data[0].get('ordId') or data[0].get('clOrdId') or data[0].get('id')
+                                        else:
+                                            order_id = resp.get('ordId') or resp.get('clOrdId') or resp.get('id')
+                                    if order_id:
+                                        logger.info(f"✅ 51008缩量重试成功(OKX原生) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                                except Exception as _g3:
+                                    last_err = _g3
+                                    logger.error(f"❌ 51008缩量重试 OKX原生下单异常: {_g3}")
                             if order_id:
                                 break
                     except Exception:
