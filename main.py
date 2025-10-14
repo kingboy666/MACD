@@ -1696,6 +1696,7 @@ class MACDStrategy:
                     strong_trend = bbv['band_width'] > bbv['band_ma20'] * 1.0
 
             def _post_algo(ord_type: str):
+                # 基础字段
                 payload = {
                     'instId': inst_id,
                     'tdMode': 'cross',
@@ -1703,13 +1704,17 @@ class MACDStrategy:
                     'ordType': ord_type,
                     'reduceOnly': True,
                     'sz': f"{size}",
-                    'slTriggerPx': f"{sl_trigger}",
-                    'slOrdPx': '-1',
                 }
-                # 仅当为OCO且非强趋势时才附带TP字段；trigger只挂SL
-                if ord_type == 'oco' and not strong_trend:
-                    payload['tpTriggerPx'] = f"{tp_trigger}"
-                    payload['tpOrdPx'] = '-1'
+                # 字段按类型区分：oco 使用 tp/slTriggerPx；trigger 使用 triggerPx/orderPx
+                if ord_type == 'oco':
+                    payload['slTriggerPx'] = f"{sl_trigger}"
+                    payload['slOrdPx'] = '-1'
+                    if not strong_trend:
+                        payload['tpTriggerPx'] = f"{tp_trigger}"
+                        payload['tpOrdPx'] = '-1'
+                else:  # trigger
+                    payload['triggerPx'] = f"{sl_trigger}"
+                    payload['orderPx'] = '-1'
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
                 return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
