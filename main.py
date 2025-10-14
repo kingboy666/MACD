@@ -864,9 +864,16 @@ class MACDStrategy:
             resp = self._safe_call(self.exchange.privateGetAccountPositions, {'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data', [])
             for p in data:
-                if p.get('instId') == inst_id and float(p.get('pos', 0)) != 0:
-                    size = abs(float(p.get('pos', 0)))
-                    side = 'long' if p.get('posSide') == 'long' else 'short'
+                if p.get('instId') == inst_id:
+                    pos = float(p.get('pos', 0) or 0)
+                    if pos == 0:
+                        continue
+                    size = abs(pos)
+                    if self.is_hedge_mode:
+                        side = 'long' if p.get('posSide') == 'long' else 'short'
+                    else:
+                        # 单向(net)模式：依据仓位正负判断方向
+                        side = 'long' if pos > 0 else 'short'
                     entry_price = float(p.get('avgPx', 0))
                     leverage = float(p.get('lever', 0))
                     unreal = float(p.get('upl', 0))
@@ -1032,18 +1039,17 @@ class MACDStrategy:
             logger.info(f"🧮 下单成本对齐: 分配金额={amount:.4f}U | 预计成本={est_cost:.4f}U | 数量={contract_size:.8f} | minSz={min_amount} | lotSz={lot_sz}")
 
             pos_side = 'long' if side == 'buy' else 'short'
-            native_only = _get_env_bool('USE_OKX_NATIVE_ONLY', False)
+            native_only = True  # 强制走OKX原生接口，避免ccxt抽象差异
 
             if not native_only:
                 # 使用ccxt下单
                 order_type = 'market'
                 params = {
-                    'type': 'swap',
-                    'margin_mode': 'cross',
+                    'marginMode': 'cross',
                     'leverage': self.symbol_leverage.get(symbol, 20),
                 }
                 if self.is_hedge_mode:
-                    params['position_side'] = pos_side
+                    params['positionSide'] = pos_side
                 order = self._safe_call(self.exchange.create_order, symbol, order_type, side, contract_size, None, params)
                 if order:
                     logger.info(f"✅ 下单成功: {symbol} {side} {contract_size:.8f} @{order_type}")
@@ -1096,12 +1102,23 @@ class MACDStrategy:
                 self.cancel_all_orders(symbol)
                 time.sleep(1)
             
-            # 平仓
-            params = {'reduce_only': True}
+            # 平仓（改为OKX原生接口，严格reduceOnly）
+            inst_id = self.symbol_to_inst_id(symbol)
+            payload = {
+                'instId': inst_id,
+                'tdMode': 'cross',
+                'side': side,
+                'ordType': 'market',
+                'sz': f"{amount}",
+                'reduceOnly': True,
+            }
             if self.is_hedge_mode:
-                params['position_side'] = position['side']
-            order = self._safe_call(self.exchange.create_market_order, symbol, side, amount, params=params)
-            if order:
+                payload['posSide'] = position['side']
+            else:
+                payload['posSide'] = 'net'
+            resp = self._safe_call(self.exchange.privatePostTradeOrder, payload)
+            ok = isinstance(resp, dict) and str(resp.get('code', '')) == '0'
+            if ok:
                 pnl = position['unrealized_pnl']
                 self.stats.add_trade(symbol, position['side'], pnl)
                 logger.info(f"✅ 平仓成功: {symbol} {side} {amount:.6f} PNL:{pnl:.2f}U")
@@ -1122,10 +1139,9 @@ class MACDStrategy:
                     alloc_amount = self.calculate_order_amount(symbol)
                     if alloc_amount > 0:
                         self.create_order(symbol, reverse_side, alloc_amount)
-                
                 return True
             else:
-                logger.error(f"❌ 平仓失败: {symbol}")
+                logger.error(f"❌ 平仓失败(原生): {symbol} - {resp}")
                 return False
             
         except Exception as e:
@@ -1405,6 +1421,7 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
+                    'clOrdId': f"{self.tpsl_cl_prefix}{ord_type}_{int(time.time()*1000)}",
                 }
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
