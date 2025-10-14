@@ -1148,6 +1148,99 @@ class MACDStrategy:
                     logger.error(f"❌ OKX原生下单异常: {e3}")
                     logger.debug(traceback.format_exc())
 
+            # 若因 51202(市价单超额) 等导致失败，则缩量重试最多3次
+            if not order_id and last_err is not None:
+                try:
+                    msg = str(last_err)
+                except Exception:
+                    msg = ""
+                if ('51202' in msg) or ('exceeds the maximum' in msg.lower()) or ('maximum amount' in msg.lower()):
+                    try:
+                        max_retry = 3
+                        for _ in range(max_retry):
+                            try:
+                                contract_size = contract_size / 2.0
+                                # 对齐步进与精度
+                                if lot_sz:
+                                    try:
+                                        step = float(lot_sz)
+                                        if step and step > 0:
+                                            contract_size = math.ceil(contract_size / step) * step
+                                    except Exception:
+                                        pass
+                                contract_size = round(contract_size, amount_precision)
+                                if contract_size <= 0 or contract_size < min_amount:
+                                    contract_size = max(min_amount, 10 ** (-amount_precision))
+                                    if lot_sz:
+                                        try:
+                                            step2 = float(lot_sz)
+                                            if step2 and step2 > 0:
+                                                contract_size = math.ceil(contract_size / step2) * step2
+                                        except Exception:
+                                            pass
+                                    contract_size = round(contract_size, amount_precision)
+                                logger.warning(f"↘️ 51202 缩量重试: 新数量={contract_size:.8f}")
+                            except Exception:
+                                pass
+
+                            order_id = None
+                            # 依次重试三种下单方式
+                            try:
+                                params = {'tdMode': 'cross', 'posSide': pos_side}
+                                resp = self.exchange.create_order(symbol, 'market', side, contract_size, None, params)
+                                if isinstance(resp, dict):
+                                    order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                                elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                    order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                                if order_id:
+                                    logger.info(f"✅ 51202缩量重试成功(create_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                            except Exception as _e1:
+                                last_err = _e1
+                                logger.error(f"❌ 51202缩量重试 create_order 异常: {_e1}")
+
+                            if not order_id:
+                                try:
+                                    params = {'tdMode': 'cross', 'posSide': pos_side}
+                                    resp = self.exchange.create_market_order(symbol, side, contract_size, None, params)  # type: ignore[arg-type]
+                                    if isinstance(resp, dict):
+                                        order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                                    elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                        order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                                    if order_id:
+                                        logger.info(f"✅ 51202缩量重试成功(create_market_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                                except Exception as _e2:
+                                    last_err = _e2
+                                    logger.error(f"❌ 51202缩量重试 create_market_order 异常: {_e2}")
+
+                            if not order_id:
+                                try:
+                                    inst_id = self.symbol_to_inst_id(symbol)
+                                    raw_params = {
+                                        'instId': inst_id,
+                                        'tdMode': 'cross',
+                                        'side': side,
+                                        'posSide': pos_side,
+                                        'ordType': 'market',
+                                        'sz': str(contract_size)
+                                    }
+                                    resp = self.exchange.privatePostTradeOrder(raw_params)
+                                    if isinstance(resp, dict):
+                                        data = resp.get('data') or []
+                                        if isinstance(data, list) and data:
+                                            order_id = data[0].get('ordId') or data[0].get('clOrdId') or data[0].get('id')
+                                        else:
+                                            order_id = resp.get('ordId') or resp.get('clOrdId') or resp.get('id')
+                                    if order_id:
+                                        logger.info(f"✅ 51202缩量重试成功(OKX原生) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
+                                except Exception as _e3:
+                                    last_err = _e3
+                                    logger.error(f"❌ 51202缩量重试 OKX原生下单异常: {_e3}")
+
+                            if order_id:
+                                break
+                    except Exception:
+                        pass
+
             if order_id:
                 time.sleep(2)
                 pos = self.get_position(symbol, force_refresh=True)
@@ -1281,6 +1374,81 @@ class MACDStrategy:
                     last_err = e3
                     logger.error(f"❌ 平仓 OKX 原生接口异常: {e3}")
                     logger.debug(_tb.format_exc())
+
+            # 若 reduceOnly/posSide 导致 51169（方向/模式不匹配），回退为净持仓通用平仓：不带 posSide、不带 reduceOnly
+            if not order_id and last_err is not None:
+                try:
+                    _msg = str(last_err)
+                except Exception:
+                    _msg = ""
+                if '51169' in _msg:
+                    try:
+                        # 对齐 size 到 lotSz/精度，避免数量不合法
+                        market_info = self.markets_info.get(symbol, {})
+                        amount_precision = int(market_info.get('amount_precision', 8) or 8)
+                        lot_sz = market_info.get('lot_size')
+                        _size = float(size)
+                        if lot_sz:
+                            try:
+                                _step = float(lot_sz)
+                                if _step and _step > 0:
+                                    _size = math.ceil(_size / _step) * _step
+                            except Exception:
+                                pass
+                        _size = round(max(_size, 10 ** (-amount_precision)), amount_precision)
+
+                        order_id = None
+                        # 1) ccxt create_order（不带 posSide/reduceOnly）
+                        try:
+                            params_plain = {'tdMode': 'cross'}
+                            resp = self.exchange.create_order(symbol, 'market', side, _size, None, params_plain)
+                            if isinstance(resp, dict):
+                                order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                            elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                            if order_id:
+                                logger.info(f"✅ 51169回退成功(create_order-plain) {symbol} {side} 数量:{_size:.6f} 订单ID:{order_id}")
+                        except Exception as _f1:
+                            logger.error(f"❌ 51169回退 create_order-plain 异常: {_f1}")
+
+                        # 2) ccxt create_market_order（不带 posSide/reduceOnly）
+                        if not order_id:
+                            try:
+                                params_plain = {'tdMode': 'cross'}
+                                resp = self.exchange.create_market_order(symbol, side, _size, None, params_plain)  # type: ignore[arg-type]
+                                if isinstance(resp, dict):
+                                    order_id = resp.get('id') or resp.get('orderId') or resp.get('ordId') or resp.get('clOrdId')
+                                elif isinstance(resp, list) and resp and isinstance(resp[0], dict):
+                                    order_id = resp[0].get('id') or resp[0].get('orderId') or resp[0].get('ordId') or resp[0].get('clOrdId')
+                                if order_id:
+                                    logger.info(f"✅ 51169回退成功(create_market_order-plain) {symbol} {side} 数量:{_size:.6f} 订单ID:{order_id}")
+                            except Exception as _f2:
+                                logger.error(f"❌ 51169回退 create_market_order-plain 异常: {_f2}")
+
+                        # 3) OKX 原生 privatePostTradeOrder（不带 posSide/reduceOnly）
+                        if not order_id:
+                            try:
+                                inst_id = self.symbol_to_inst_id(symbol)
+                                raw_params_plain = {
+                                    'instId': inst_id,
+                                    'tdMode': 'cross',
+                                    'side': side,
+                                    'ordType': 'market',
+                                    'sz': str(_size)
+                                }
+                                resp = self.exchange.privatePostTradeOrder(raw_params_plain)
+                                if isinstance(resp, dict):
+                                    data = resp.get('data') or []
+                                    if isinstance(data, list) and data:
+                                        order_id = data[0].get('ordId') or data[0].get('clOrdId') or data[0].get('id')
+                                    else:
+                                        order_id = resp.get('ordId') or resp.get('clOrdId') or resp.get('id')
+                                if order_id:
+                                    logger.info(f"✅ 51169回退成功(OKX原生-plain) {symbol} {side} 数量:{_size:.6f} 订单ID:{order_id}")
+                            except Exception as _f3:
+                                logger.error(f"❌ 51169回退 OKX原生-plain 异常: {_f3}")
+                    except Exception:
+                        pass
 
             if order_id:
                 logger.info(f"✅ 成功平仓{symbol}，方向: {side}，数量: {size:.6f}，盈亏: {pnl:.2f}U")
@@ -1807,7 +1975,8 @@ class MACDStrategy:
             try:
                 _p2 = getattr(self, 'per_symbol_params', {}).get(symbol, {})
                 _th = float(_p2.get('adx_min_trend', 0) or 0)
-                if _th > 0 and adx_val > 0 and adx_val < _th:
+                # 仅在“无持仓时”用ADX过滤开仓信号；有持仓则允许平仓信号通过
+                if _th > 0 and adx_val > 0 and adx_val < _th and (self.get_position(symbol, force_refresh=False).get('size', 0) == 0):
                     return {'signal': 'hold', 'reason': f'ADX不足 {adx_val:.1f} < {_th:.1f}'}
             except Exception:
                 pass
@@ -1902,6 +2071,20 @@ class MACDStrategy:
                             atr_p = int((os.environ.get('ATR_PERIOD') or '14').strip())
                         atr_val = self.calculate_atr(kl, atr_p)
                         if current_position and current_position.get('size', 0) > 0 and atr_val > 0:
+                            # 若是手动持仓或尚未初始化SL/TP，这里兜底初始化并在OKX侧挂出TP/SL
+                            st0 = self.sl_tp_state.get(symbol)
+                            if not st0:
+                                try:
+                                    entry0 = float(current_position.get('entry_price', 0) or 0)
+                                    if entry0 > 0:
+                                        self._set_initial_sl_tp(symbol, entry0, atr_val, current_position.get('side', 'long'))
+                                        okx_ok = self.place_okx_tp_sl(symbol, entry0, current_position.get('side', 'long'), atr_val)
+                                        if okx_ok:
+                                            logger.info(f"📌 手动/历史持仓兜底：已初始化并挂TP/SL {symbol}")
+                                        else:
+                                            logger.warning(f"⚠️ 手动/历史持仓兜底挂单失败 {symbol}")
+                                except Exception as _e0:
+                                    logger.warning(f"⚠️ 兜底初始化SL/TP异常 {symbol}: {_e0}")
                             side_now = current_position.get('side', 'long')
                             self._update_trailing_stop(symbol, close_price, atr_val, side_now)
                             # 硬止损兜底
