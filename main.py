@@ -209,54 +209,54 @@ class MACDStrategy:
         self.per_symbol_params: Dict[str, Dict[str, Any]] = {
             # 原有小币种
             'FIL/USDT:USDT': {
-                'macd': (8, 21, 9), 'atr_period': 14, 'adx_period': 12,
-                'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
+                'macd': (8, 21, 9), 'atr_period': 16, 'adx_period': 12,
+                'adx_min_trend': 26, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             'ZRO/USDT:USDT': {
                 'macd': (9, 26, 12), 'atr_period': 14, 'adx_period': 10,
                 'adx_min_trend': 30, 'sl_n': 2.2, 'tp_m': 3.0, 'allow_reverse': True
             },
             'WIF/USDT:USDT': {
-                'macd': (5, 13, 5), 'atr_period': 16, 'adx_period': 10,
-                'adx_min_trend': 30, 'sl_n': 1.9, 'tp_m': 4.0, 'tp_pct': 0.012, 'allow_reverse': True
+                'macd': (5, 13, 9), 'atr_period': 18, 'adx_period': 10,
+                'adx_min_trend': 24, 'sl_n': 2.1, 'tp_m': 4.5, 'tp_pct': 0.012, 'allow_reverse': True
             },
             'WLD/USDT:USDT': {
-                'macd': (8, 21, 9), 'atr_period': 14, 'adx_period': 12,
-                'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
+                'macd': (8, 21, 9), 'atr_period': 16, 'adx_period': 12,
+                'adx_min_trend': 26, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             
             # 新增主流币
             'BTC/USDT:USDT': {
-                'macd': (8, 21, 9), 'atr_period': 20, 'adx_period': 14,
-                'adx_min_trend': 25, 'sl_n': 1.5, 'tp_m': 3.0, 'allow_reverse': True
+                'macd': (8, 21, 9), 'atr_period': 22, 'adx_period': 14,
+                'adx_min_trend': 26, 'sl_n': 1.5, 'tp_m': 3.0, 'allow_reverse': True
             },
             'ETH/USDT:USDT': {
-                'macd': (8, 21, 9), 'atr_period': 18, 'adx_period': 14,
-                'adx_min_trend': 25, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
+                'macd': (8, 21, 9), 'atr_period': 20, 'adx_period': 14,
+                'adx_min_trend': 26, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             'SOL/USDT:USDT': {
                 'macd': (8, 21, 9), 'atr_period': 16, 'adx_period': 12,
                 'adx_min_trend': 30, 'sl_n': 1.8, 'tp_m': 4.0, 'tp_pct': 0.012, 'allow_reverse': True
             },
             'XRP/USDT:USDT': {
-                'macd': (8, 21, 9), 'atr_period': 16, 'adx_period': 14,
-                'adx_min_trend': 24, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
+                'macd': (8, 21, 9), 'atr_period': 18, 'adx_period': 14,
+                'adx_min_trend': 26, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             
             # 新增Meme币
             'DOGE/USDT:USDT': {
-                'macd': (5, 13, 5), 'atr_period': 16, 'adx_period': 12,
-                'adx_min_trend': 22, 'sl_n': 2.5, 'tp_m': 5.0, 'allow_reverse': True
+                'macd': (5, 13, 9), 'atr_period': 18, 'adx_period': 12,
+                'adx_min_trend': 24, 'sl_n': 2.7, 'tp_m': 5.5, 'allow_reverse': True
             },
             'PEPE/USDT:USDT': {
-                'macd': (5, 13, 5), 'atr_period': 16, 'adx_period': 10,
-                'adx_min_trend': 22, 'sl_n': 3.0, 'tp_m': 6.0, 'allow_reverse': True
+                'macd': (5, 13, 9), 'atr_period': 18, 'adx_period': 10,
+                'adx_min_trend': 24, 'sl_n': 3.2, 'tp_m': 6.5, 'allow_reverse': True
             },
             
             # 新增L2币
             'ARB/USDT:USDT': {
-                'macd': (6, 18, 8), 'atr_period': 15, 'adx_period': 12,
-                'adx_min_trend': 23, 'sl_n': 2.2, 'tp_m': 3.8, 'allow_reverse': True
+                'macd': (6, 18, 9), 'atr_period': 18, 'adx_period': 12,
+                'adx_min_trend': 24, 'sl_n': 2.4, 'tp_m': 4.3, 'allow_reverse': True
             }
         }
         
@@ -353,7 +353,7 @@ class MACDStrategy:
         self.symbol_cfg: Dict[str, Dict[str, float | str]] = {
             # 原有币种
             "ZRO/USDT:USDT": {"period": 14, "n": 2.2, "m": 3.0, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "high"},
-            "WIF/USDT:USDT": {"period": 14, "n": 2.5, "m": 4.0, "trigger_pct": 0.015, "trail_pct": 0.010, "update_basis": "high"},
+            "WIF/USDT:USDT": {"period": 14, "n": 2.5, "m": 4.0, "trigger_pct": 0.017, "trail_pct": 0.008, "update_basis": "high"},
             "WLD/USDT:USDT": {"period": 14, "n": 2.0, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"},
             "FIL/USDT:USDT": {"period": 14, "n": 2.0, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "high"},
             
@@ -364,11 +364,11 @@ class MACDStrategy:
             "XRP/USDT:USDT": {"period": 16, "n": 1.8, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"},
             
             # 新增Meme币
-            "DOGE/USDT:USDT": {"period": 16, "n": 2.5, "m": 5.0, "trigger_pct": 0.015, "trail_pct": 0.010, "update_basis": "high"},
-            "PEPE/USDT:USDT": {"period": 14, "n": 3.0, "m": 6.0, "trigger_pct": 0.020, "trail_pct": 0.012, "update_basis": "high"},
+            "DOGE/USDT:USDT": {"period": 16, "n": 2.5, "m": 5.0, "trigger_pct": 0.017, "trail_pct": 0.008, "update_basis": "high"},
+            "PEPE/USDT:USDT": {"period": 14, "n": 3.0, "m": 6.0, "trigger_pct": 0.022, "trail_pct": 0.010, "update_basis": "high"},
             
             # 新增L2币
-            "ARB/USDT:USDT": {"period": 15, "n": 2.2, "m": 3.8, "trigger_pct": 0.012, "trail_pct": 0.008, "update_basis": "high"}
+            "ARB/USDT:USDT": {"period": 15, "n": 2.2, "m": 3.8, "trigger_pct": 0.014, "trail_pct": 0.006, "update_basis": "high"}
         }
         
         # 跟踪峰值/谷值
@@ -1068,6 +1068,41 @@ class MACDStrategy:
                 logger.warning(f"⚠️ {symbol}最终数量无效: {contract_size}")
                 return False
 
+            # 预估保证金并预缩量：减少 51008 重试
+            try:
+                lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+                est_cost0 = float(contract_size * current_price)
+                est_margin0 = est_cost0 / max(1.0, lev)
+                avail = float(self.get_account_balance() or 0.0)
+                # 预留一点安全系数（98%）
+                if avail > 0 and est_margin0 > avail * 0.98:
+                    ratio = (avail * 0.98 * lev) / max(1e-12, est_cost0)
+                    # 按比例缩数量
+                    contract_size = max(0.0, contract_size * max(0.1, min(1.0, ratio)))
+                    # 对齐步进与精度
+                    if lot_sz:
+                        try:
+                            step_pre = float(lot_sz)
+                            if step_pre and step_pre > 0:
+                                contract_size = math.ceil(contract_size / step_pre) * step_pre
+                        except Exception:
+                            pass
+                    contract_size = round(contract_size, amount_precision)
+                    # 不低于 minSz
+                    if contract_size <= 0 or contract_size < min_amount:
+                        contract_size = max(min_amount, 10 ** (-amount_precision))
+                        if lot_sz:
+                            try:
+                                step_pre2 = float(lot_sz)
+                                if step_pre2 and step_pre2 > 0:
+                                    contract_size = math.ceil(contract_size / step_pre2) * step_pre2
+                            except Exception:
+                                pass
+                        contract_size = round(contract_size, amount_precision)
+                    logger.info(f"🔧 保证金预缩量: 可用={avail:.4f}U 杠杆={lev:.1f}x | 预估保证金={est_margin0:.4f}U → 新数量={contract_size:.8f}")
+            except Exception:
+                pass
+
             logger.info(f"📝 准备下单: {symbol} {side} 金额:{amount:.4f}U 价格:{current_price:.4f} 数量:{contract_size:.8f}")
             try:
                 est_cost = contract_size * current_price
@@ -1196,7 +1231,7 @@ class MACDStrategy:
                                     logger.info(f"✅ 51202缩量重试成功(create_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                             except Exception as _e1:
                                 last_err = _e1
-                                logger.error(f"❌ 51202缩量重试 create_order 异常: {_e1}")
+                                logger.warning(f"⚠️ 51202缩量重试 create_order 异常: {_e1}")
 
                             if not order_id:
                                 try:
@@ -1210,7 +1245,7 @@ class MACDStrategy:
                                         logger.info(f"✅ 51202缩量重试成功(create_market_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                                 except Exception as _e2:
                                     last_err = _e2
-                                    logger.error(f"❌ 51202缩量重试 create_market_order 异常: {_e2}")
+                                    logger.warning(f"⚠️ 51202缩量重试 create_market_order 异常: {_e2}")
 
                             if not order_id:
                                 try:
@@ -1234,7 +1269,7 @@ class MACDStrategy:
                                         logger.info(f"✅ 51202缩量重试成功(OKX原生) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                                 except Exception as _e3:
                                     last_err = _e3
-                                    logger.error(f"❌ 51202缩量重试 OKX原生下单异常: {_e3}")
+                                    logger.warning(f"⚠️ 51202缩量重试 OKX原生下单异常: {_e3}")
 
                             if order_id:
                                 break
@@ -1289,7 +1324,7 @@ class MACDStrategy:
                                     logger.info(f"✅ 51008缩量重试成功(create_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                             except Exception as _g1:
                                 last_err = _g1
-                                logger.error(f"❌ 51008缩量重试 create_order 异常: {_g1}")
+                                logger.warning(f"⚠️ 51008缩量重试 create_order 异常: {_g1}")
 
                             if not order_id:
                                 try:
@@ -1303,7 +1338,7 @@ class MACDStrategy:
                                         logger.info(f"✅ 51008缩量重试成功(create_market_order) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                                 except Exception as _g2:
                                     last_err = _g2
-                                    logger.error(f"❌ 51008缩量重试 create_market_order 异常: {_g2}")
+                                    logger.warning(f"⚠️ 51008缩量重试 create_market_order 异常: {_g2}")
 
                             if not order_id:
                                 try:
@@ -1327,7 +1362,7 @@ class MACDStrategy:
                                         logger.info(f"✅ 51008缩量重试成功(OKX原生) {symbol} {side} 数量:{contract_size:.8f} 订单ID:{order_id}")
                                 except Exception as _g3:
                                     last_err = _g3
-                                    logger.error(f"❌ 51008缩量重试 OKX原生下单异常: {_g3}")
+                                    logger.warning(f"⚠️ 51008缩量重试 OKX原生下单异常: {_g3}")
                             if order_id:
                                 break
                     except Exception:
@@ -2009,7 +2044,7 @@ class MACDStrategy:
             except Exception:
                 atr_period = 14
             try:
-                atr_ratio_thresh = float((os.environ.get('ATR_RATIO_THRESH') or '0.004').strip())
+                atr_ratio_thresh = float((os.environ.get('ATR_RATIO_THRESH') or '0.008').strip())
             except Exception:
                 atr_ratio_thresh = 0.004
             try:
@@ -2079,10 +2114,63 @@ class MACDStrategy:
                 sell_cross = (prev_macd >= prev_signal and current_macd < current_signal)
                 sell_color = (prev_hist >= 0 and current_hist < 0)
 
+                # 柱状图强度阈值（相对当前价格的比例）
+                try:
+                    hist_strength_pct = float((os.environ.get('HIST_STRENGTH_PCT') or '0.0008').strip())
+                except Exception:
+                    hist_strength_pct = 0.0008
+                hist_abs_thresh = float(hist_strength_pct * close_price)
+
+                # 拥挤过滤：最近30根的整体区间与 ATR 对比
+                congested = False
+                try:
+                    last_n = 30
+                    if len(klines) >= last_n:
+                        hi_max = max(k['high'] for k in klines[-last_n:])
+                        lo_min = min(k['low'] for k in klines[-last_n:])
+                        rng = float(hi_max - lo_min)
+                        congested = (atr_val > 0 and rng < (1.8 * atr_val))
+                except Exception:
+                    congested = False
+
+                # 15m EMA20/EMA50共振（仅在开仓时判定）
+                ema_ok_long = True
+                ema_ok_short = True
+                try:
+                    inst_id = self.symbol_to_inst_id(symbol)
+                    resp15 = self.exchange.publicGetMarketCandles({'instId': inst_id, 'bar': '15m', 'limit': '80'})
+                    rows15 = resp15.get('data') if isinstance(resp15, dict) else resp15
+                    closes15 = []
+                    for r in (rows15 or []):
+                        try:
+                            closes15.append(float(r[4]))
+                        except Exception:
+                            continue
+                    if len(closes15) >= 50:
+                        ema20 = pd.Series(np.array(closes15)).ewm(span=20, adjust=False).mean().values[-1]
+                        ema50 = pd.Series(np.array(closes15)).ewm(span=50, adjust=False).mean().values[-1]
+                        ema_ok_long = (ema20 > ema50)
+                        ema_ok_short = (ema20 < ema50)
+                except Exception:
+                    ema_ok_long = True
+                    ema_ok_short = True
+
                 if buy_cross and buy_color:
-                    return {'signal': 'buy', 'reason': '双确认：金叉 + 柱状图由负转正'}
+                    if (abs(prev_hist) < hist_abs_thresh):
+                        return {'signal': 'hold', 'reason': f'柱状图强度不足 |hist_prev|<{hist_strength_pct:.4%}×价'}
+                    if congested:
+                        return {'signal': 'hold', 'reason': '拥挤过滤：区间<1.8×ATR'}
+                    if not ema_ok_long:
+                        return {'signal': 'hold', 'reason': '15m EMA20/EMA50未同向（多头）'}
+                    return {'signal': 'buy', 'reason': '双确认+强度达标+15m同向'}
                 elif sell_cross and sell_color:
-                    return {'signal': 'sell', 'reason': '双确认：死叉 + 柱状图由正转负'}
+                    if (abs(prev_hist) < hist_abs_thresh):
+                        return {'signal': 'hold', 'reason': f'柱状图强度不足 |hist_prev|<{hist_strength_pct:.4%}×价'}
+                    if congested:
+                        return {'signal': 'hold', 'reason': '拥挤过滤：区间<1.8×ATR'}
+                    if not ema_ok_short:
+                        return {'signal': 'hold', 'reason': '15m EMA20/EMA50未同向（空头）'}
+                    return {'signal': 'sell', 'reason': '双确认+强度达标+15m同向'}
                 else:
                     return {'signal': 'hold', 'reason': '等待双确认信号'}
             
