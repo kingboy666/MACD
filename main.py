@@ -352,10 +352,36 @@ class MACDStrategy:
         }
         self.bb_tp_offset = _get_env_float('BB_TP_OFFSET', 0.003)
         self.bb_sl_offset = _get_env_float('BB_SL_OFFSET', 0.002)
+        # 止损参数（布林优先 + ATR 兜底）
+        self.min_sl_pct = _get_env_float('MIN_SL_PCT', 0.06)  # 兼容保留（若未启用动态地板时使用）
+        # 追踪止损激活门槛：盈利达到这两者较大值才开始推进SL
+        self.trail_activate_atr = _get_env_float('TRAIL_ACTIVATE_BY_ATR', 1.0)   # ≥1×ATR
+        self.trail_activate_pct = _get_env_float('TRAIL_ACTIVATE_PCT', 0.012)    # 或 ≥1.2%
+        # 动态地板参数（用于震荡行情自适应加宽初始SL）
+        self.sl_floor_k_atr = _get_env_float('SL_FLOOR_ATR_K', 1.3)
+        self.sl_floor_c_bw = _get_env_float('SL_FLOOR_BW_C', 0.6)
+        self.base_sl_pct_main = _get_env_float('BASE_SL_PCT_MAIN', 0.07)
+        self.base_sl_pct_mid = _get_env_float('BASE_SL_PCT_MID', 0.09)
+        self.base_sl_pct_high = _get_env_float('BASE_SL_PCT_HIGH', 0.12)
+        # 波动分级（可按需扩充/调整）
+        self.symbol_vol_tier: Dict[str, str] = {
+            'BTC/USDT:USDT': 'main',
+            'ETH/USDT:USDT': 'main',
+            'SOL/USDT:USDT': 'main',
+            'XRP/USDT:USDT': 'mid',
+            'ARB/USDT:USDT': 'mid',
+            'ZRO/USDT:USDT': 'mid',
+            'WLD/USDT:USDT': 'mid',
+            'FIL/USDT:USDT': 'mid',
+            'WIF/USDT:USDT': 'high',
+            'DOGE/USDT:USDT': 'high',
+            'PEPE/USDT:USDT': 'high',
+        }
         
         # 启动基线余额与风控参数
         self.starting_balance = self.get_account_balance() or 0.0
-        self.hard_sl_max_loss_pct = _get_env_float('HARD_SL_MAX_LOSS_PCT', 0.03)  # 3%
+        # 暂时关闭硬止损（可用环境变量覆盖重新开启）
+        self.hard_sl_max_loss_pct = _get_env_float('HARD_SL_MAX_LOSS_PCT', 0.0)
         self.account_dd_limit_pct = _get_env_float('ACCOUNT_DD_LIMIT_PCT', 0.20)  # 20%
         self.cb_close_all = _get_env_bool('CB_CLOSE_ALL', True)
         # 强制彻底关闭账户熔断
@@ -384,19 +410,19 @@ class MACDStrategy:
         # ===== 每币种配置(用于追踪止损) =====
         self.symbol_cfg: Dict[str, Dict[str, float | str]] = {
             # 原有币种
-            "ZRO/USDT:USDT": {"period": 14, "n": 2.2, "m": 3.0, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "high"},
-            "WIF/USDT:USDT": {"period": 14, "n": 2.5, "m": 4.0, "trigger_pct": 0.017, "trail_pct": 0.008, "update_basis": "high"},
-            "WLD/USDT:USDT": {"period": 14, "n": 2.0, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"},
-            "FIL/USDT:USDT": {"period": 14, "n": 2.0, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "high"},
+            "ZRO/USDT:USDT": {"period": 14, "n": 2.8, "m": 3.5, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "high"},
+            "WIF/USDT:USDT": {"period": 14, "n": 3.0, "m": 4.5, "trigger_pct": 0.017, "trail_pct": 0.006, "update_basis": "high"},
+            "WLD/USDT:USDT": {"period": 14, "n": 2.8, "m": 3.5, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "close"},
+            "FIL/USDT:USDT": {"period": 14, "n": 2.8, "m": 3.5, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "high"},
             
             # 新增主流币
-            "BTC/USDT:USDT": {"period": 20, "n": 1.5, "m": 3.0, "trigger_pct": 0.008, "trail_pct": 0.004, "update_basis": "high"},
-            "ETH/USDT:USDT": {"period": 18, "n": 1.8, "m": 3.5, "trigger_pct": 0.008, "trail_pct": 0.005, "update_basis": "high"},
-            "SOL/USDT:USDT": {"period": 16, "n": 2.0, "m": 4.0, "trigger_pct": 0.012, "trail_pct": 0.007, "update_basis": "high"},
-            "XRP/USDT:USDT": {"period": 16, "n": 1.8, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"},
+            "BTC/USDT:USDT": {"period": 20, "n": 2.2, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.004, "update_basis": "high"},
+            "ETH/USDT:USDT": {"period": 18, "n": 2.4, "m": 4.0, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "high"},
+            "SOL/USDT:USDT": {"period": 16, "n": 2.4, "m": 4.0, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "high"},
+            "XRP/USDT:USDT": {"period": 16, "n": 2.8, "m": 3.5, "trigger_pct": 0.012, "trail_pct": 0.005, "update_basis": "close"},
             
             # 新增Meme币
-            "DOGE/USDT:USDT": {"period": 16, "n": 2.5, "m": 5.0, "trigger_pct": 0.017, "trail_pct": 0.008, "update_basis": "high"},
+            "DOGE/USDT:USDT": {"period": 16, "n": 3.0, "m": 4.5, "trigger_pct": 0.017, "trail_pct": 0.006, "update_basis": "high"},
             "PEPE/USDT:USDT": {"period": 14, "n": 3.0, "m": 6.0, "trigger_pct": 0.022, "trail_pct": 0.010, "update_basis": "high"},
             
             # 新增L2币
@@ -1301,6 +1327,60 @@ class MACDStrategy:
                     sl = entry_price + n * atr_val
                     tp = entry_price * (1 - tp_pct) if tp_pct else entry_price - m * atr_val
 
+            # 动态地板：floor_pct = max(分级基础、ATR项、带宽项)，震荡越大地板越宽
+            try:
+                # 1) 分级基础百分比
+                tier = self.symbol_vol_tier.get(symbol, 'mid')
+                if tier == 'high':
+                    base_pct = self.base_sl_pct_high
+                elif tier == 'main':
+                    base_pct = self.base_sl_pct_main
+                else:
+                    base_pct = self.base_sl_pct_mid
+                base_pct = max(0.0, float(base_pct))
+                # 2) ATR项（按入场价比例）
+                atr_comp = 0.0
+                if entry_price > 0 and atr_val > 0:
+                    atr_comp = max(0.0, float(self.sl_floor_k_atr) * (atr_val / entry_price))
+                # 3) 布林带带宽项（带宽/中轨），有BB时生效
+                bw_comp = 0.0
+                try:
+                    # 优先尝试使用同周期BB；若前面已算过 upper/middle/band_width 则可重用
+                    kl2 = self.get_klines(symbol, 50)
+                    closes2 = [k['close'] for k in kl2] if kl2 else []
+                    ps_b2 = self.strategy_params.get(symbol, {}) if hasattr(self, 'strategy_params') else {}
+                    bb_period2 = ps_b2.get('bb_period', 20)
+                    bb_k2 = ps_b2.get('bb_k', 2.0)
+                    bb2 = self.calculate_bollinger_bands(closes2, bb_period2, bb_k2) if closes2 else None
+                    if bb2:
+                        mid2 = float(bb2.get('middle') or 0.0)
+                        bw2 = float(bb2.get('band_width') or 0.0)
+                        if mid2 > 0:
+                            bw_comp = max(0.0, float(self.sl_floor_c_bw) * (bw2 / mid2))
+                except Exception:
+                    bw_comp = 0.0
+                floor_pct = max(base_pct, atr_comp, bw_comp)
+                # 应用动态地板
+                if side == 'long':
+                    floor_px = entry_price * (1 - floor_pct)
+                    if sl > floor_px:
+                        sl = floor_px
+                else:
+                    floor_px = entry_price * (1 + floor_pct)
+                    if sl < floor_px:
+                        sl = floor_px
+            except Exception:
+                # 回退到旧的固定地板（保证兼容）
+                min_pct = max(0.0, getattr(self, 'min_sl_pct', 0.06))
+                if side == 'long':
+                    floor_px = entry_price * (1 - min_pct)
+                    if sl > floor_px:
+                        sl = floor_px
+                else:
+                    floor_px = entry_price * (1 + min_pct)
+                    if sl < floor_px:
+                        sl = floor_px
+
             # 写入状态
             side_num = 1.0 if side == 'long' else -1.0
             peak_init = entry_price if side == 'long' else float('inf')
@@ -1330,7 +1410,9 @@ class MACDStrategy:
             if side == 'long':
                 peak = max(self.trailing_peak.get(symbol, entry), basis_price)
                 self.trailing_peak[symbol] = peak
-                activated = (basis_price >= entry * (1 + trigger_pct)) or ((basis_price - entry) >= (1.2 * atr_val))
+                profit_long = (basis_price - entry)
+                act_need = max(self.trail_activate_atr * atr_val, self.trail_activate_pct * entry)
+                activated = profit_long >= act_need
                 atr_sl = basis_price - n * atr_val
                 percent_sl = peak * (1 - trail_pct) if activated else st['sl']
                 new_sl = max(st['sl'], atr_sl, percent_sl)
@@ -1339,7 +1421,9 @@ class MACDStrategy:
             else:
                 trough = min(self.trailing_trough.get(symbol, entry), basis_price)
                 self.trailing_trough[symbol] = trough
-                activated = (basis_price <= entry * (1 - trigger_pct)) or ((entry - basis_price) >= (1.2 * atr_val))
+                profit_short = (entry - basis_price)
+                act_need = max(self.trail_activate_atr * atr_val, self.trail_activate_pct * entry)
+                activated = profit_short >= act_need
                 atr_sl = basis_price + n * atr_val
                 percent_sl = trough * (1 + trail_pct) if activated else st['sl']
                 new_sl = min(st['sl'], atr_sl, percent_sl)
