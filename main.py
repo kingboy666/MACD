@@ -824,7 +824,8 @@ class MACDStrategy:
             for acc in data:
                 for d in acc.get('details', []):
                     if d.get('ccy') == 'USDT':
-                        v = d.get('availBal') or d.get('cashBal') or '0'
+                        # 优先使用合约账户可用权益(更贴近可用保证金)，回退到余额字段
+                        v = d.get('availEq') or d.get('availBal') or d.get('cashBal') or '0'
                         avail = float(v)
                         break
             return avail
@@ -1024,18 +1025,25 @@ class MACDStrategy:
             est_cost0 = contract_size * current_price
             est_margin0 = est_cost0 / max(1.0, lev)
             avail = self.get_account_balance()
-            if avail > 0 and est_margin0 > avail * 0.98:
-                ratio = (avail * 0.98 * lev) / max(1e-12, est_cost0)
-                contract_size = max(0.0, contract_size * max(0.1, min(1.0, ratio)))
-                if lot_sz and step > 0:
+            # 以可用保证金做硬上限：cap_qty = floor(((avail*0.80)*lev)/price, 到 lotSz 步进)
+            cap_usdt = max(0.0, (avail * 0.80))
+            cap_qty_raw = (cap_usdt * lev) / max(current_price, 1e-12)
+            cap_qty = cap_qty_raw
+            if step > 0:
+                cap_qty = math.floor(cap_qty_raw / step) * step
+            cap_qty = round(cap_qty, amount_precision)
+            if cap_qty <= 0:
+                logger.warning(f"⚠️ 可用保证金不足：avail={avail:.4f}U lev={lev} price={current_price:.6f} → 最大数量=0，跳过下单 {symbol}")
+                return False
+            if contract_size > cap_qty:
+                logger.info(f"🔧 按可用保证金限额收缩数量: 原={contract_size:.8f} → 上限={cap_qty:.8f} (avail={avail:.4f}U lev={lev}x)")
+                contract_size = cap_qty
+            # 兜底：不低于交易所最小数量
+            if contract_size < min_amount:
+                contract_size = min_amount
+                if step > 0:
                     contract_size = math.ceil(contract_size / step) * step
                 contract_size = round(contract_size, amount_precision)
-                if contract_size <= 0 or contract_size < min_amount:
-                    contract_size = max(min_amount, 10 ** (-amount_precision))
-                    if lot_sz and step > 0:
-                        contract_size = math.ceil(contract_size / step) * step
-                    contract_size = round(contract_size, amount_precision)
-                logger.info(f"🔧 保证金预缩量: 可用={avail:.4f}U 杠杆={lev:.1f}x | 预估保证金={est_margin0:.4f}U → 新数量={contract_size:.8f}")
 
             if contract_size <= 0:
                 logger.warning(f"⚠️ {symbol}最终数量无效: {contract_size}")
@@ -1076,13 +1084,44 @@ class MACDStrategy:
                 }
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
-                resp = self._safe_call(self.exchange.privatePostTradeOrder, payload)
-                if resp and resp.get('code') == '0':
-                    logger.info(f"✅ 原生下单成功: {symbol} {side} {contract_size:.8f}")
-                    return True
-                else:
-                    logger.error(f"❌ 原生下单失败: {symbol} {side} - {resp}")
-                    return False
+                # 原生下单 + 51008降规模重试（最多2次，每次减半数量，直到不低于minSz）
+                def _try_place(qty: float) -> Optional[dict]:
+                    pp = dict(payload)
+                    pp['sz'] = f"{max(qty, min_amount)}"
+                    return self._safe_call(self.exchange.privatePostTradeOrder, pp)
+                attempt = 0
+                qty = contract_size
+                while attempt <= 2:
+                    resp = None
+                    try:
+                        resp = _try_place(qty)
+                        if resp and str(resp.get('code','')) == '0':
+                            logger.info(f"✅ 原生下单成功: {symbol} {side} {qty:.8f}")
+                            return True
+                        else:
+                            # 如果返回体包含 data.sCode=51008，也按不足处理
+                            data = (resp or {}).get('data', []) if isinstance(resp, dict) else []
+                            scode = str(data[0].get('sCode','')) if data else ''
+                            if scode == '51008':
+                                raise ccxt.InsufficientFunds('Insufficient margin')
+                            logger.error(f"❌ 原生下单失败: {symbol} {side} - {resp}")
+                            return False
+                    except Exception as e:
+                        emsg = str(e)
+                        if ('InsufficientFunds' in emsg or '51008' in emsg) and attempt < 2:
+                            new_qty = qty / 2.0
+                            if step > 0:
+                                new_qty = math.floor(new_qty / step) * step
+                            new_qty = round(new_qty, amount_precision)
+                            if new_qty < min_amount or new_qty <= 0:
+                                logger.error(f"❌ 51008降规模后数量仍低于minSz，放弃下单 {symbol}")
+                                return False
+                            logger.warning(f"⚠️ 51008保证金不足，降规模重试: {qty:.8f} → {new_qty:.8f} (尝试{attempt+1}/2)")
+                            qty = new_qty
+                            attempt += 1
+                            continue
+                        logger.error(f"❌ 原生下单异常: {symbol} {side}: {emsg}")
+                        return False
 
         except Exception as e:
             logger.error(f"❌ 下单失败 {symbol} {side}: {str(e)} - {traceback.format_exc()}")
