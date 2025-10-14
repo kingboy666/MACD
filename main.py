@@ -366,6 +366,8 @@ class MACDStrategy:
         self.allow_cancel_pending = _get_env_bool('ALLOW_CANCEL_PENDING', True)
         self.safe_cancel_only_our_tpsl = _get_env_bool('SAFE_CANCEL_ONLY_OUR_TPSL', True)
         self.tpsl_cl_prefix = _get_env_str('TPSL_CL_PREFIX', 'MACD_TPSL_')
+        # 是否为算法单携带 algoClOrdId（默认关闭以规避部分账户 51000 报错）
+        self.use_algo_client_id = _get_env_bool('USE_ALGO_CLIENT_ID', False)
         
         # ATR 止盈止损参数
         self.atr_sl_n = _get_env_float('ATR_SL_N', 1.8)
@@ -1074,8 +1076,6 @@ class MACDStrategy:
                 }
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
-                else:
-                    payload['posSide'] = 'net'
                 resp = self._safe_call(self.exchange.privatePostTradeOrder, payload)
                 if resp and resp.get('code') == '0':
                     logger.info(f"✅ 原生下单成功: {symbol} {side} {contract_size:.8f}")
@@ -1119,8 +1119,6 @@ class MACDStrategy:
             }
             if self.is_hedge_mode:
                 payload['posSide'] = position['side']
-            else:
-                payload['posSide'] = 'net'
             resp = self._safe_call(self.exchange.privatePostTradeOrder, payload)
             ok = isinstance(resp, dict) and str(resp.get('code', '')) == '0'
             if ok:
@@ -1171,8 +1169,6 @@ class MACDStrategy:
             }
             if self.is_hedge_mode:
                 payload['posSide'] = pos_side
-            else:
-                payload['posSide'] = 'net'
             resp = self._safe_call(self.exchange.privatePostTradeOrder, payload)
             if resp and resp.get('code') == '0':
                 logger.info(f"✅ 减仓成功: {symbol} {side} {qty:.6f}")
@@ -1434,13 +1430,21 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
-                    'algoClOrdId': _gen_algo_id(ord_type),
                 }
+                if self.use_algo_client_id:
+                    payload['algoClOrdId'] = _gen_algo_id(ord_type)
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
-                else:
-                    payload['posSide'] = 'net'
-                return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
+                # 优先带 algoClOrdId 提交；如遇 51000 且消息包含 algoClOrdId，则移除该字段重试一次
+                try:
+                    return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
+                except Exception as e:
+                    emsg = str(e)
+                    if ('51000' in emsg or 'Parameter' in emsg) and ('algoClOrdId' in emsg or 'algoclordid' in emsg.lower()):
+                        payload.pop('algoClOrdId', None)
+                        logger.warning(f"⚠️ algoClOrdId 触发参数错误，移除后重试 ordType={ord_type} {inst_id}")
+                        return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
+                    raise
 
             def _is_success(resp: Any) -> bool:
                 if not isinstance(resp, dict) or str(resp.get('code', '')) not in ('0', '200'):
