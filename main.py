@@ -641,7 +641,7 @@ class MACDStrategy:
                 ord_type = str(it.get('ordType', '')).lower()
                 if not ord_type:
                     continue
-                clid = str(it.get('clOrdId', ''))
+                clid = str(it.get('algoClOrdId') or it.get('clOrdId', ''))
                 if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and not clid.startswith(self.tpsl_cl_prefix):
                     continue
                 aid = it.get('algoId') or it.get('algoID') or it.get('id')
@@ -1422,7 +1422,7 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
-                    'clOrdId': f"{self.tpsl_cl_prefix}{ord_type}_{int(time.time()*1000)}",
+                    'algoClOrdId': f"{self.tpsl_cl_prefix}{ord_type}_{int(time.time()*1000)}",
                 }
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
