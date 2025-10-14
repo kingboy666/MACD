@@ -643,12 +643,24 @@ class MACDStrategy:
             groups: Dict[str, List[Dict[str, str]]] = {}
             # 使用与下单一致的“清洗前缀”进行匹配（仅[A-Za-z0-9_-]）
             safe_prefix = re.sub('[^A-Za-z0-9_-]', '', self.tpsl_cl_prefix or '')
+            # 若为对冲模式，且当前有持仓，则仅撤对应posSide的条件单；否则不按posSide过滤
+            desired_pos_side = None
+            if self.is_hedge_mode:
+                pos_now = self.get_position(symbol, force_refresh=True)
+                if pos_now.get('size', 0) > 0:
+                    desired_pos_side = pos_now.get('side')  # 'long' or 'short'
             for it in data:
                 ord_type = str(it.get('ordType', '')).lower()
                 if not ord_type:
                     continue
+                # 当未使用algoClOrdId标记时，不再按前缀过滤，避免老单残留
+                # 仅当明确启用并存在前缀时才做“只撤自己单”的过滤
                 clid = str(it.get('algoClOrdId') or it.get('clOrdId', ''))
-                if self.safe_cancel_only_our_tpsl and safe_prefix and not clid.startswith(safe_prefix):
+                if self.safe_cancel_only_our_tpsl and self.use_algo_client_id and safe_prefix and not clid.startswith(safe_prefix):
+                    continue
+                # 对冲模式下，如已知当前posSide，则仅撤该posSide的条件单
+                its_pos_side = str(it.get('posSide') or '').lower()
+                if desired_pos_side and its_pos_side and its_pos_side != desired_pos_side:
                     continue
                 aid = it.get('algoId') or it.get('algoID') or it.get('id')
                 if aid:
@@ -1097,6 +1109,29 @@ class MACDStrategy:
                         resp = _try_place(qty)
                         if resp and str(resp.get('code','')) == '0':
                             logger.info(f"✅ 原生下单成功: {symbol} {side} {qty:.8f}")
+                            # 下单成功后立即尝试挂交易所侧TP/SL，避免等待下轮巡检
+                            try:
+                                pos_now = self.get_position(symbol, force_refresh=True)
+                                if pos_now.get('size', 0) > 0:
+                                    kl = self.get_klines(symbol, 50)
+                                    ps = self.per_symbol_params.get(symbol, {})
+                                    atr_p = ps.get('atr_period', 14)
+                                    atr_val = self.calculate_atr(kl, atr_p) if kl else 0.0
+                                    entry_px = pos_now.get('entry_price', 0.0)
+                                    side_now = pos_now.get('side', 'long')
+                                    if entry_px > 0 and atr_val > 0:
+                                        # 初始化本地SL/TP状态
+                                        self._set_initial_sl_tp(symbol, entry_px, atr_val, side_now)
+                                        # 挂交易所侧TP/SL
+                                        okx_ok = self.place_okx_tp_sl(symbol, entry_px, side_now, atr_val)
+                                        if okx_ok:
+                                            logger.info(f"📌 开仓即挂交易所侧TP/SL成功 {symbol}")
+                                        else:
+                                            logger.warning(f"⚠️ 开仓后挂交易所侧TP/SL失败 {symbol}")
+                                    else:
+                                        logger.debug(f"ℹ️ 开仓后TP/SL跳过：entry={entry_px} ATR={atr_val} {symbol}")
+                            except Exception as _e:
+                                logger.warning(f"⚠️ 开仓后挂TP/SL异常 {symbol}: {str(_e)}")
                             return True
                         else:
                             # 如果返回体包含 data.sCode=51008，也按不足处理
@@ -1415,6 +1450,37 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 无有效持仓数量，跳过挂TP/SL {symbol}")
                 return False
 
+            # 若已存在同instId(+posSide)的未完成条件单，则直接跳过挂单，避免重复
+            try:
+                existing = []
+                for _ord in ('oco', 'trigger', 'conditional'):
+                    try:
+                        _resp = self._safe_call(
+                            self.exchange.privateGetTradeOrdersAlgoPending,
+                            {'instType': 'SWAP', 'instId': inst_id, 'ordType': _ord}
+                        )
+                        existing.extend(_resp.get('data', []))
+                    except Exception:
+                        pass
+                if existing:
+                    match_found = False
+                    for it in existing:
+                        if it.get('instId') != inst_id:
+                            continue
+                        if self.is_hedge_mode:
+                            if (it.get('posSide') or '').lower() != pos_side:
+                                continue
+                        match_found = True
+                        break
+                    if match_found:
+                        logger.info(f"ℹ️ 已存在未完成TP/SL条件单，跳过重挂 {symbol}")
+                        self.okx_tp_sl_placed[symbol] = True
+                        self.tp_sl_last_placed[symbol] = time.time()
+                        return True
+            except Exception:
+                # 查询失败不阻塞后续流程
+                pass
+            # 若不存在则清理旧单（在未使用algoClOrdId时也能清理干净）
             self.cancel_symbol_tp_sl(symbol)
             time.sleep(0.3)
 
