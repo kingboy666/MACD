@@ -22,6 +22,8 @@ import pandas as pd
 import numpy as np
 import math
 import traceback
+import random
+import re
 
 # 配置日志 - 使用中国时区和UTF-8编码
 class ChinaTimeFormatter(logging.Formatter):
@@ -637,12 +639,14 @@ class MACDStrategy:
                     # 若某 ordType 不支持或无数据，忽略即可
                     continue
             groups: Dict[str, List[Dict[str, str]]] = {}
+            # 使用与下单一致的“清洗前缀”进行匹配（仅[A-Za-z0-9_-]）
+            safe_prefix = re.sub('[^A-Za-z0-9_-]', '', self.tpsl_cl_prefix or '')
             for it in data:
                 ord_type = str(it.get('ordType', '')).lower()
                 if not ord_type:
                     continue
                 clid = str(it.get('algoClOrdId') or it.get('clOrdId', ''))
-                if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and not clid.startswith(self.tpsl_cl_prefix):
+                if self.safe_cancel_only_our_tpsl and safe_prefix and not clid.startswith(safe_prefix):
                     continue
                 aid = it.get('algoId') or it.get('algoID') or it.get('id')
                 if aid:
@@ -1410,6 +1414,14 @@ class MACDStrategy:
                     sl_trigger = math.ceil(sl_trigger / tick) * tick
                     tp_trigger = math.floor(tp_trigger / tick) * tick
 
+            def _gen_algo_id(ord_type: str) -> str:
+                # 生成符合OKX要求的algoClOrdId：≤32字符，仅[A-Za-z0-9_-]，并加随机串避免重复
+                base = f"{self.tpsl_cl_prefix or ''}{ord_type}_"
+                base = re.sub('[^A-Za-z0-9_-]', '', base)
+                rnd = ''.join(random.choices('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=6))
+                algo_id = f"{base}{rnd}"
+                return algo_id[:32]
+
             def _post_algo(ord_type: str):
                 payload = {
                     'instId': inst_id,
@@ -1422,7 +1434,7 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
-                    'algoClOrdId': f"{self.tpsl_cl_prefix}{ord_type}_{int(time.time()*1000)}",
+                    'algoClOrdId': _gen_algo_id(ord_type),
                 }
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
