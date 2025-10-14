@@ -1410,13 +1410,7 @@ class MACDStrategy:
                     sl_trigger = math.ceil(sl_trigger / tick) * tick
                     tp_trigger = math.floor(tp_trigger / tick) * tick
 
-            def _gen_algo_id(ord_type: str) -> str:
-                # 生成符合OKX要求的algoClOrdId：≤32字符，仅[A-Za-z0-9_-]，并加随机串避免重复
-                base = f"{self.tpsl_cl_prefix or ''}{ord_type}_"
-                base = re.sub('[^A-Za-z0-9_-]', '', base)
-                rnd = ''.join(random.choices('0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZ', k=6))
-                algo_id = f"{base}{rnd}"
-                return algo_id[:32]
+
 
             def _post_algo(ord_type: str):
                 payload = {
@@ -1431,20 +1425,9 @@ class MACDStrategy:
                     'slTriggerPx': f"{sl_trigger}",
                     'slOrdPx': '-1',
                 }
-                if self.use_algo_client_id:
-                    payload['algoClOrdId'] = _gen_algo_id(ord_type)
                 if self.is_hedge_mode:
                     payload['posSide'] = pos_side
-                # 优先带 algoClOrdId 提交；如遇 51000 且消息包含 algoClOrdId，则移除该字段重试一次
-                try:
-                    return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
-                except Exception as e:
-                    emsg = str(e)
-                    if ('51000' in emsg or 'Parameter' in emsg) and ('algoClOrdId' in emsg or 'algoclordid' in emsg.lower()):
-                        payload.pop('algoClOrdId', None)
-                        logger.warning(f"⚠️ algoClOrdId 触发参数错误，移除后重试 ordType={ord_type} {inst_id}")
-                        return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
-                    raise
+                return self._safe_call(self.exchange.privatePostTradeOrderAlgo, payload)
 
             def _is_success(resp: Any) -> bool:
                 if not isinstance(resp, dict) or str(resp.get('code', '')) not in ('0', '200'):
