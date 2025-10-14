@@ -173,7 +173,7 @@ class MACDStrategy:
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
             'WIF/USDT:USDT': '5m',
-            'ZRO/USDT:USDT': '5m',
+            'ZRO/USDT:USDT': '15m',
             'ARB/USDT:USDT': '5m',
             'PEPE/USDT:USDT': '5m',
             # 10m：中等波动
@@ -213,12 +213,12 @@ class MACDStrategy:
                 'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 3.5, 'allow_reverse': True
             },
             'ZRO/USDT:USDT': {
-                'macd': (6, 20, 9), 'atr_period': 14, 'adx_period': 10,
-                'adx_min_trend': 25, 'sl_n': 2.2, 'tp_m': 3.0, 'allow_reverse': True
+                'macd': (12, 36, 18), 'atr_period': 14, 'adx_period': 10,
+                'adx_min_trend': 30, 'sl_n': 2.2, 'tp_m': 3.0, 'allow_reverse': True
             },
             'WIF/USDT:USDT': {
-                'macd': (6, 18, 9), 'atr_period': 14, 'adx_period': 10,
-                'adx_min_trend': 25, 'sl_n': 2.5, 'tp_m': 4.0, 'allow_reverse': True
+                'macd': (8, 26, 12), 'atr_period': 14, 'adx_period': 10,
+                'adx_min_trend': 30, 'sl_n': 1.9, 'tp_m': 4.0, 'tp_pct': 0.012, 'allow_reverse': True
             },
             'WLD/USDT:USDT': {
                 'macd': (9, 34, 13), 'atr_period': 14, 'adx_period': 12,
@@ -235,8 +235,8 @@ class MACDStrategy:
                 'adx_min_trend': 25, 'sl_n': 1.8, 'tp_m': 3.5, 'allow_reverse': True
             },
             'SOL/USDT:USDT': {
-                'macd': (8, 30, 12), 'atr_period': 16, 'adx_period': 12,
-                'adx_min_trend': 23, 'sl_n': 2.0, 'tp_m': 4.0, 'allow_reverse': True
+                'macd': (9, 35, 14), 'atr_period': 16, 'adx_period': 12,
+                'adx_min_trend': 30, 'sl_n': 1.8, 'tp_m': 4.0, 'tp_pct': 0.012, 'allow_reverse': True
             },
             'XRP/USDT:USDT': {
                 'macd': (10, 36, 14), 'atr_period': 16, 'adx_period': 14,
@@ -1360,6 +1360,11 @@ class MACDStrategy:
                         base['m'] = float(p['tp_m'])
                     except Exception:
                         pass
+                if 'tp_pct' in p:
+                    try:
+                        base['tp_pct'] = float(p['tp_pct'])
+                    except Exception:
+                        pass
         except Exception:
             pass
         return base
@@ -1371,14 +1376,20 @@ class MACDStrategy:
                 return
             cfg = self.get_symbol_cfg(symbol)
             n = float(cfg['n']); m = float(cfg['m'])
+            # 支持可选的固定止盈百分比（tp_pct），优先于 ATR×m
+            tp_pct = None
+            try:
+                tp_pct = float(cfg.get('tp_pct')) if 'tp_pct' in cfg else None
+            except Exception:
+                tp_pct = None
             if side == 'long':
                 sl = entry_price - n * atr_val
-                tp = entry_price + m * atr_val
+                tp = (entry_price * (1 + tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price + m * atr_val)
                 side_num = 1.0
                 self.trailing_peak[symbol] = max(entry_price, self.trailing_peak.get(symbol, entry_price))
             else:
                 sl = entry_price + n * atr_val
-                tp = entry_price - m * atr_val
+                tp = (entry_price * (1 - tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price - m * atr_val)
                 side_num = -1.0
                 self.trailing_trough[symbol] = min(entry_price, self.trailing_trough.get(symbol, entry_price)) if symbol in self.trailing_trough else entry_price
             self.sl_tp_state[symbol] = {'sl': float(sl), 'tp': float(tp), 'side': side_num, 'entry': float(entry_price)}
