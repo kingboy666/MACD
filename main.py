@@ -120,6 +120,8 @@ class MACDStrategy:
     """MACD策略类 - 扩展到11个币种"""
     def __init__(self, api_key: str, secret_key: str, passphrase: str):
         """初始化策略"""
+        # SAR 结果缓存：key=(tag, len, last_ts, af_start, af_max) -> last_sar
+        self._sar_cache: Dict[tuple, float] = {}
         # 交易所配置
         self.exchange = ccxt.okx({
             'apiKey': api_key,
@@ -206,6 +208,20 @@ class MACDStrategy:
         }
         
         # ===== 分币种参数 - 精细调优 =====
+        # 分组精细化策略参数（运行时与 per_symbol_params 合并覆盖）
+        self.strategy_params: Dict[str, Dict[str, Any]] = {
+            'BTC/USDT:USDT': {'strategy': 'macd_sar', 'bb_period': 20, 'bb_k': 2.0, 'sar_af_start': 0.02, 'sar_af_max': 0.20},
+            'ETH/USDT:USDT': {'strategy': 'macd_sar', 'bb_period': 20, 'bb_k': 2.0, 'sar_af_start': 0.02, 'sar_af_max': 0.20},
+            'SOL/USDT:USDT': {'strategy': 'macd_sar', 'bb_period': 20, 'bb_k': 2.0, 'sar_af_start': 0.02, 'sar_af_max': 0.20},
+            'WIF/USDT:USDT': {'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
+            'PEPE/USDT:USDT':{'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
+            'DOGE/USDT:USDT':{'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
+            'ZRO/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
+            'WLD/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
+            'FIL/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
+            'XRP/USDT:USDT': {'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 1.8, 'sar_af_start': 0.02, 'sar_af_max': 0.15},
+            'ARB/USDT:USDT': {'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 1.8, 'sar_af_start': 0.02, 'sar_af_max': 0.15},
+        }
         self.per_symbol_params: Dict[str, Dict[str, Any]] = {
             # 原有小币种
             'FIL/USDT:USDT': {
@@ -292,6 +308,33 @@ class MACDStrategy:
         
         # 交易统计
         self.stats = TradingStats()
+
+        # ===== 策略分组与BB/SAR参数（第一阶段以轻量映射接入）=====
+        self.strategy_by_symbol: Dict[str, str] = {
+            # 主流：macd_sar
+            'BTC/USDT:USDT': 'macd_sar',
+            'ETH/USDT:USDT': 'macd_sar',
+            'SOL/USDT:USDT': 'macd_sar',
+            # 高波动：bb_sar
+            'WIF/USDT:USDT': 'bb_sar',
+            'PEPE/USDT:USDT': 'bb_sar',
+            'DOGE/USDT:USDT': 'bb_sar',
+            # 中波动：hybrid
+            'ZRO/USDT:USDT': 'hybrid',
+            'WLD/USDT:USDT': 'hybrid',
+            'FIL/USDT:USDT': 'hybrid',
+            # 震荡：bb_sar
+            'XRP/USDT:USDT': 'bb_sar',
+            'ARB/USDT:USDT': 'bb_sar',
+        }
+        try:
+            self.bb_tp_offset = float((os.environ.get('BB_TP_OFFSET') or '0.003').strip())
+        except Exception:
+            self.bb_tp_offset = 0.003
+        try:
+            self.bb_sl_offset = float((os.environ.get('BB_SL_OFFSET') or '0.002').strip())
+        except Exception:
+            self.bb_sl_offset = 0.002
         
         # 启动基线余额与风控参数
         try:
@@ -1662,30 +1705,100 @@ class MACDStrategy:
                         pass
         except Exception:
             pass
+        # 合并精细化策略参数（覆盖 per_symbol_params 相同键）
+        try:
+            sp = getattr(self, 'strategy_params', {}).get(symbol, {})
+            if isinstance(sp, dict) and sp:
+                # 仅覆盖非 None 值
+                base.update({k: v for k, v in sp.items() if v is not None})
+        except Exception:
+            pass
+        # bb_sar 中轨触碰容差默认值
+        if 'bb_mid_touch_pct' not in base or base.get('bb_mid_touch_pct') is None:
+            base['bb_mid_touch_pct'] = 0.0015
+        # 类型兜底转换
+        if 'bb_period' in base:
+            try:
+                base['bb_period'] = int(base['bb_period'])
+            except Exception:
+                pass
+        for k in ('bb_k', 'sar_af_start', 'sar_af_max', 'bb_mid_touch_pct'):
+            if k in base:
+                try:
+                    base[k] = float(base[k])
+                except Exception:
+                    pass
         return base
 
-    def _set_initial_sl_tp(self, symbol: str, entry_price: float, atr_val: float, side: str):
-        """设置初始 SL/TP"""
+    def get_strategy_for(self, symbol: str) -> str:
+        """返回该symbol的策略类型：macd_sar | bb_sar | hybrid"""
         try:
-            if atr_val <= 0 or entry_price <= 0 or side not in ('long', 'short'):
+            ps = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+            if isinstance(ps, dict) and 'strategy' in ps and ps['strategy']:
+                return str(ps['strategy'])
+        except Exception:
+            pass
+        return self.strategy_by_symbol.get(symbol, 'macd_sar')
+
+    def _set_initial_sl_tp(self, symbol: str, entry_price: float, atr_val: float, side: str):
+        """设置初始 SL/TP：macd_sar 走 ATR；bb_sar/hybrid 走 BB+SAR 方案"""
+        try:
+            if entry_price <= 0 or side not in ('long', 'short'):
                 return
-            cfg = self.get_symbol_cfg(symbol)
-            n = float(cfg['n']); m = float(cfg['m'])
-            # 支持可选的固定止盈百分比（tp_pct），优先于 ATR×m
-            tp_pct = None
-            try:
-                tp_pct = float(cfg.get('tp_pct')) if 'tp_pct' in cfg else None
-            except Exception:
+            strat = self.get_strategy_for(symbol)
+            close_price = float(entry_price)
+            sl = tp = None
+
+            if strat in ('bb_sar', 'hybrid'):
+                # 计算BB与SAR
+                kl = self.get_klines(symbol, 80)
+                if kl and len(kl) >= 25:
+                    closes = [k['close'] for k in kl]
+                    ps = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+                    bb_period = int(ps.get('bb_period', 20)) if isinstance(ps, dict) else 20
+                    bb_k = float(ps.get('bb_k', 2.0)) if isinstance(ps, dict) else (2.5 if strat == 'bb_sar' else 2.2)
+                    bb = self.calculate_bollinger_bands(closes, bb_period, bb_k) or {}
+                    sar_val = self.calculate_sar(kl, float(ps.get('sar_af_start', 0.02)) if isinstance(ps, dict) else (0.01 if strat=='bb_sar' else 0.03),
+                                                    float(ps.get('sar_af_max', 0.2)) if isinstance(ps, dict) else (0.10 if strat=='bb_sar' else 0.25))
+                    upper = float(bb.get('upper', 0) or 0); middle = float(bb.get('middle', 0) or 0); lower = float(bb.get('lower', 0) or 0)
+                    if upper > 0 and middle > 0 and lower > 0:
+                        if side == 'long':
+                            tp = upper * (1.0 + float(self.bb_tp_offset))
+                            # SAR为最终止损边界
+                            if sar_val is not None and sar_val > 0:
+                                sl = max(float(sar_val), middle * (1.0 - float(self.bb_sl_offset)))
+                            else:
+                                sl = middle * (1.0 - float(self.bb_sl_offset))
+                        else:
+                            tp = lower * (1.0 - float(self.bb_tp_offset))
+                            if sar_val is not None and sar_val > 0:
+                                sl = min(float(sar_val), middle * (1.0 + float(self.bb_sl_offset)))
+                            else:
+                                sl = middle * (1.0 + float(self.bb_sl_offset))
+
+            if sl is None or tp is None:
+                # 回退至ATR方案（macd_sar 或 BB数据不足）
+                if atr_val <= 0:
+                    return
+                cfg = self.get_symbol_cfg(symbol)
+                n = float(cfg['n']); m = float(cfg['m'])
                 tp_pct = None
+                try:
+                    tp_pct = float(cfg.get('tp_pct')) if 'tp_pct' in cfg else None
+                except Exception:
+                    tp_pct = None
+                if side == 'long':
+                    sl = entry_price - n * atr_val
+                    tp = (entry_price * (1 + tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price + m * atr_val)
+                else:
+                    sl = entry_price + n * atr_val
+                    tp = (entry_price * (1 - tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price - m * atr_val)
+
+            # 写入状态
+            side_num = 1.0 if side == 'long' else -1.0
             if side == 'long':
-                sl = entry_price - n * atr_val
-                tp = (entry_price * (1 + tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price + m * atr_val)
-                side_num = 1.0
                 self.trailing_peak[symbol] = max(entry_price, self.trailing_peak.get(symbol, entry_price))
             else:
-                sl = entry_price + n * atr_val
-                tp = (entry_price * (1 - tp_pct)) if (tp_pct and tp_pct > 0) else (entry_price - m * atr_val)
-                side_num = -1.0
                 self.trailing_trough[symbol] = min(entry_price, self.trailing_trough.get(symbol, entry_price)) if symbol in self.trailing_trough else entry_price
             self.sl_tp_state[symbol] = {'sl': float(sl), 'tp': float(tp), 'side': side_num, 'entry': float(entry_price)}
         except Exception:
@@ -2020,6 +2133,124 @@ class MACDStrategy:
         except Exception:
             return 0.0
 
+    def calculate_bollinger_bands(self, prices: List[float], period: int = 20, k: float = 2.0) -> Dict[str, Any]:
+        """计算布林带：返回上轨/中轨/下轨及带宽和中轨斜率"""
+        try:
+            if len(prices) < period + 2:
+                return {}
+            s = pd.Series(np.array(prices, dtype=float))
+            mid = s.rolling(window=period, min_periods=period).mean()
+            std = s.rolling(window=period, min_periods=period).std()
+            upper = mid + k * std
+            lower = mid - k * std
+            up_arr = np.asarray(upper)
+            lo_arr = np.asarray(lower)
+            mid_arr = np.asarray(mid)
+            if np.isnan(up_arr[-1]) or np.isnan(lo_arr[-1]) or np.isnan(mid_arr[-1]):
+                return {}
+            width = float((up_arr[-1] - lo_arr[-1]))
+            prev_width = float((up_arr[-2] - lo_arr[-2]))
+            mid_slope = float(mid_arr[-1] - mid_arr[-2]) if not np.isnan(mid_arr[-2]) else 0.0
+            # 计算带宽与20期均值（用于“开口/收口”过滤）
+            bw_arr = None
+            try:
+                bw_arr = (up_arr - lo_arr) / np.where(mid_arr == 0, np.nan, mid_arr)
+            except Exception:
+                bw_arr = None
+            band_width = float(bw_arr[-1]) if isinstance(bw_arr, np.ndarray) and not np.isnan(bw_arr[-1]) else 0.0
+            if isinstance(bw_arr, np.ndarray):
+                last_n = int(20 if bw_arr.shape[0] >= 20 else bw_arr.shape[0])
+                bw_ma20 = float(np.nanmean(bw_arr[-last_n:])) if last_n > 0 else 0.0
+            else:
+                bw_ma20 = 0.0
+            return {
+                'upper': float(up_arr[-1]),
+                'middle': float(mid_arr[-1]),
+                'lower': float(lo_arr[-1]),
+                'prev_width': prev_width,
+                'width': width,
+                'mid_slope': mid_slope,
+                'band_width': band_width,
+                'band_ma20': bw_ma20
+            }
+        except Exception:
+            return {}
+
+    def calculate_sar(self, klines: List[Dict], af_start: float = 0.02, af_max: float = 0.2) -> Optional[float]:
+        """计算抛物线SAR，返回最后一个SAR值（简化实现）"""
+        try:
+            if len(klines) < 3:
+                return None
+            highs = [k['high'] for k in klines]
+            lows = [k['low'] for k in klines]
+            # SAR 结果缓存：按末根时间与长度缓存，降低多币循环重复计算
+            try:
+                if not hasattr(self, '_sar_cache'):
+                    self._sar_cache = {}
+                # 末根时间戳容错转换为整数
+                def _safe_int(x: Any, default_val: int) -> int:
+                    try:
+                        if x is None:
+                            return int(default_val)
+                        if isinstance(x, (int, np.integer)):
+                            return int(x)
+                        xs = str(x).strip()
+                        if xs == '':
+                            return int(default_val)
+                        # 兼容毫秒/秒时间戳字符串
+                        return int(float(xs))
+                    except Exception:
+                        return int(default_val)
+                last_ts_raw = None
+                try:
+                    last_ts_raw = klines[-1].get('ts') or klines[-1].get('timestamp') or klines[-1].get('time')
+                except Exception:
+                    last_ts_raw = None
+                last_ts_safe = _safe_int(last_ts_raw, -1)
+                cache_key = ('sar_last', int(len(klines)), last_ts_safe, float(af_start), float(af_max))
+                sar_cached = self._sar_cache.get(cache_key)
+                if sar_cached is not None:
+                    return float(sar_cached)
+            except Exception:
+                pass
+            # 初始化
+            sar = lows[0]
+            trend = 1  # 1=上升，-1=下降
+            ep = highs[0]
+            af = float(af_start)
+            for i in range(1, len(highs)):
+                prev_sar = sar
+                if trend == 1:
+                    sar = prev_sar + af * (ep - prev_sar)
+                    if lows[i] < sar:
+                        trend = -1
+                        sar = ep
+                        ep = lows[i]
+                        af = float(af_start)
+                    else:
+                        if highs[i] > ep:
+                            ep = highs[i]
+                            af = min(af + af_start, af_max)
+                else:
+                    sar = prev_sar + af * (ep - prev_sar)
+                    if highs[i] > sar:
+                        trend = 1
+                        sar = ep
+                        ep = highs[i]
+                        af = float(af_start)
+                    else:
+                        if lows[i] < ep:
+                            ep = lows[i]
+                            af = min(af + af_start, af_max)
+            # 写回缓存
+            try:
+                self._sar_cache[cache_key] = float(sar)
+            except Exception:
+                pass
+            return float(sar)
+        except Exception:
+            return None
+
     def analyze_symbol(self, symbol: str) -> Dict[str, str]:
         """分析单个交易对"""
         try:
@@ -2109,70 +2340,142 @@ class MACDStrategy:
                 pass
             
             if position['size'] == 0:
-                buy_cross = (prev_macd <= prev_signal and current_macd > current_signal)
-                buy_color = (prev_hist <= 0 and current_hist > 0)
-                sell_cross = (prev_macd >= prev_signal and current_macd < current_signal)
-                sell_color = (prev_hist >= 0 and current_hist < 0)
+                strat = self.get_strategy_for(symbol)
 
-                # 柱状图强度阈值（相对当前价格的比例）
-                try:
-                    hist_strength_pct = float((os.environ.get('HIST_STRENGTH_PCT') or '0.0008').strip())
-                except Exception:
-                    hist_strength_pct = 0.0008
-                hist_abs_thresh = float(hist_strength_pct * close_price)
-
-                # 拥挤过滤：最近30根的整体区间与 ATR 对比
-                congested = False
-                try:
-                    last_n = 30
-                    if len(klines) >= last_n:
-                        hi_max = max(k['high'] for k in klines[-last_n:])
-                        lo_min = min(k['low'] for k in klines[-last_n:])
-                        rng = float(hi_max - lo_min)
-                        congested = (atr_val > 0 and rng < (1.8 * atr_val))
-                except Exception:
-                    congested = False
-
-                # 15m EMA20/EMA50共振（仅在开仓时判定）
-                ema_ok_long = True
-                ema_ok_short = True
-                try:
-                    inst_id = self.symbol_to_inst_id(symbol)
-                    resp15 = self.exchange.publicGetMarketCandles({'instId': inst_id, 'bar': '15m', 'limit': '80'})
-                    rows15 = resp15.get('data') if isinstance(resp15, dict) else resp15
-                    closes15 = []
-                    for r in (rows15 or []):
+                # 先准备BB/SAR（若需要）
+                bb: Dict[str, float] = {}
+                sar_val: Optional[float] = None
+                if strat in ('bb_sar', 'hybrid'):
+                    ps_b = getattr(self, 'per_symbol_params', {}).get(symbol, {})
+                    def _get_num(d: Any, key: str, default: float) -> float:
                         try:
-                            closes15.append(float(r[4]))
+                            if isinstance(d, dict) and key in d:
+                                v = d.get(key)
+                                if v is None:
+                                    return float(default)
+                                if isinstance(v, (int, float)):
+                                    return float(v)
+                                vs = str(v).strip()
+                                return float(vs) if vs != '' else float(default)
                         except Exception:
-                            continue
-                    if len(closes15) >= 50:
-                        ema20 = pd.Series(np.array(closes15)).ewm(span=20, adjust=False).mean().values[-1]
-                        ema50 = pd.Series(np.array(closes15)).ewm(span=50, adjust=False).mean().values[-1]
-                        ema_ok_long = (ema20 > ema50)
-                        ema_ok_short = (ema20 < ema50)
-                except Exception:
+                            pass
+                        return float(default)
+                    bb_period = int(_get_num(ps_b, 'bb_period', 20.0)) if isinstance(ps_b, dict) else 20
+                    # 缺省：高波动=2.5；hybrid=2.2
+                    default_k = 2.5 if strat == 'bb_sar' else 2.2
+                    bb_k = float(_get_num(ps_b, 'bb_k', default_k)) if isinstance(ps_b, dict) else default_k
+                    bb = self.calculate_bollinger_bands(closes, bb_period, bb_k) or {}
+                    sar_val = self.calculate_sar(
+                        klines,
+                        _get_num(ps_b, 'sar_af_start', (0.01 if strat=='bb_sar' else 0.03)),
+                        _get_num(ps_b, 'sar_af_max', (0.10 if strat=='bb_sar' else 0.25))
+                    )
+
+                if strat == 'macd_sar':
+                    # 使用既有MACD增强逻辑（保留）
+                    buy_cross = (prev_macd <= prev_signal and current_macd > current_signal)
+                    buy_color = (prev_hist <= 0 and current_hist > 0)
+                    sell_cross = (prev_macd >= prev_signal and current_macd < current_signal)
+                    sell_color = (prev_hist >= 0 and current_hist < 0)
+
+                    # 柱状图强度阈值（相对当前价格的比例）
+                    try:
+                        hist_strength_pct = float((os.environ.get('HIST_STRENGTH_PCT') or '0.0008').strip())
+                    except Exception:
+                        hist_strength_pct = 0.0008
+                    hist_abs_thresh = float(hist_strength_pct * close_price)
+
+                    # 拥挤过滤
+                    congested = False
+                    try:
+                        last_n = 30
+                        if len(klines) >= last_n:
+                            hi_max = max(k['high'] for k in klines[-last_n:])
+                            lo_min = min(k['low'] for k in klines[-last_n:])
+                            rng = float(hi_max - lo_min)
+                            congested = (atr_val > 0 and rng < (1.8 * atr_val))
+                    except Exception:
+                        congested = False
+
+                    # 15m EMA共振
                     ema_ok_long = True
                     ema_ok_short = True
+                    try:
+                        inst_id = self.symbol_to_inst_id(symbol)
+                        resp15 = self.exchange.publicGetMarketCandles({'instId': inst_id, 'bar': '15m', 'limit': '80'})
+                        rows15 = resp15.get('data') if isinstance(resp15, dict) else resp15
+                        closes15 = []
+                        for r in (rows15 or []):
+                            try:
+                                closes15.append(float(r[4]))
+                            except Exception:
+                                continue
+                        if len(closes15) >= 50:
+                            ema20 = pd.Series(np.array(closes15)).ewm(span=20, adjust=False).mean().values[-1]
+                            ema50 = pd.Series(np.array(closes15)).ewm(span=50, adjust=False).mean().values[-1]
+                            ema_ok_long = (ema20 > ema50)
+                            ema_ok_short = (ema20 < ema50)
+                    except Exception:
+                        ema_ok_long = True
+                        ema_ok_short = True
 
-                if buy_cross and buy_color:
-                    if (abs(prev_hist) < hist_abs_thresh):
-                        return {'signal': 'hold', 'reason': f'柱状图强度不足 |hist_prev|<{hist_strength_pct:.4%}×价'}
-                    if congested:
-                        return {'signal': 'hold', 'reason': '拥挤过滤：区间<1.8×ATR'}
-                    if not ema_ok_long:
-                        return {'signal': 'hold', 'reason': '15m EMA20/EMA50未同向（多头）'}
-                    return {'signal': 'buy', 'reason': '双确认+强度达标+15m同向'}
-                elif sell_cross and sell_color:
-                    if (abs(prev_hist) < hist_abs_thresh):
-                        return {'signal': 'hold', 'reason': f'柱状图强度不足 |hist_prev|<{hist_strength_pct:.4%}×价'}
-                    if congested:
-                        return {'signal': 'hold', 'reason': '拥挤过滤：区间<1.8×ATR'}
-                    if not ema_ok_short:
-                        return {'signal': 'hold', 'reason': '15m EMA20/EMA50未同向（空头）'}
-                    return {'signal': 'sell', 'reason': '双确认+强度达标+15m同向'}
-                else:
-                    return {'signal': 'hold', 'reason': '等待双确认信号'}
+                    if buy_cross and buy_color:
+                        if (abs(prev_hist) < hist_abs_thresh):
+                            return {'signal': 'hold', 'reason': '柱状图强度不足'}
+                        if congested:
+                            return {'signal': 'hold', 'reason': '拥挤过滤'}
+                        if not ema_ok_long:
+                            return {'signal': 'hold', 'reason': '15m EMA不同向(多)'}
+                        return {'signal': 'buy', 'reason': 'MACD双确认+过滤通过'}
+                    elif sell_cross and sell_color:
+                        if (abs(prev_hist) < hist_abs_thresh):
+                            return {'signal': 'hold', 'reason': '柱状图强度不足'}
+                        if congested:
+                            return {'signal': 'hold', 'reason': '拥挤过滤'}
+                        if not ema_ok_short:
+                            return {'signal': 'hold', 'reason': '15m EMA不同向(空)'}
+                        return {'signal': 'sell', 'reason': 'MACD双确认+过滤通过'}
+                    else:
+                        return {'signal': 'hold', 'reason': '等待MACD双确认'}
+
+                elif strat == 'bb_sar':
+                    if not bb or ('upper' not in bb):
+                        return {'signal': 'hold', 'reason': 'BB数据不足'}
+                    upper = float(bb['upper']); middle = float(bb['middle']); lower = float(bb['lower'])
+                    width = float(bb.get('width', 0)); prev_width = float(bb.get('prev_width', width))
+                    mid_slope = float(bb.get('mid_slope', 0))
+                    # 带宽与20期均值的“收口”过滤：band_width < band_ma20 * 0.8 则不开仓
+                    bw = float(bb.get('band_width', 0) or 0)
+                    bw_ma20 = float(bb.get('band_ma20', 0) or 0)
+                    if bw_ma20 > 0 and bw > 0 and bw < bw_ma20 * 0.8:
+                        return {'signal': 'hold', 'reason': '布林收口观望(band)'}
+
+                    price = close_price
+                    # 三线向上：mid_slope>0；价>中轨且> SAR(若有)
+                    cond_buy = (mid_slope > 0 and price > middle and (sar_val is None or price > float(sar_val)))
+                    # 三线向下：mid_slope<0；价<中轨且< SAR(若有)
+                    cond_sell = (mid_slope < 0 and price < middle and (sar_val is None or price < float(sar_val)))
+
+                    if cond_buy:
+                        return {'signal': 'buy', 'reason': 'BB三线向上+价>中轨+SAR下方'}
+                    if cond_sell:
+                        return {'signal': 'sell', 'reason': 'BB三线向下+价<中轨+SAR上方'}
+                    return {'signal': 'hold', 'reason': 'BB条件未满足'}
+
+                else:  # hybrid
+                    if not bb or ('upper' not in bb):
+                        return {'signal': 'hold', 'reason': 'BB数据不足'}
+                    upper = float(bb['upper']); middle = float(bb['middle']); lower = float(bb['lower'])
+                    price = close_price
+
+                    bull_break = (price > upper and (sar_val is None or price > float(sar_val)))
+                    bear_break = (price < lower and (sar_val is None or price < float(sar_val)))
+
+                    if bull_break:
+                        return {'signal': 'buy', 'reason': 'BB上轨突破 + SAR确认'}
+                    if bear_break:
+                        return {'signal': 'sell', 'reason': 'BB下轨跌破 + SAR确认'}
+                    return {'signal': 'hold', 'reason': '等待BB突破+SAR确认'}
             
             else:
                 current_position_side = position['side']
@@ -2293,7 +2596,10 @@ class MACDStrategy:
                                             self.cancel_symbol_tp_sl(symbol)
                                         except Exception:
                                             pass
-                                        okx_ok = self.place_okx_tp_sl(symbol, entry_px, current_position.get('side', 'long'), atr_val)
+                                        entry_px2 = float(self.sl_tp_state.get(symbol, {}).get('entry', 0) or 0)
+                                        okx_ok = False
+                                        if entry_px2 > 0:
+                                            okx_ok = self.place_okx_tp_sl(symbol, entry_px2, current_position.get('side', 'long'), atr_val)
                                         if okx_ok:
                                             logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
                                         else:
