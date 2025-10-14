@@ -913,8 +913,8 @@ class MACDStrategy:
             # 1) 固定目标名义金额（最高优先）
             target_str = _get_env_str('TARGET_NOTIONAL_USDT')
             if target_str:
-                target = max(0.0, float(target_str))
-                logger.info(f"💵 使用固定目标名义金额: {target:.4f}U")
+                target = max(1.0, float(target_str))
+                logger.info(f"💵 使用固定目标名义金额(>=1U): {target:.4f}U")
                 return target
 
             # 2) 基于余额分配 - 方案A: 平均分配到11个币种
@@ -932,7 +932,8 @@ class MACDStrategy:
             allocated_amount *= factor
 
             # 4) 下限/上限
-            min_floor = max(0.0, _get_env_float('MIN_PER_SYMBOL_USDT', 0.1))
+            # 最低名义金额强制不低于1U，即便环境变量设置更低也会提升到1U
+            min_floor = max(1.0, _get_env_float('MIN_PER_SYMBOL_USDT', 1.0))
             max_cap = max(0.0, _get_env_float('MAX_PER_SYMBOL_USDT', 0.0))
 
             if min_floor > 0 and allocated_amount < min_floor:
