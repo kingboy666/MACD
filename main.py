@@ -146,6 +146,35 @@ class TradingStats:
 
 class MACDStrategy:
     """MACD策略类 - 扩展到11个币种"""
+    # 仅对特定交易对的出场行为做覆盖（不依赖环境变量）
+    # 键名说明：
+    # - TRAIL_ACTIVATE_PCT：追踪止损的百分比激活阈值（替代全局 self.trail_activate_pct）
+    # - trail_pct：追踪止损的跟随步长（等效于 cfg['trail_pct']）
+    # - INITIAL_SL_FLOOR_PCT：初始SL的最小亏损比例地板（长: entry*(1-地板)；短: entry*(1+地板)）
+    # - INITIAL_TP_TARGET_PCT：初始TP的最小盈利比例目标（长: >= entry*(1+目标)；短: <= entry*(1-目标)）
+    # - PARTIAL_TP_TIERS：分批止盈阶梯字符串；空字符串表示关闭分批
+    PER_SYMBOL_OVERRIDES: Dict[str, Dict[str, object]] = {
+        'WIF/USDT:USDT': {
+            'TRAIL_ACTIVATE_PCT': 0.05,
+            'trail_pct': 0.012,
+            'INITIAL_SL_FLOOR_PCT': 0.02,
+            'INITIAL_TP_TARGET_PCT': 0.12,
+            'PARTIAL_TP_TIERS': '',
+        },
+        'ARB/USDT:USDT': {
+            'TRAIL_ACTIVATE_PCT': 0.05,
+            'trail_pct': 0.012,
+            'INITIAL_SL_FLOOR_PCT': 0.02,
+            'INITIAL_TP_TARGET_PCT': 0.12,
+            'PARTIAL_TP_TIERS': '',
+        },
+    }
+
+    def get_sym_cfg(self, symbol: str, key: str, default):
+        try:
+            return self.PER_SYMBOL_OVERRIDES.get(symbol, {}).get(key, default)
+        except Exception:
+            return default
     def __init__(self, api_key: str, secret_key: str, passphrase: str):
         """初始化策略"""
         # SAR 结果缓存：key=(tag, len, last_ts, af_start, af_max) -> last_sar
@@ -1142,6 +1171,7 @@ class MACDStrategy:
                     contract_size = round(contract_size, amount_precision)
 
             # 最低保证金阈值（例如 0.5U）：确保名义金额>=阈值*杠杆
+            lev = float(self.symbol_leverage.get(symbol, 20))
             min_margin_usdt = max(0.0, _get_env_float('MIN_MARGIN_USDT', 0.5))
             min_target_usdt = min_margin_usdt * lev
             base_target_usdt = max(amount, min_target_usdt)
@@ -1527,9 +1557,13 @@ class MACDStrategy:
                 return
             cfg = self.get_symbol_cfg(symbol)
             n = cfg['n']; trigger_pct = cfg['trigger_pct']; trail_pct = cfg['trail_pct']
+            # 覆盖追踪步长（仅特定币）
+            trail_pct = float(self.get_sym_cfg(symbol, 'trail_pct', trail_pct) or trail_pct)
             entry = st.get('entry', 0)
             if entry <= 0:
                 return
+            # 覆盖追踪激活阈值（仅特定币）
+            trail_activate_pct_local = float(self.get_sym_cfg(symbol, 'TRAIL_ACTIVATE_PCT', self.trail_activate_pct) or self.trail_activate_pct)
 
             basis_price = current_price
             activated = False
@@ -1538,7 +1572,7 @@ class MACDStrategy:
                 peak = max(self.trailing_peak.get(symbol, entry), basis_price)
                 self.trailing_peak[symbol] = peak
                 profit_long = (basis_price - entry)
-                act_need = max(self.trail_activate_atr * atr_val, self.trail_activate_pct * entry)
+                act_need = max(self.trail_activate_atr * atr_val, trail_activate_pct_local * entry)
                 activated = profit_long >= act_need
                 atr_sl = basis_price - n * atr_val
                 percent_sl = peak * (1 - trail_pct) if activated else st['sl']
@@ -1549,7 +1583,7 @@ class MACDStrategy:
                 trough = min(self.trailing_trough.get(symbol, entry), basis_price)
                 self.trailing_trough[symbol] = trough
                 profit_short = (entry - basis_price)
-                act_need = max(self.trail_activate_atr * atr_val, self.trail_activate_pct * entry)
+                act_need = max(self.trail_activate_atr * atr_val, trail_activate_pct_local * entry)
                 activated = profit_short >= act_need
                 atr_sl = basis_price + n * atr_val
                 percent_sl = trough * (1 + trail_pct) if activated else st['sl']
@@ -1664,8 +1698,9 @@ class MACDStrategy:
     def _maybe_partial_take_profit(self, symbol: str, current_price: float, atr_val: float, side: str):
         """分批止盈：基于 ATR 阶梯，达到阈值即按比例减仓"""
         try:
-            tiers_str = _get_env_str('PARTIAL_TP_TIERS')  # e.g., "1.5:0.3,3.0:0.3"
-            if not tiers_str or atr_val <= 0:
+            # per-symbol 覆盖；空串表示关闭分批
+            tiers_str = self.get_sym_cfg(symbol, 'PARTIAL_TP_TIERS', _get_env_str('PARTIAL_TP_TIERS'))  # e.g., "1.5:0.3,3.0:0.3"
+            if tiers_str == '' or not tiers_str or atr_val <= 0:
                 return
             st = self.sl_tp_state.get(symbol)
             pos = self.get_position(symbol, force_refresh=True)
