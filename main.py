@@ -352,6 +352,8 @@ class MACDStrategy:
         # API 速率限制
         self._last_api_ts: float = 0.0
         self._min_api_interval: float = _get_env_float('OKX_API_MIN_INTERVAL', 0.2)
+        # 下单安全系数（控制名义额度占可用保证金的比例），默认0.80
+        self.order_safety_factor: float = _get_env_float('ORDER_SAFETY_FACTOR', 0.80)
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = _get_env_float('SYMBOL_LOOP_DELAY', 0.3)
@@ -1066,47 +1068,86 @@ class MACDStrategy:
             logger.error(f"❌ 检查挂单失败: {str(e)} - {traceback.format_exc()}")
             return False
     
+    def check_margin_sufficiency(self, symbol: str, amount: float) -> bool:
+        """检查保证金是否足够，避免51008错误"""
+        try:
+            # 获取当前价格
+            inst_id = self.symbol_to_inst_id(symbol)
+            tkr = self._safe_call(self.exchange.publicGetMarketTicker, {'instId': inst_id})
+            d = tkr.get('data', [{}])[0]
+            current_price = float(d.get('last') or d.get('lastPx') or 0.0)
+            
+            if current_price <= 0:
+                logger.error(f"❌ 无法获取{symbol}有效价格，无法检查保证金")
+                return False
+            
+            # 获取杠杆倍数
+            leverage = self.symbol_leverage.get(symbol, 20)
+            
+            # 计算所需保证金
+            required_margin = amount / leverage
+            
+            # 获取可用余额
+            available_balance = self.get_account_balance()
+            
+            # 保留额外20%作为缓冲
+            safe_margin = available_balance * 0.8
+            
+            # 检查保证金是否足够
+            if required_margin > safe_margin:
+                logger.warning(f"⚠️ {symbol}保证金不足: 需要{required_margin:.4f}U, 可用{safe_margin:.4f}U (总余额:{available_balance:.4f}U)")
+                return False
+            
+            # 检查最小保证金要求（调整为0.05U以适应小额账户）
+            min_margin = max(0.05, _get_env_float('MIN_MARGIN_USDT', 0.05))
+            if required_margin < min_margin:
+                logger.warning(f"⚠️ {symbol}保证金低于最小要求{min_margin}U: {required_margin:.4f}U")
+                return False
+            
+            logger.info(f"✅ {symbol}保证金检查通过: 需要{required_margin:.4f}U, 可用{safe_margin:.4f}U")
+            return True
+            
+        except Exception as e:
+            logger.error(f"❌ 检查{symbol}保证金失败: {str(e)} - {traceback.format_exc()}")
+            return False
+
     def calculate_order_amount(self, symbol: str, active_count: Optional[int] = None) -> float:
-        """计算下单金额 - 方案A: 平均分配"""
+        """计算下单金额（不均分）：基于“实时余额×安全系数×单笔比例”，并保证名义≥0.5U×杠杆。"""
         try:
             # 1) 固定目标名义金额（最高优先）
             target_str = _get_env_str('TARGET_NOTIONAL_USDT')
             if target_str:
-                target = max(1.0, float(target_str))
-                logger.info(f"💵 使用固定目标名义金额(>=1U): {target:.4f}U")
+                target = max(0.1, float(target_str))
+                logger.info(f"💵 使用固定目标名义金额: {target:.4f}U")
                 return target
 
-            # 2) 基于余额分配 - 方案A: 平均分配到11个币种
+            # 2) 实时可用余额
             balance = self.get_account_balance()
             if balance <= 0:
                 logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
                 return 0.0
 
-            # 平均分配：总余额 / 11个币种
-            num_symbols = len(self.symbols)  # 11个币种
-            allocated_amount = balance / max(1, num_symbols)
+            # 3) 安全系数与单笔占用比例（串行下单，默认单笔使用“可用×安全系数×50%”）
+            safety = float(getattr(self, 'order_safety_factor', 0.80) or 0.80)
+            per_order_frac = _get_env_float('PER_ORDER_FRACTION', 0.50)
+            per_order_frac = min(max(per_order_frac, 0.05), 1.0)  # 限定 5%~100%
 
-            # 3) 放大因子
-            factor = max(1.0, _get_env_float('ORDER_NOTIONAL_FACTOR', 1.0))
-            allocated_amount *= factor
+            base_budget = balance * safety
+            allocated_amount = base_budget * per_order_frac
 
-            # 4) 下限/上限
-            # 最低名义金额强制不低于1U，即便环境变量设置更低也会提升到1U
-            min_floor = max(1.0, _get_env_float('MIN_PER_SYMBOL_USDT', 1.0))
+            # 4) 名义地板：≥ 0.5U × 杠杆
+            lev = float(self.symbol_leverage.get(symbol, 20))
+            min_target_usdt = 0.5 * lev
+            if allocated_amount < min_target_usdt:
+                allocated_amount = min_target_usdt
+
+            # 5) 上限保护（可选 env）
             max_cap = max(0.0, _get_env_float('MAX_PER_SYMBOL_USDT', 0.0))
-
-            if min_floor > 0 and allocated_amount < min_floor:
-                allocated_amount = min_floor
             if max_cap > 0 and allocated_amount > max_cap:
                 allocated_amount = max_cap
 
-            logger.info(f"💵 资金分配: 模式=平均分配, 总余额={balance:.4f}U, 币种数={num_symbols}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
-            if allocated_amount <= 0:
-                logger.warning(f"⚠️ {symbol}最终分配金额为0，跳过")
-                return 0.0
-
-            return allocated_amount
-
+            logger.info(f"💵 分配(不均分): 余额={balance:.4f}U 安全系数={safety:.2f} 单笔比例={per_order_frac:.2f} → 目标名义={allocated_amount:.4f}U (地板={min_target_usdt:.4f}U)")
+            return float(max(allocated_amount, 0.0))
         except Exception as e:
             logger.error(f"❌ 计算{symbol}下单金额失败: {str(e)} - {traceback.format_exc()}")
             return 0.0
@@ -1117,6 +1158,11 @@ class MACDStrategy:
             if self.dry_run:
                 logger.info(f"🧪 [DRY_RUN] 模拟下单: {symbol} {side} 金额:{amount:.4f}U")
                 return True
+            
+            # 1. 预检查保证金是否足够
+            if not self.check_margin_sufficiency(symbol, amount):
+                logger.error(f"❌ 可用保证金不足以满足{amount:.4f}U或minSz，放弃下单 {symbol}")
+                return False
             
             if self.has_open_orders(symbol):
                 logger.warning(f"⚠️ {symbol}存在未成交订单，先取消")
@@ -1172,9 +1218,9 @@ class MACDStrategy:
                         contract_size = math.ceil(contract_size / step) * step
                     contract_size = round(contract_size, amount_precision)
 
-            # 最低保证金阈值（例如 0.5U）：确保名义金额>=阈值*杠杆
+            # 最低保证金阈值（调整为0.05U以适应小额账户）：确保名义金额>=阈值*杠杆
             lev = float(self.symbol_leverage.get(symbol, 20))
-            min_margin_usdt = max(0.0, _get_env_float('MIN_MARGIN_USDT', 0.5))
+            min_margin_usdt = max(0.0, _get_env_float('MIN_MARGIN_USDT', 0.05))
             min_target_usdt = min_margin_usdt * lev
             base_target_usdt = max(amount, min_target_usdt)
             used_usdt = contract_size * current_price
@@ -1251,6 +1297,14 @@ class MACDStrategy:
                     return False
                 logger.info(f"🔧 按保证金硬上限收缩数量: 原={contract_size:.8f} → {new_qty:.8f} (avail={avail:.4f}U lev={lev}x)")
                 contract_size = new_qty
+
+            # 3. 最终保证金检查（防止边界情况）
+            lev = float(self.symbol_leverage.get(symbol, 20))
+            final_margin = (contract_size * current_price) / max(1.0, lev)
+            final_balance = self.get_account_balance()
+            if final_margin > final_balance * 0.5:  # 使用50%作为安全阈值
+                logger.warning(f"⚠️ 最终保证金检查失败: 需要{final_margin:.4f}U, 可用{final_balance:.4f}U, 放弃下单 {symbol}")
+                return False
 
             logger.info(f"📝 准备下单: {symbol} {side} 金额:{amount:.4f}U 价格:{current_price:.4f} 数量:{contract_size:.8f}")
             est_cost = contract_size * current_price
@@ -2511,7 +2565,7 @@ class MACDStrategy:
         logger.info("⏰ 刷新方式: 实时巡检（每interval秒执行一次，可用环境变量 SCAN_INTERVAL 调整，默认1秒）")
         logger.info(f"🔄 状态同步: 每{self.sync_interval}秒")
         logger.info(f"📊 监控币种: {', '.join(self.symbols)}")
-        logger.info(f"💡 11个币种特性: 支持0.1U起的小额交易，平均分配资金")
+        logger.info(f"💡 11个币种特性: 支持0.1U起的小额交易；优先为有信号的币种分配，串行下单，智能不均分")
         logger.info(self.stats.get_summary())
         logger.info("=" * 70)
 
