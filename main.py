@@ -326,8 +326,8 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = _get_env_float('SYMBOL_LOOP_DELAY', 0.3)
-        # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
-        self.set_leverage_on_start = _get_env_bool('SET_LEVERAGE_ON_START', True)
+        # 启动时是否逐币设置杠杆（默认 False，避免 59669 导致启动失败；需要统一杠杆时可临时设为 True）
+        self.set_leverage_on_start = _get_env_bool('SET_LEVERAGE_ON_START', False)
         
         # 交易统计
         self.stats = TradingStats()
@@ -556,22 +556,100 @@ class MACDStrategy:
                 self.is_hedge_mode = False
                 logger.warning("⚠️ 无法获取持仓模式，假设one-way模式")
             
-            # 按交易对设置杠杆（可选）
+            # 按交易对设置杠杆（仅在与目标不一致时设置；失败仅告警跳过，避免 59669 终止初始化）
             if self.set_leverage_on_start:
                 for symbol in self.symbols:
-                    lev = self.symbol_leverage.get(symbol, 20)
-                    inst_id = self.symbol_to_inst_id(symbol)
-                    leverage_params = {'instId': inst_id, 'lever': str(lev), 'mgnMode': 'cross'}
-                    if self.is_hedge_mode:
-                        self._safe_call(self.exchange.privatePostAccountSetLeverage, {**leverage_params, 'posSide': 'long'})
-                        self._safe_call(self.exchange.privatePostAccountSetLeverage, {**leverage_params, 'posSide': 'short'})
-                    else:
-                        self._safe_call(self.exchange.privatePostAccountSetLeverage, leverage_params)  # 无posSide
-                    logger.info(f"✅ 设置{symbol}杠杆为{lev}倍")
+                    try:
+                        target_lev = float(self.symbol_leverage.get(symbol, 20))
+                        inst_id = self.symbol_to_inst_id(symbol)
+                        cur = self.get_current_leverage(symbol)
+                        if self.is_hedge_mode:
+                            need_set_long = cur.get('long') is None or abs(cur.get('long', 0.0) - target_lev) > 1e-9
+                            need_set_short = cur.get('short') is None or abs(cur.get('short', 0.0) - target_lev) > 1e-9
+                            if not need_set_long and not need_set_short:
+                                logger.info(f"ℹ️ 杠杆一致(hedge) 跳过 {symbol}: long={cur.get('long')} short={cur.get('short')} 目标={target_lev}")
+                                continue
+                            leverage_params = {'instId': inst_id, 'lever': f\"{target_lev}\", 'mgnMode': 'cross'}
+                            if need_set_long:
+                                try:
+                                    self._safe_call(self.exchange.privatePostAccountSetLeverage, {**leverage_params, 'posSide': 'long'})
+                                    logger.info(f"✅ 已设置{symbol} long 杠杆为{target_lev}倍")
+                                except Exception as eL:
+                                    emsg = str(eL)
+                                    if '59669' in emsg:
+                                        logger.warning(f"⚠️ 跳过设置杠杆 {symbol} long: 59669（交叉保证金条件单/追踪/TP/SL/机器人）保持现状")
+                                    else:
+                                        logger.warning(f"⚠️ 跳过设置杠杆 {symbol} long: {emsg}")
+                            if need_set_short:
+                                try:
+                                    self._safe_call(self.exchange.privatePostAccountSetLeverage, {**leverage_params, 'posSide': 'short'})
+                                    logger.info(f"✅ 已设置{symbol} short 杠杆为{target_lev}倍")
+                                except Exception as eS:
+                                    emsg = str(eS)
+                                    if '59669' in emsg:
+                                        logger.warning(f"⚠️ 跳过设置杠杆 {symbol} short: 59669（交叉保证金条件单/追踪/TP/SL/机器人）保持现状")
+                                    else:
+                                        logger.warning(f"⚠️ 跳过设置杠杆 {symbol} short: {emsg}")
+                        else:
+                            cur_any = cur.get('any')
+                            if cur_any is not None and abs(cur_any - target_lev) <= 1e-9:
+                                logger.info(f"ℹ️ 杠杆一致(one-way) 跳过 {symbol}: 当前={cur_any} 目标={target_lev}")
+                                continue
+                            leverage_params = {'instId': inst_id, 'lever': f\"{target_lev}\", 'mgnMode': 'cross'}
+                            try:
+                                self._safe_call(self.exchange.privatePostAccountSetLeverage, leverage_params)
+                                logger.info(f"✅ 已设置{symbol} 杠杆为{target_lev}倍（one-way）")
+                            except Exception as eO:
+                                emsg = str(eO)
+                                if '59669' in emsg:
+                                    logger.warning(f"⚠️ 跳过设置杠杆 {symbol}: 59669（交叉保证金条件单/追踪/TP/SL/机器人）保持现状")
+                                else:
+                                    logger.warning(f"⚠️ 跳过设置杠杆 {symbol}: {emsg}")
+                    except Exception as e_loop:
+                        logger.warning(f"⚠️ 设置杠杆环节异常（已跳过）{symbol}: {str(e_loop)}")
+                        continue
             
         except Exception as e:
             logger.error(f"❌ 交易所设置失败: {str(e)} - {traceback.format_exc()}")
             raise
+
+    def get_current_leverage(self, symbol: str) -> Dict[str, Optional[float]]:
+        """
+        查询OKX当前杠杆信息：
+        - 对冲模式：分别返回 long / short 的杠杆
+        - 单向模式：返回 any（同一个数）
+        """
+        try:
+            inst_id = self.symbol_to_inst_id(symbol)
+            if not inst_id:
+                return {'long': None, 'short': None, 'any': None}
+            resp = self._safe_call(self.exchange.privateGetAccountLeverageInfo, {'instId': inst_id, 'mgnMode': 'cross'})
+            data = (resp or {}).get('data', [])
+            cur_long: Optional[float] = None
+            cur_short: Optional[float] = None
+            cur_any: Optional[float] = None
+            for it in data:
+                if it.get('instId') != inst_id:
+                    continue
+                ps = str(it.get('posSide') or '').lower()
+                lev_val = None
+                for v in (it.get('lever'), it.get('leverLong'), it.get('leverShort')):
+                    try:
+                        if v is not None:
+                            lev_val = float(v)
+                            break
+                    except Exception:
+                        continue
+                if ps == 'long':
+                    cur_long = lev_val
+                elif ps == 'short':
+                    cur_short = lev_val
+                else:
+                    cur_any = lev_val
+            return {'long': cur_long, 'short': cur_short, 'any': cur_any}
+        except Exception as e:
+            logger.warning(f"⚠️ 查询当前杠杆失败 {symbol}: {str(e)}")
+            return {'long': None, 'short': None, 'any': None}
 
     def _load_markets(self):
         """加载市场信息"""
