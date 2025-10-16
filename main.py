@@ -824,10 +824,12 @@ class MACDStrategy:
                 for obj in items:
                     aid = obj['algoId']
                     try:
-                        self._safe_call(self.exchange.privatePostTradeCancelAlgos, {'algoId': aid, 'ordType': ord_type, 'instId': inst_id})
+                        mapped = ('oco' if ord_type in ('tp','sl','oco') else ('trigger' if ord_type == 'trigger' else ('move_order_stop' if ord_type in ('trailing','move_order_stop','move_stop') else 'conditional')))
+                        payload_okx = {'algoIds': [{'algoId': str(aid)}], 'ordType': mapped, 'instId': inst_id}
+                        self._safe_call(self.exchange.privatePostTradeCancelAlgos, payload_okx)
                         total += 1
                     except Exception as _e:
-                        logger.warning(f"⚠️ 撤销失败 {symbol}: ordType={ord_type} algoId={aid} err={_e}")
+                        logger.warning(f"⚠️ 撤销失败 {symbol}: ordType={mapped} algoId={aid} err={_e}")
                         continue
             if total > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
@@ -1227,6 +1229,23 @@ class MACDStrategy:
             if contract_size <= 0:
                 logger.warning(f"⚠️ {symbol}最终数量无效: {contract_size}")
                 return False
+
+            # 发单前的保证金硬校验（避免 51008）：若名义占用 > avail*0.90，则按比例收缩数量
+            lev = float(self.symbol_leverage.get(symbol, 20))
+            avail = self.get_account_balance()
+            est_margin_check = (contract_size * current_price) / max(1.0, lev)
+            margin_cap = max(0.0, avail * 0.90)
+            if est_margin_check > margin_cap and contract_size > 0:
+                shrink_ratio = margin_cap / max(est_margin_check, 1e-12)
+                new_qty = contract_size * max(min(shrink_ratio, 1.0), 0.0)
+                if step > 0:
+                    new_qty = math.floor(new_qty / step) * step
+                new_qty = round(new_qty, amount_precision)
+                if new_qty < min_amount or new_qty <= 0:
+                    logger.warning(f"⚠️ 保证金不足，收缩后低于最小数量，放弃下单 {symbol} (avail={avail:.4f}U)")
+                    return False
+                logger.info(f"🔧 按保证金硬上限收缩数量: 原={contract_size:.8f} → {new_qty:.8f} (avail={avail:.4f}U lev={lev}x)")
+                contract_size = new_qty
 
             logger.info(f"📝 准备下单: {symbol} {side} 金额:{amount:.4f}U 价格:{current_price:.4f} 数量:{contract_size:.8f}")
             est_cost = contract_size * current_price
