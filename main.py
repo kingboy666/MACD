@@ -1230,11 +1230,11 @@ class MACDStrategy:
                 logger.warning(f"⚠️ {symbol}最终数量无效: {contract_size}")
                 return False
 
-            # 发单前的保证金硬校验（避免 51008）：若名义占用 > avail*0.90，则按比例收缩数量
+            # 发单前的保证金硬校验（更保守，避免 51008）：若名义占用 > avail*0.60，则按比例收缩数量
             lev = float(self.symbol_leverage.get(symbol, 20))
             avail = self.get_account_balance()
             est_margin_check = (contract_size * current_price) / max(1.0, lev)
-            margin_cap = max(0.0, avail * 0.90)
+            margin_cap = max(0.0, avail * 0.60)
             if est_margin_check > margin_cap and contract_size > 0:
                 shrink_ratio = margin_cap / max(est_margin_check, 1e-12)
                 new_qty = contract_size * max(min(shrink_ratio, 1.0), 0.0)
@@ -1243,6 +1243,11 @@ class MACDStrategy:
                 new_qty = round(new_qty, amount_precision)
                 if new_qty < min_amount or new_qty <= 0:
                     logger.warning(f"⚠️ 保证金不足，收缩后低于最小数量，放弃下单 {symbol} (avail={avail:.4f}U)")
+                    return False
+                # 二次校验：确保每笔保证金不低于0.5U
+                est_margin_after = (new_qty * current_price) / max(1.0, lev)
+                if est_margin_after < 0.5:
+                    logger.warning(f"⚠️ 收缩后保证金仍低于0.5U，放弃下单 {symbol} (est_margin={est_margin_after:.4f}U)")
                     return False
                 logger.info(f"🔧 按保证金硬上限收缩数量: 原={contract_size:.8f} → {new_qty:.8f} (avail={avail:.4f}U lev={lev}x)")
                 contract_size = new_qty
@@ -1329,20 +1334,37 @@ class MACDStrategy:
                             return False
                     except Exception as e:
                         emsg = str(e)
-                        # 51008: 保证金不足；51202: 市价单数量超过最大值 —— 均执行降规模重试
+                        # 51008: 保证金不足；51202: 市价单数量超过最大值
                         if (('InsufficientFunds' in emsg or '51008' in emsg) or ('51202' in emsg)) and attempt < 2:
-                            new_qty = qty / 2.0
-                            # 应用单笔上限再次限幅
+                            # 一次性计算可承载的安全数量（按 avail*0.60），并满足0.5U地板与minSz
+                            avail_now = self.get_account_balance()
+                            safe_cap_usdt = max(0.0, avail_now * 0.60)
+                            # 单笔上限保护
+                            max_qty_by_avail = (safe_cap_usdt * lev) / max(current_price, 1e-12)
                             if max_mkt and max_mkt > 0:
-                                new_qty = min(new_qty, max_mkt)
+                                max_qty_by_avail = min(max_qty_by_avail, max_mkt)
+                            if step > 0:
+                                max_qty_by_avail = math.floor(max_qty_by_avail / step) * step
+                            max_qty_by_avail = round(max_qty_by_avail, amount_precision)
+                            # 满足0.5U保证金所需的最小数量
+                            min_qty_for_floor = (0.5 * lev) / max(current_price, 1e-12)
+                            if step > 0:
+                                min_qty_for_floor = math.ceil(min_qty_for_floor / step) * step
+                            min_qty_for_floor = max(min_amount, round(min_qty_for_floor, amount_precision))
+                            if max_qty_by_avail < min_qty_for_floor or max_qty_by_avail <= 0:
+                                logger.error(f"❌ 可用保证金不足以满足0.5U地板或minSz，放弃下单 {symbol} (avail={avail_now:.4f}U)")
+                                return False
+                            new_qty = min(qty, max_qty_by_avail)
+                            # 对齐步进与精度
                             if step > 0:
                                 new_qty = math.floor(new_qty / step) * step
                             new_qty = round(new_qty, amount_precision)
+                            if new_qty < min_qty_for_floor:
+                                new_qty = min_qty_for_floor
                             if new_qty < min_amount or new_qty <= 0:
-                                logger.error(f"❌ 降规模后数量仍低于minSz，放弃下单 {symbol}")
+                                logger.error(f"❌ 重新计算后的数量仍低于minSz，放弃下单 {symbol}")
                                 return False
-                            which = '51202上限' if '51202' in emsg else '51008保证金'
-                            logger.warning(f"⚠️ {which}，降规模重试: {qty:.8f} → {new_qty:.8f} (尝试{attempt+1}/2)")
+                            logger.warning(f"⚠️ {'51202上限' if '51202' in emsg else '51008保证金'}，按可用保证金一次性收缩重试: {qty:.8f} → {new_qty:.8f}")
                             qty = new_qty
                             attempt += 1
                             continue
