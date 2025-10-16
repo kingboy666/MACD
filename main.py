@@ -672,6 +672,7 @@ class MACDStrategy:
                     'amount_precision': amt_prec,
                     'price_precision': px_prec,
                     'lot_size': lot_sz,
+                    'max_market_size': (float(it.get('maxMktSz', 0)) if it.get('maxMktSz') is not None else 0.0) or None,
                 }
                 logger.info(f"📊 {symbol} - 最小数量:{min_sz:.8f} 步进:{(lot_sz or 0):.8f} Tick:{tick_sz:.8f}")
             logger.info("✅ 市场信息加载完成")
@@ -684,6 +685,7 @@ class MACDStrategy:
                     'amount_precision': 8,
                     'price_precision': 4,
                     'lot_size': None,
+                    'max_market_size': None,
                 }
     
     def sync_exchange_time(self):
@@ -776,12 +778,9 @@ class MACDStrategy:
                 ord_type = str(it.get('ordType', '')).lower()
                 if not ord_type:
                     continue
-                # 当未使用algoClOrdId标记时，不再按前缀过滤，避免老单残留
-                # 仅当明确启用并存在前缀时才做“只撤自己单”的过滤
                 clid = str(it.get('algoClOrdId') or it.get('clOrdId', ''))
                 if self.safe_cancel_only_our_tpsl and self.use_algo_client_id and safe_prefix and not clid.startswith(safe_prefix):
                     continue
-                # 对冲模式下，如已知当前posSide，则仅撤该posSide的条件单
                 its_pos_side = str(it.get('posSide') or '').lower()
                 if desired_pos_side and its_pos_side and its_pos_side != desired_pos_side:
                     continue
@@ -791,29 +790,16 @@ class MACDStrategy:
             if not groups:
                 return True
             total = 0
+            # 逐个 algoId 撤销，避免批量 JSON 结构导致 50002
             for ord_type, items in groups.items():
-                ids = [x['algoId'] for x in items]
-                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'ordType': ord_type, 'instId': inst_id}
-                payload_arr = {'algoIds': ids, 'ordType': ord_type, 'instId': inst_id}
-                ok_this = False
-                try:
-                    self._safe_call(self.exchange.privatePostTradeCancelAlgos, payload_obj)
-                    ok_this = True
-                except Exception:
+                for obj in items:
+                    aid = obj['algoId']
                     try:
-                        self._safe_call(self.exchange.privatePostTradeCancelAlgos, payload_arr)
-                        ok_this = True
-                    except Exception:
-                        for aid in ids:
-                            try:
-                                self._safe_call(self.exchange.privatePostTradeCancelAlgos, {'algoId': aid, 'ordType': ord_type, 'instId': inst_id})
-                                ok_this = True
-                            except Exception:
-                                continue
-                if ok_this:
-                    total += len(ids)
-                else:
-                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
+                        self._safe_call(self.exchange.privatePostTradeCancelAlgos, {'algoId': aid, 'ordType': ord_type, 'instId': inst_id})
+                        total += 1
+                    except Exception as _e:
+                        logger.warning(f"⚠️ 撤销失败 {symbol}: ordType={ord_type} algoId={aid} err={_e}")
+                        continue
             if total > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
                 return True
@@ -1155,6 +1141,23 @@ class MACDStrategy:
                         contract_size = math.ceil(contract_size / step) * step
                     contract_size = round(contract_size, amount_precision)
 
+            # 最低保证金阈值（例如 0.5U）：确保名义金额>=阈值*杠杆
+            min_margin_usdt = max(0.0, _get_env_float('MIN_MARGIN_USDT', 0.5))
+            min_target_usdt = min_margin_usdt * lev
+            base_target_usdt = max(amount, min_target_usdt)
+            used_usdt = contract_size * current_price
+            if used_usdt < base_target_usdt:
+                need_qty = (base_target_usdt - used_usdt) / current_price
+                incr_step = step if step > 0 else (10 ** (-amount_precision))
+                add_qty = math.ceil(need_qty / incr_step) * incr_step
+                contract_size = round(contract_size + add_qty, amount_precision)
+                # 再次保证不低于交易所最小数量
+                if contract_size < min_amount:
+                    contract_size = max(min_amount, 10 ** (-amount_precision))
+                    if lot_sz and step > 0:
+                        contract_size = math.ceil(contract_size / step) * step
+                    contract_size = round(contract_size, amount_precision)
+
             # 预估保证金并预缩量
             lev = self.symbol_leverage.get(symbol, 20)
             est_cost0 = contract_size * current_price
@@ -1173,6 +1176,17 @@ class MACDStrategy:
             if contract_size > cap_qty:
                 logger.info(f"🔧 按可用保证金限额收缩数量: 原={contract_size:.8f} → 上限={cap_qty:.8f} (avail={avail:.4f}U lev={lev}x)")
                 contract_size = cap_qty
+
+            # 单笔市价单最大数量（maxMktSz）限幅
+            max_mkt = self.markets_info.get(symbol, {}).get('max_market_size')
+            if max_mkt and max_mkt > 0:
+                if contract_size > max_mkt:
+                    logger.info(f"🔧 按交易所单笔上限收缩数量: 原={contract_size:.8f} → 上限={max_mkt:.8f}")
+                    contract_size = max_mkt
+                    if step > 0:
+                        contract_size = math.floor(contract_size / step) * step
+                    contract_size = round(contract_size, amount_precision)
+
             # 兜底：不低于交易所最小数量
             if contract_size < min_amount:
                 contract_size = min_amount
@@ -1266,15 +1280,20 @@ class MACDStrategy:
                             return False
                     except Exception as e:
                         emsg = str(e)
-                        if ('InsufficientFunds' in emsg or '51008' in emsg) and attempt < 2:
+                        # 51008: 保证金不足；51202: 市价单数量超过最大值 —— 均执行降规模重试
+                        if (('InsufficientFunds' in emsg or '51008' in emsg) or ('51202' in emsg)) and attempt < 2:
                             new_qty = qty / 2.0
+                            # 应用单笔上限再次限幅
+                            if max_mkt and max_mkt > 0:
+                                new_qty = min(new_qty, max_mkt)
                             if step > 0:
                                 new_qty = math.floor(new_qty / step) * step
                             new_qty = round(new_qty, amount_precision)
                             if new_qty < min_amount or new_qty <= 0:
-                                logger.error(f"❌ 51008降规模后数量仍低于minSz，放弃下单 {symbol}")
+                                logger.error(f"❌ 降规模后数量仍低于minSz，放弃下单 {symbol}")
                                 return False
-                            logger.warning(f"⚠️ 51008保证金不足，降规模重试: {qty:.8f} → {new_qty:.8f} (尝试{attempt+1}/2)")
+                            which = '51202上限' if '51202' in emsg else '51008保证金'
+                            logger.warning(f"⚠️ {which}，降规模重试: {qty:.8f} → {new_qty:.8f} (尝试{attempt+1}/2)")
                             qty = new_qty
                             attempt += 1
                             continue
