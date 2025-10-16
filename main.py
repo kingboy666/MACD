@@ -381,6 +381,10 @@ class MACDStrategy:
             'DOGE/USDT:USDT': 'high',
             'PEPE/USDT:USDT': 'high',
         }
+
+        # 统一以XRP模板应用到所有交易对（运行期覆盖，不改动原参数存储）
+        self.apply_xrp_template_all = _get_env_bool('APPLY_XRP_FOR_ALL', True)
+        self.xrp_symbol = 'XRP/USDT:USDT'
         
         # 启动基线余额与风控参数
         self.starting_balance = self.get_account_balance() or 0.0
@@ -1307,7 +1311,7 @@ class MACDStrategy:
             if strat in ('bb_sar', 'hybrid'):
                 kl = self.get_klines(symbol, 50)
                 closes = [k['close'] for k in kl]
-                ps_b = self.strategy_params.get(symbol, {})
+                ps_b = self.get_strategy_params(symbol)
                 bb_period = ps_b.get('bb_period', 20)
                 bb_k = ps_b.get('bb_k', 2.5 if strat == 'bb_sar' else 2.2)
                 bb = self.calculate_bollinger_bands(closes, bb_period, bb_k) or {}
@@ -1374,7 +1378,7 @@ class MACDStrategy:
                     # 优先尝试使用同周期BB；若前面已算过 upper/middle/band_width 则可重用
                     kl2 = self.get_klines(symbol, 50)
                     closes2 = [k['close'] for k in kl2] if kl2 else []
-                    ps_b2 = self.strategy_params.get(symbol, {}) if hasattr(self, 'strategy_params') else {}
+                    ps_b2 = self.get_strategy_params(symbol) if hasattr(self, 'strategy_params') else {}
                     bb_period2 = ps_b2.get('bb_period', 20)
                     bb_k2 = ps_b2.get('bb_k', 2.0)
                     bb2 = self.calculate_bollinger_bands(closes2, bb_period2, bb_k2) if closes2 else None
@@ -1516,7 +1520,7 @@ class MACDStrategy:
             if not kl or len(kl) < (self.sar_confirm_bars + 1):
                 return False
             # 计算SAR（使用与BB相同的策略参数组或默认）
-            ps_b = getattr(self, 'strategy_params', {}).get(symbol, {}) if hasattr(self, 'strategy_params') else {}
+            ps_b = self.get_strategy_params(symbol) if hasattr(self, 'strategy_params') else {}
             sar_af_start = ps_b.get('sar_af_start', 0.02)
             sar_af_max = ps_b.get('sar_af_max', 0.2)
             sar_series = None
@@ -1688,7 +1692,7 @@ class MACDStrategy:
             closes_tmp = [k['close'] for k in kl_tmp] if kl_tmp else []
             strong_trend = False
             if closes_tmp:
-                ps_b = self.strategy_params.get(symbol, {})
+                ps_b = self.get_strategy_params(symbol)
                 bb_period = ps_b.get('bb_period', 20)
                 bb_k = ps_b.get('bb_k', 2.0)
                 bbv = self.calculate_bollinger_bands(closes_tmp, bb_period, bb_k)
@@ -1915,11 +1919,15 @@ class MACDStrategy:
             return None
 
     def get_strategy_for(self, symbol: str) -> str:
-        """获取币种策略类型"""
+        """获取币种策略类型（当启用XRP模板时，对所有币种返回XRP的策略类型）"""
+        if getattr(self, 'apply_xrp_template_all', False):
+            return self.strategy_by_symbol.get(getattr(self, 'xrp_symbol', 'XRP/USDT:USDT'), 'bb_sar')
         return self.strategy_by_symbol.get(symbol, 'macd_sar')
 
     def get_symbol_cfg(self, symbol: str) -> Dict:
-        """获取币种配置"""
+        """获取币种配置（当启用XRP模板时，返回XRP的追踪/动态TP/SL配置）"""
+        if getattr(self, 'apply_xrp_template_all', False):
+            return self.symbol_cfg.get(getattr(self, 'xrp_symbol', 'XRP/USDT:USDT'), {})
         return self.symbol_cfg.get(symbol, {})
 
     def calculate_macd(self, prices: List[float]) -> Dict[str, float]:
@@ -1931,6 +1939,12 @@ class MACDStrategy:
         signal = macd.ewm(span=self.signal_period, adjust=False).mean()
         hist = macd - signal
         return {'macd': macd.iloc[-1], 'signal': signal.iloc[-1], 'histogram': hist.iloc[-1]}
+
+    def get_strategy_params(self, symbol: str) -> Dict[str, Any]:
+        """获取策略参数（BB/SAR参数组）。启用XRP模板时，统一返回XRP的参数。"""
+        if getattr(self, 'apply_xrp_template_all', False):
+            return self.strategy_params.get(getattr(self, 'xrp_symbol', 'XRP/USDT:USDT'), {})
+        return self.strategy_params.get(symbol, {})
 
     def calculate_macd_with_params(self, prices: List[float], fast: int, slow: int, signal: int) -> Dict[str, float]:
         """带参数MACD计算"""
@@ -2018,7 +2032,7 @@ class MACDStrategy:
         if position['size'] > 0:
             return {'signal': 'hold', 'reason': '已有持仓，bb_sar不处理平仓'}
         
-        ps_b = self.strategy_params.get(symbol, {})
+        ps_b = self.get_strategy_params(symbol)
         bb_period = ps_b.get('bb_period', 20)
         bb_k = ps_b.get('bb_k', 2.5)
         bb = self.calculate_bollinger_bands(closes, bb_period, bb_k) or {}
