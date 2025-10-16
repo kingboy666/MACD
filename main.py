@@ -569,7 +569,7 @@ class MACDStrategy:
                             if not need_set_long and not need_set_short:
                                 logger.info(f"ℹ️ 杠杆一致(hedge) 跳过 {symbol}: long={cur.get('long')} short={cur.get('short')} 目标={target_lev}")
                                 continue
-                            leverage_params = {'instId': inst_id, 'lever': f\"{target_lev}\", 'mgnMode': 'cross'}
+                            leverage_params = {'instId': inst_id, 'lever': f"{target_lev}", 'mgnMode': 'cross'}
                             if need_set_long:
                                 try:
                                     self._safe_call(self.exchange.privatePostAccountSetLeverage, {**leverage_params, 'posSide': 'long'})
@@ -595,7 +595,7 @@ class MACDStrategy:
                             if cur_any is not None and abs(cur_any - target_lev) <= 1e-9:
                                 logger.info(f"ℹ️ 杠杆一致(one-way) 跳过 {symbol}: 当前={cur_any} 目标={target_lev}")
                                 continue
-                            leverage_params = {'instId': inst_id, 'lever': f\"{target_lev}\", 'mgnMode': 'cross'}
+                            leverage_params = {'instId': inst_id, 'lever': f"{target_lev}", 'mgnMode': 'cross'}
                             try:
                                 self._safe_call(self.exchange.privatePostAccountSetLeverage, leverage_params)
                                 logger.info(f"✅ 已设置{symbol} 杠杆为{target_lev}倍（one-way）")
