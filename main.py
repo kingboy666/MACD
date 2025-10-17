@@ -1201,6 +1201,22 @@ class MACDStrategy:
             logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
             return 0.0
     
+    def get_position_mode(self) -> str:
+        """
+        返回持仓模式：
+        - 双向持仓：返回 'long_short'，下单时使用 posSide=long/short
+        - 净持仓：返回 'net'，下单时不带 posSide
+        """
+        mode = getattr(self, 'position_mode', None)
+        if isinstance(mode, str):
+            m = mode.lower()
+            if m in ('long_short', 'dual', 'hedge'):
+                return 'long_short'
+            if m in ('net', 'oneway'):
+                return 'net'
+        # 默认按双向持仓处理，避免原生下单报错
+        return 'long_short'
+
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
         try:
