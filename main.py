@@ -850,55 +850,46 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。统一按 instId 查询，收集 algoId 批量撤销；不传 ordType/clOrdId。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
-            groups: Dict[str, List[Dict[str, str]]] = {}
+            ids: List[str] = []
             for it in (data or []):
                 try:
-                    ord_type = str(it.get('ordType') or '').lower()
-                    if not ord_type:
-                        continue
-                    clid = str(it.get('clOrdId') or '')
-                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
+                    if str(it.get('instId') or '') != inst_id:
                         continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
                     if aid:
-                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
+                        ids.append(str(aid))
                 except Exception:
                     continue
-            if not groups:
+            if not ids:
                 return True
-            total = 0
-            for ord_type, items in groups.items():
-                ids = [x['algoId'] for x in items]
-                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
-                payload_arr = {'algoIds': ids, 'instId': inst_id}
-                ok_this = False
+            payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
+            payload_arr = {'algoIds': ids, 'instId': inst_id}
+            ok = False
+            try:
+                self.exchange.privatePostTradeCancelAlgos(payload_obj)
+                ok = True
+            except Exception:
                 try:
-                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
-                    ok_this = True
+                    self.exchange.privatePostTradeCancelAlgos(payload_arr)
+                    ok = True
                 except Exception:
-                    try:
-                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
-                        ok_this = True
-                    except Exception:
-                        for aid in ids:
-                            try:
-                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
-                                ok_this = True
-                            except Exception:
-                                continue
-                if ok_this:
-                    total += len(ids)
-                else:
-                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
-            if total > 0:
-                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
+                    ok_any = False
+                    for aid in ids:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
+                            ok_any = True
+                        except Exception:
+                            continue
+                    ok = ok_any
+            if ok:
+                logger.info(f"✅ 撤销 {symbol} 条件单数量: {len(ids)}")
                 return True
             logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
             return False
@@ -1537,6 +1528,12 @@ class MACDStrategy:
             sl = round(sl, px_prec)
             tp = round(tp, px_prec)
             
+            # 挂单前先查询并撤旧，确保无残留TP/SL，避免51088
+            ok_cancel = self.cancel_symbol_tp_sl(symbol)
+            if not ok_cancel:
+                logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
+                return False
+
             cl_prefix = self.tpsl_cl_prefix or 'TPSL_'
             clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
             clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
