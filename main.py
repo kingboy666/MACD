@@ -861,14 +861,35 @@ class MACDStrategy:
 
             logger.info(f"🔄 开始撤销 {symbol} 的条件单")
 
-            # 查询待撤销的算法单
-            try:
-                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-                data = resp.get('data') if isinstance(resp, dict) else resp
-                logger.info(f"📋 获取到 {symbol} 的算法单数量: {len(data or [])}")
-            except Exception as e:
-                logger.warning(f"⚠️ 获取算法单失败 {symbol}: {e}，将尝试直接撤销")
-                data = None
+            # 查询待撤销的算法单 - 尝试多种参数组合
+            data = None
+            ord_types_to_try = [
+                {'instType': 'SWAP', 'instId': inst_id},  # 默认参数
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'conditional'},  # 添加ordType=conditional
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'oco'},  # 添加ordType=oco
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'trigger'},  # 添加ordType=trigger
+            ]
+            
+            for params in ord_types_to_try:
+                try:
+                    logger.debug(f"🔍 查询算法单 {symbol}: 参数={params}")
+                    resp = self.exchange.privateGetTradeOrdersAlgoPending(params)
+                    data = resp.get('data') if isinstance(resp, dict) else resp
+                    logger.info(f"📋 获取到 {symbol} 的算法单数量: {len(data or [])}, 使用参数={params}")
+                    break  # 成功获取数据后退出循环
+                except Exception as e:
+                    error_str = str(e)
+                    logger.debug(f"⚠️ 查询算法单异常 {symbol}: {error_str}")
+                    # 如果是Parameter ordType error，继续尝试下一个参数
+                    if "Parameter ordType error" in error_str:
+                        continue
+                    # 其他错误也尝试继续
+                    else:
+                        continue
+            
+            # 如果所有参数都失败
+            if data is None:
+                logger.warning(f"⚠️ 所有参数组合都无法获取算法单 {symbol}，将尝试直接撤销")
 
             if not data:
                 logger.info(f"✅ {symbol} 没有待撤销的算法单")
@@ -963,10 +984,23 @@ class MACDStrategy:
             t0 = time.time()
             max_wait_time = 3.0
             last_left_count = -1
+            ord_type_index = 0
             
-            while True:
+            # 尝试不同的ordType参数组合
+            check_ord_types = [
+                {'instType': 'SWAP', 'instId': inst_id},  # 默认参数
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'conditional'},  # 添加ordType=conditional
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'oco'},  # 添加ordType=oco
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'trigger'},  # 添加ordType=trigger
+            ]
+            
+            while (time.time() - t0) <= max_wait_time:
                 try:
-                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                    # 使用当前ordType参数组合
+                    current_params = check_ord_types[ord_type_index % len(check_ord_types)]
+                    logger.debug(f"🔍 检查剩余订单 {symbol}: 参数={current_params}")
+                    
+                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending(current_params)
                     d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
                     left_orders = d2 or []
                     left = len(left_orders)
@@ -982,15 +1016,24 @@ class MACDStrategy:
                         last_left_count = left
                     
                     if left == 0:
-                        logger.info(f"✅ 确认 {symbol} 所有订单已清空")
+                        logger.info(f"✅ 确认 {symbol} 所有订单已清空，使用参数={current_params}")
                         break
-                except Exception as e:
-                    logger.warning(f"⚠️ 检查剩余订单时出错 {symbol}: {e}")
-                    # 即使出错也继续尝试检查
-                    pass
                     
-                if time.time() - t0 > max_wait_time:
-                    logger.warning(f"⏰ 等待订单清空超时 {symbol}，已等待{max_wait_time}秒")
+                    # 尝试下一个参数组合
+                    ord_type_index += 1
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    logger.debug(f"⚠️ 检查剩余订单异常 {symbol}: {error_str}")
+                    
+                    # 如果是Parameter ordType error，尝试下一个参数
+                    if "Parameter ordType error" in error_str:
+                        ord_type_index += 1
+                        logger.debug(f"🔄 尝试下一个ordType参数组合 {symbol}")
+                    
+                # 检查是否已超时
+                if (time.time() - t0) > max_wait_time:
+                    logger.warning(f"⏰ 等待订单清空超时 {symbol}，已尝试{ord_type_index+1}种参数组合")
                     break
                 
                 time.sleep(0.3)  # 稍微延长等待时间，减少API调用频率
@@ -1746,23 +1789,40 @@ class MACDStrategy:
             if sl <= 0 or tp <= 0:
                 return False
 
-            # 检查当前仓位是否已有TP/SL订单
-            try:
-                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-                data = resp.get('data') if isinstance(resp, dict) else resp
-                existing_tp_sl = []
-                for it in (data or []):
-                    ord_type = str(it.get('ordType', '')).lower()
-                    if ord_type in ('oco', 'conditional', 'stop', 'limit'):
-                        existing_tp_sl.append(it.get('algoId'))
-                
-                if existing_tp_sl:
-                    logger.info(f"🔍 发现 {symbol} 已有 {len(existing_tp_sl)} 个TP/SL订单，将先撤销")
-                    if not self.cancel_symbol_tp_sl(symbol):
-                        logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
-                        return False
-            except Exception as e:
-                logger.debug(f"检查现有TP/SL订单失败 {symbol}: {e}")
+            # 检查当前仓位是否已有TP/SL订单 - 尝试多种参数组合
+            existing_tp_sl = []
+            ord_types_to_try = [
+                {'instType': 'SWAP', 'instId': inst_id},  # 默认参数
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'conditional'},  # 添加ordType=conditional
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'oco'},  # 添加ordType=oco
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'trigger'},  # 添加ordType=trigger
+            ]
+            
+            for params in ord_types_to_try:
+                try:
+                    logger.debug(f"🔍 检查现有TP/SL订单 {symbol}: 参数={params}")
+                    resp = self.exchange.privateGetTradeOrdersAlgoPending(params)
+                    data = resp.get('data') if isinstance(resp, dict) else resp
+                    for it in (data or []):
+                        ord_type = str(it.get('ordType', '')).lower()
+                        if ord_type in ('oco', 'conditional', 'stop', 'limit'):
+                            existing_tp_sl.append(it.get('algoId'))
+                    
+                    # 找到订单后停止搜索
+                    if existing_tp_sl:
+                        break
+                except Exception as e:
+                    error_str = str(e)
+                    logger.debug(f"⚠️ 检查现有TP/SL订单异常 {symbol}: {error_str}")
+                    # 如果是Parameter ordType error，继续尝试下一个参数
+                    if "Parameter ordType error" not in error_str:
+                        break  # 非参数错误，停止尝试
+            
+            if existing_tp_sl:
+                logger.info(f"🔍 发现 {symbol} 已有 {len(existing_tp_sl)} 个TP/SL订单，将先撤销")
+                if not self.cancel_symbol_tp_sl(symbol):
+                    logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
+                    return False
 
             px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
             tick_sz = 10 ** (-px_prec)
@@ -1797,23 +1857,59 @@ class MACDStrategy:
             if not self.cancel_symbol_tp_sl(symbol):
                 logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
                 return False
-            # 额外等待并轮询（最多2秒）
+            # 额外等待并轮询（最多2秒）使用多参数尝试
             try:
                 t0 = time.time()
-                while True:
-                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-                    d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
-                    left = 0
-                    for it in (d2 or []):
-                        clid = str(it.get('clOrdId') or '')
-                        if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
-                            continue
-                        left += 1
-                    if left == 0 or (time.time() - t0) > 2.0:
-                        break
+                ord_type_index = 0
+                order_confirmed_empty = False
+                
+                # 尝试不同的ordType参数组合
+                check_ord_types = [
+                    {'instType': 'SWAP', 'instId': inst_id},  # 默认参数
+                    {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'conditional'},  # 添加ordType=conditional
+                    {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'oco'},  # 添加ordType=oco
+                    {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'trigger'},  # 添加ordType=trigger
+                ]
+                
+                while (time.time() - t0) <= 2.0 and not order_confirmed_empty:
+                    try:
+                        # 使用当前ordType参数组合
+                        current_params = check_ord_types[ord_type_index % len(check_ord_types)]
+                        logger.debug(f"🔍 确认订单清空 {symbol}: 参数={current_params}")
+                        
+                        resp2 = self.exchange.privateGetTradeOrdersAlgoPending(current_params)
+                        d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                        left = 0
+                        for it in (d2 or []):
+                            clid = str(it.get('clOrdId') or '')
+                            if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
+                                continue
+                            left += 1
+                        
+                        if left == 0:
+                            logger.info(f"✅ 确认订单已清空 {symbol}: 参数={current_params}")
+                            order_confirmed_empty = True
+                            break
+                        
+                        # 尝试下一个参数组合
+                        ord_type_index += 1
+                        
+                    except Exception as e:
+                        error_str = str(e)
+                        logger.debug(f"⚠️ 确认订单清空异常 {symbol}: {error_str}")
+                        
+                        # 如果是Parameter ordType error，尝试下一个参数
+                        if "Parameter ordType error" in error_str:
+                            ord_type_index += 1
+                        
                     time.sleep(0.2)
-            except Exception:
-                pass
+                
+                if not order_confirmed_empty:
+                    logger.warning(f"⚠️ 无法完全确认订单清空 {symbol}，但将继续尝试挂单")
+                    # 最后再次尝试撤销，确保没有残留订单
+                    self.cancel_symbol_tp_sl(symbol)
+            except Exception as e:
+                logger.debug(f"⚠️ 订单轮询确认异常 {symbol}: {e}")
 
             # 构建 OCO 参数：一向模式不传 posSide
             pos_mode = self.get_position_mode()
@@ -1885,27 +1981,80 @@ class MACDStrategy:
             # 额外等待并轮询（最多3秒）确保订单清空
             logger.info(f"⏳ 等待并确认订单清空 {symbol}")
             t0 = time.time()
-            while True:
+            
+            # 尝试不同的ordType参数组合
+            ord_types_to_try = [
+                {'instType': 'SWAP', 'instId': inst_id},  # 默认参数
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'conditional'},  # 添加ordType=conditional
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'oco'},  # 添加ordType=oco
+                {'instType': 'SWAP', 'instId': inst_id, 'ordType': 'trigger'},  # 添加ordType=trigger
+            ]
+            
+            ord_type_index = 0
+            orders_confirmed_empty = False
+            
+            while (time.time() - t0) <= 3.0:
                 try:
-                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                    # 尝试当前ordType参数组合
+                    current_params = ord_types_to_try[ord_type_index % len(ord_types_to_try)]
+                    logger.debug(f"🔍 检查待处理订单 {symbol}: 参数={current_params}")
+                    
+                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending(current_params)
                     d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                    
+                    # 计算需要考虑的订单数量
                     left = 0
                     for it in (d2 or []):
                         clid = str(it.get('clOrdId') or '')
                         if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
                             continue
                         left += 1
+                    
+                    # 如果没有订单，标记为已清空
                     if left == 0:
-                        logger.info(f"✅ 确认订单已清空 {symbol}")
+                        logger.info(f"✅ 确认订单已清空 {symbol}: 参数={current_params}")
+                        orders_confirmed_empty = True
                         break
-                    elif (time.time() - t0) > 3.0:
-                        logger.warning(f"⚠️ 等待订单清空超时 {symbol}，剩余{left}个订单")
-                        break
-                    logger.debug(f"⏳ 等待订单清空，当前剩余{left}个订单")
-                    time.sleep(0.3)
+                    
+                    # 记录剩余订单数量
+                    logger.debug(f"⏳ 等待订单清空，当前剩余{left}个订单: 参数={current_params}")
+                    
+                    # 如果使用了当前ordType并返回了订单，尝试下一个参数组合
+                    ord_type_index += 1
+                    
                 except Exception as e:
-                    logger.warning(f"⚠️ 检查待处理订单异常 {symbol}: {str(e)}")
-                    time.sleep(0.3)
+                    error_str = str(e)
+                    logger.debug(f"⚠️ 检查待处理订单异常 {symbol}: {error_str}")
+                    
+                    # 如果遇到Parameter ordType error，尝试下一个参数组合
+                    if "Parameter ordType error" in error_str:
+                        ord_type_index += 1
+                        logger.debug(f"🔄 尝试下一个ordType参数组合 {symbol}")
+                    
+                # 检查是否已超时
+                if (time.time() - t0) > 3.0:
+                    logger.warning(f"⚠️ 等待订单清空超时 {symbol}，尝试了{ord_type_index+1}种参数组合")
+                    break
+                
+                time.sleep(0.3)
+            
+            # 如果订单未确认清空，再次尝试最终清理
+            if not orders_confirmed_empty:
+                logger.warning(f"⚠️ 订单未确认清空，执行最终清理 {symbol}")
+                # 尝试最终的撤销操作，使用所有可能的ordType
+                final_ord_types = ['conditional', 'oco', 'trigger']
+                for final_ord_type in final_ord_types:
+                    try:
+                        cancel_params = {
+                            'instType': 'SWAP',
+                            'instId': inst_id,
+                            'ordType': final_ord_type
+                        }
+                        logger.debug(f"🔄 最终清理尝试 {symbol}: ordType={final_ord_type}")
+                        self.exchange.privateCancelTradeOrdersAlgo(cancel_params)
+                        time.sleep(0.2)
+                    except Exception:
+                        pass
             
             # 构建止损条件单
             sl_params = {
