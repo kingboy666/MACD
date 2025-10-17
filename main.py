@@ -2062,8 +2062,8 @@ class MACDStrategy:
                 'ordType': 'conditional',
                 'side': 'sell' if side == 'long' else 'buy',
                 'tdMode': 'cross',
-                'triggerPx': str(sl),
-                'ordPx': '-1',  # 市价
+                'slTriggerPx': str(sl),  # 使用slTriggerPx而不是triggerPx
+                'slOrdPx': '-1',  # 市价，使用slOrdPx而不是ordPx
                 'closeFraction': '1',
             }
             if pos_mode == 'long_short':
@@ -2075,8 +2075,8 @@ class MACDStrategy:
                 'ordType': 'conditional',
                 'side': 'sell' if side == 'long' else 'buy',
                 'tdMode': 'cross',
-                'triggerPx': str(tp),
-                'ordPx': '-1',  # 市价
+                'tpTriggerPx': str(tp),  # 使用tpTriggerPx而不是triggerPx
+                'tpOrdPx': '-1',  # 市价，使用tpOrdPx而不是ordPx
                 'closeFraction': '1',
             }
             if pos_mode == 'long_short':
