@@ -855,65 +855,106 @@ class MACDStrategy:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
+                
+            # 获取所有挂单
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
-            ids: List[str] = []
-            order_types: Dict[str, str] = {}  # 存储每个algoId对应的ordType
+            
+            # 按ordType分组收集algoId
+            conditional_ids = []
+            oco_ids = []
+            trigger_ids = []
+            move_order_stop_ids = []
             
             for it in (data or []):
                 try:
                     if str(it.get('instId') or '') != inst_id:
                         continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
-                    if aid:
-                        aid_str = str(aid)
-                        ids.append(aid_str)
-                        # 保存订单类型，默认为"conditional"
-                        order_types[aid_str] = it.get('ordType', 'conditional')
-                except Exception:
+                    if not aid:
+                        continue
+                        
+                    aid_str = str(aid)
+                    ord_type = it.get('ordType', '')
+                    
+                    # 根据订单类型分组
+                    if ord_type == 'oco':
+                        oco_ids.append(aid_str)
+                    elif ord_type == 'trigger':
+                        trigger_ids.append(aid_str)
+                    elif ord_type == 'move_order_stop':
+                        move_order_stop_ids.append(aid_str)
+                    else:
+                        # 默认为conditional类型
+                        conditional_ids.append(aid_str)
+                        
+                    logger.debug(f"找到{symbol}条件单: algoId={aid_str}, ordType={ord_type}")
+                except Exception as e:
+                    logger.debug(f"处理条件单信息异常: {e}")
                     continue
                     
-            if not ids:
+            if not (conditional_ids or oco_ids or trigger_ids or move_order_stop_ids):
                 return True
                 
-            # 添加ordType参数到请求中
-            payload_obj = {
-                'algoIds': [{'algoId': x, 'ordType': order_types.get(x, 'conditional')} for x in ids], 
-                'instId': inst_id
-            }
-            payload_arr = {
-                'algoIds': ids, 
-                'instId': inst_id,
-                'ordType': 'conditional'  # 默认使用conditional类型
-            }
+            # 分类型撤单
+            ok = True
             
-            ok = False
-            try:
-                self.exchange.privatePostTradeCancelAlgos(payload_obj)
-                ok = True
-            except Exception as e:
-                logger.debug(f"尝试第一种撤单方式失败: {e}")
+            # 撤销conditional类型订单
+            if conditional_ids:
                 try:
-                    self.exchange.privatePostTradeCancelAlgos(payload_arr)
-                    ok = True
+                    self.exchange.privatePostTradeCancelAlgos({
+                        'algoIds': conditional_ids,
+                        'instId': inst_id,
+                        'ordType': 'conditional'
+                    })
+                    logger.info(f"✅ 撤销 {symbol} conditional类型条件单: {len(conditional_ids)}个")
                 except Exception as e:
-                    logger.debug(f"尝试第二种撤单方式失败: {e}")
-                    ok_any = False
-                    for aid in ids:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({
-                                'algoId': aid, 
-                                'instId': inst_id,
-                                'ordType': order_types.get(aid, 'conditional')
-                            })
-                            ok_any = True
-                        except Exception:
-                            continue
-                    ok = ok_any
+                    logger.warning(f"⚠️ 撤销 {symbol} conditional类型条件单失败: {e}")
+                    ok = False
+                    
+            # 撤销oco类型订单
+            if oco_ids:
+                try:
+                    self.exchange.privatePostTradeCancelAlgos({
+                        'algoIds': oco_ids,
+                        'instId': inst_id,
+                        'ordType': 'oco'
+                    })
+                    logger.info(f"✅ 撤销 {symbol} oco类型条件单: {len(oco_ids)}个")
+                except Exception as e:
+                    logger.warning(f"⚠️ 撤销 {symbol} oco类型条件单失败: {e}")
+                    ok = False
+                    
+            # 撤销trigger类型订单
+            if trigger_ids:
+                try:
+                    self.exchange.privatePostTradeCancelAlgos({
+                        'algoIds': trigger_ids,
+                        'instId': inst_id,
+                        'ordType': 'trigger'
+                    })
+                    logger.info(f"✅ 撤销 {symbol} trigger类型条件单: {len(trigger_ids)}个")
+                except Exception as e:
+                    logger.warning(f"⚠️ 撤销 {symbol} trigger类型条件单失败: {e}")
+                    ok = False
+                    
+            # 撤销move_order_stop类型订单
+            if move_order_stop_ids:
+                try:
+                    self.exchange.privatePostTradeCancelAlgos({
+                        'algoIds': move_order_stop_ids,
+                        'instId': inst_id,
+                        'ordType': 'move_order_stop'
+                    })
+                    logger.info(f"✅ 撤销 {symbol} move_order_stop类型条件单: {len(move_order_stop_ids)}个")
+                except Exception as e:
+                    logger.warning(f"⚠️ 撤销 {symbol} move_order_stop类型条件单失败: {e}")
+                    ok = False
+            total_count = len(conditional_ids) + len(oco_ids) + len(trigger_ids) + len(move_order_stop_ids)
             if ok:
-                logger.info(f"✅ 撤销 {symbol} 条件单数量: {len(ids)}")
+                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total_count}个")
                 return True
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：部分或全部撤销失败")
             return False
         except Exception as e:
             logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
