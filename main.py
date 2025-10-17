@@ -854,17 +854,28 @@ class MACDStrategy:
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
+                logger.info(f"⚠️ {symbol} 无法转换为有效的instId，跳过撤销条件单")
                 return True
                 
             # 获取所有挂单
-            resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-            data = resp.get('data') if isinstance(resp, dict) else resp
+            try:
+                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                data = resp.get('data') if isinstance(resp, dict) else resp
+                if not data:
+                    logger.info(f"✅ {symbol} 没有待撤销的条件单")
+                    return True
+            except Exception as e:
+                logger.warning(f"⚠️ 获取 {symbol} 条件单失败: {e}")
+                return False
             
             # 按ordType分组收集algoId
             conditional_ids = []
             oco_ids = []
             trigger_ids = []
             move_order_stop_ids = []
+            
+            # 记录每个algoId对应的原始ordType，用于错误处理
+            id_to_type = {}
             
             for it in (data or []):
                 try:
@@ -876,6 +887,7 @@ class MACDStrategy:
                         
                     aid_str = str(aid)
                     ord_type = it.get('ordType', '')
+                    id_to_type[aid_str] = ord_type
                     
                     # 根据订单类型分组
                     if ord_type == 'oco':
@@ -894,6 +906,7 @@ class MACDStrategy:
                     continue
                     
             if not (conditional_ids or oco_ids or trigger_ids or move_order_stop_ids):
+                logger.info(f"✅ {symbol} 没有需要撤销的条件单")
                 return True
                 
             # 分类型撤单
@@ -902,6 +915,7 @@ class MACDStrategy:
             # 撤销conditional类型订单
             if conditional_ids:
                 try:
+                    # 尝试批量撤销
                     self.exchange.privatePostTradeCancelAlgos({
                         'algoIds': conditional_ids,
                         'instId': inst_id,
@@ -909,8 +923,19 @@ class MACDStrategy:
                     })
                     logger.info(f"✅ 撤销 {symbol} conditional类型条件单: {len(conditional_ids)}个")
                 except Exception as e:
-                    logger.warning(f"⚠️ 撤销 {symbol} conditional类型条件单失败: {e}")
-                    ok = False
+                    logger.warning(f"⚠️ 批量撤销 {symbol} conditional类型条件单失败: {e}")
+                    # 尝试逐个撤销
+                    for aid in conditional_ids:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({
+                                'algoIds': [aid],
+                                'instId': inst_id,
+                                'ordType': 'conditional'
+                            })
+                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
+                        except Exception as e2:
+                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
+                            ok = False
                     
             # 撤销oco类型订单
             if oco_ids:
@@ -922,8 +947,19 @@ class MACDStrategy:
                     })
                     logger.info(f"✅ 撤销 {symbol} oco类型条件单: {len(oco_ids)}个")
                 except Exception as e:
-                    logger.warning(f"⚠️ 撤销 {symbol} oco类型条件单失败: {e}")
-                    ok = False
+                    logger.warning(f"⚠️ 批量撤销 {symbol} oco类型条件单失败: {e}")
+                    # 尝试逐个撤销
+                    for aid in oco_ids:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({
+                                'algoIds': [aid],
+                                'instId': inst_id,
+                                'ordType': 'oco'
+                            })
+                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
+                        except Exception as e2:
+                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
+                            ok = False
                     
             # 撤销trigger类型订单
             if trigger_ids:
@@ -935,8 +971,19 @@ class MACDStrategy:
                     })
                     logger.info(f"✅ 撤销 {symbol} trigger类型条件单: {len(trigger_ids)}个")
                 except Exception as e:
-                    logger.warning(f"⚠️ 撤销 {symbol} trigger类型条件单失败: {e}")
-                    ok = False
+                    logger.warning(f"⚠️ 批量撤销 {symbol} trigger类型条件单失败: {e}")
+                    # 尝试逐个撤销
+                    for aid in trigger_ids:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({
+                                'algoIds': [aid],
+                                'instId': inst_id,
+                                'ordType': 'trigger'
+                            })
+                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
+                        except Exception as e2:
+                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
+                            ok = False
                     
             # 撤销move_order_stop类型订单
             if move_order_stop_ids:
@@ -948,8 +995,20 @@ class MACDStrategy:
                     })
                     logger.info(f"✅ 撤销 {symbol} move_order_stop类型条件单: {len(move_order_stop_ids)}个")
                 except Exception as e:
-                    logger.warning(f"⚠️ 撤销 {symbol} move_order_stop类型条件单失败: {e}")
-                    ok = False
+                    logger.warning(f"⚠️ 批量撤销 {symbol} move_order_stop类型条件单失败: {e}")
+                    # 尝试逐个撤销
+                    for aid in move_order_stop_ids:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({
+                                'algoIds': [aid],
+                                'instId': inst_id,
+                                'ordType': 'move_order_stop'
+                            })
+                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
+                        except Exception as e2:
+                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
+                            ok = False
+                    
             total_count = len(conditional_ids) + len(oco_ids) + len(trigger_ids) + len(move_order_stop_ids)
             if ok:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total_count}个")
