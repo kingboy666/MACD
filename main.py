@@ -1347,6 +1347,35 @@ class MACDStrategy:
             logger.error(f"❌ 创建订单失败 {symbol}: {str(e)}")
             return False
     
+    def _set_initial_sl_tp(self, symbol: str, entry: float, atr: float, side: str) -> bool:
+        """初始化 SL/TP（基于 ATR 与每币参数 n/m），写入 sl_tp_state"""
+        try:
+            cfg = self.symbol_cfg.get(symbol, {})
+            n = float(cfg.get('n', 2.0))
+            m = float(cfg.get('m', 3.0))
+            atr = max(0.0, float(atr or 0.0))
+            entry = float(entry or 0.0)
+            if entry <= 0:
+                return False
+
+            if str(side).lower() == 'long':
+                sl = max(0.0, entry - n * atr)
+                tp = max(0.0, entry + m * atr)
+            else:
+                sl = max(0.0, entry + n * atr)
+                tp = max(0.0, entry - m * atr)
+
+            self.sl_tp_state[symbol] = {
+                'entry': entry,
+                'sl': sl,
+                'tp': tp
+            }
+            logger.info(f"🧩 初始化SL/TP {symbol} side={side}: entry={entry:.6f} SL={sl:.6f} TP={tp:.6f} (n={n}, m={m}, ATR={atr:.6f})")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 初始化SL/TP失败 {symbol}: {e}")
+            return False
+
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
         """挂OKX侧TP/SL条件单"""
         try:
@@ -1555,6 +1584,16 @@ class MACDStrategy:
             'strong_trend': ema_trend == macd_trend and ema_trend != 'neutral'
         }
     
+    def get_category(self, symbol: str) -> str:
+        """返回币种分类（blue_chip/mainnet/infrastructure/emerging/meme），默认 unknown"""
+        try:
+            for cat, lst in (self.coin_categories or {}).items():
+                if symbol in lst:
+                    return cat
+        except Exception:
+            pass
+        return 'unknown'
+
     def check_long_signal(self, df, symbol):
         """优化版做多信号检测"""
         if len(df) < 5:
