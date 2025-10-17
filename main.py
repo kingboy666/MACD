@@ -237,12 +237,12 @@ class MACDStrategy:
             'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '5m',
+            'WIF/USDT:USDT': '15m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '15m',
+            'PEPE/USDT:USDT': '15m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '5m',
+            'DOGE/USDT:USDT': '15m',
             'XRP/USDT:USDT': '15m',
         }
         
@@ -255,7 +255,7 @@ class MACDStrategy:
             'meme': ['DOGE/USDT:USDT', 'WIF/USDT:USDT', 'PEPE/USDT:USDT']
         }
         
-        # === 优化后的MACD参数 ===
+        # === 优化后的MACD参数（对齐 RSI.TXT） ===
         self.macd_params = {
             'BTC/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
             'ETH/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
@@ -263,14 +263,14 @@ class MACDStrategy:
             'XRP/USDT:USDT': {'fast': 7, 'slow': 17, 'signal': 9},
             'ARB/USDT:USDT': {'fast': 6, 'slow': 15, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'ZRO/USDT:USDT': {'fast': 6, 'slow': 14, 'signal': 9},
             'WLD/USDT:USDT': {'fast': 5, 'slow': 13, 'signal': 9},
             'DOGE/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
-            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'WIF/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
             'PEPE/USDT:USDT': {'fast': 4, 'slow': 11, 'signal': 8}
         }
         
-        # === 优化后的RSI参数 ===
+        # === 优化后的RSI参数（对齐 RSI.TXT） ===
         self.rsi_params = {
             'BTC/USDT:USDT': 14,
             'ETH/USDT:USDT': 14,
@@ -278,14 +278,14 @@ class MACDStrategy:
             'XRP/USDT:USDT': 12,
             'ARB/USDT:USDT': 11,
             'FIL/USDT:USDT': 9,
-            'ZRO/USDT:USDT': 14,
+            'ZRO/USDT:USDT': 10,
             'WLD/USDT:USDT': 9,
             'DOGE/USDT:USDT': 7,
             'WIF/USDT:USDT': 7,
             'PEPE/USDT:USDT': 6
         }
         
-        # === 动态超买超卖阈值 ===
+        # === 动态超买超卖阈值（对齐 RSI.TXT） ===
         self.rsi_thresholds = {
             'BTC/USDT:USDT': {'overbought': 70, 'oversold': 30},
             'ETH/USDT:USDT': {'overbought': 70, 'oversold': 30},
@@ -317,7 +317,7 @@ class MACDStrategy:
             'ARB/USDT:USDT': 'combo',
         }
         
-        # === 优化后的止损止盈 ===
+        # === 优化后的止损（对齐 RSI.TXT；止盈数组维持不变） ===
         self.stop_loss = {
             'BTC/USDT:USDT': 2.0,
             'ETH/USDT:USDT': 2.0,
@@ -514,6 +514,12 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = 0.3
+        # 风险百分比（每笔占用余额百分比），默认0.5%，可用环境变量 RISK_PERCENT 覆盖
+        try:
+            rp_str = (os.environ.get('RISK_PERCENT') or '0.5').strip()
+            self.risk_percent = max(0.0, float(rp_str))
+        except Exception:
+            self.risk_percent = 0.5
         # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
         self.set_leverage_on_start = False
         
@@ -555,7 +561,7 @@ class MACDStrategy:
         self.partial_tp_done: Dict[str, set] = {}
         # 撤单/标记 安全控制
         self.allow_cancel_pending = True
-        self.safe_cancel_only_our_tpsl = True
+        self.safe_cancel_only_our_tpsl = False
         self.tpsl_cl_prefix = 'MACD_TPSL_'
         
         # ATR 止盈止损参数
@@ -569,8 +575,10 @@ class MACDStrategy:
         self.tp_boost_map: Dict[str, float] = {s: 1.0 for s in self.symbols}
         # TP/SL重挂冷却与阈值
         self.tp_sl_last_placed: Dict[str, float] = {}
-        self.tp_sl_refresh_interval = 300
+        self.tp_sl_refresh_interval = int(os.environ.get('TP_SL_REFRESH_INTERVAL', '300'))
         self.tp_sl_min_delta_ticks = 2
+        # 价格缓存，用于计算价格变动幅度
+        self.last_price_cache: Dict[str, float] = {}
         
         # ===== 每币种配置(用于追踪止损) =====
         self.symbol_cfg: Dict[str, Dict[str, float | str]] = {
@@ -671,7 +679,17 @@ class MACDStrategy:
                 return func(*args, **kwargs)
             except Exception as e:
                 msg = str(e)
-                is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
+                # 扩展瞬时/限频错误的重试判断范围
+                is_rate = any(s in msg for s in (
+                    '50011',             # Too Many Requests
+                    'Too Many Requests',
+                    'rate limit',
+                    'ETIMEDOUT',
+                    'timeout',
+                    'NetworkError',
+                    'ConnectionReset',
+                    'ECONNRESET'
+                ))
                 if not is_rate or i >= retries:
                     raise
                 wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
@@ -834,61 +852,95 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（OCO/TP/SL算法单）。修复OKX API参数问题"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
-            resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-            data = resp.get('data') if isinstance(resp, dict) else resp
-            groups: Dict[str, List[Dict[str, str]]] = {}
+
+            # 查询待撤销的算法单
+            try:
+                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                data = resp.get('data') if isinstance(resp, dict) else resp
+            except Exception as e:
+                logger.debug(f"获取算法单失败 {symbol}: {e}")
+                data = None
+
+            if not data:
+                return True
+
+            # 收集所有相关算法单（不限制 clOrdId 前缀，优先清空残留以避免 51088）
+            algo_ids = []
             for it in (data or []):
                 try:
-                    ord_type = str(it.get('ordType') or '').lower()
-                    if not ord_type:
-                        continue
-                    clid = str(it.get('clOrdId') or '')
-                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
-                        continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
                     if aid:
-                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
+                        algo_ids.append(str(aid))
                 except Exception:
                     continue
-            if not groups:
+
+            if not algo_ids:
                 return True
-            total = 0
-            for ord_type, items in groups.items():
-                ids = [x['algoId'] for x in items]
-                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
-                payload_arr = {'algoIds': ids, 'instId': inst_id}
-                ok_this = False
-                try:
-                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
-                    ok_this = True
-                except Exception:
+
+            # 修复：使用正确的API参数格式
+            ok_cnt = 0
+            try:
+                # 方法1：尝试批量撤销（使用新格式）
+                cancel_params = {
+                    'instId': inst_id,
+                    'algoIds': ','.join(algo_ids)  # 改为逗号分隔的字符串
+                }
+                self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                ok_cnt = len(algo_ids)
+            except Exception as e1:
+                logger.debug(f"批量撤销失败 {symbol}: {e1}，尝试逐个撤销")
+                # 方法2：逐个撤销
+                for aid in algo_ids:
                     try:
-                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
-                        ok_this = True
-                    except Exception:
-                        for aid in ids:
-                            try:
-                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
-                                ok_this = True
-                            except Exception:
-                                continue
-                if ok_this:
-                    total += len(ids)
-                else:
-                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
-            if total > 0:
-                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
-                return True
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
-            return False
+                        # 使用单独的algoId参数
+                        cancel_params = {
+                            'instId': inst_id,
+                            'algoId': aid
+                        }
+                        self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                        ok_cnt += 1
+                    except Exception as e2:
+                        logger.debug(f"逐个撤销也失败 {symbol} algoId={aid}: {e2}")
+                        # 方法3：尝试使用ordType（如果其他方法失败）
+                        try:
+                            cancel_params = {
+                                'instId': inst_id,
+                                'algoId': aid,
+                                'ordType': 'conditional'  # 添加ordType参数
+                            }
+                            self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                            ok_cnt += 1
+                            logger.debug(f"使用ordType参数成功撤销 {symbol} algoId={aid}")
+                        except Exception as e3:
+                            logger.warning(f"所有方法撤销失败 {symbol} algoId={aid}: {e3}")
+
+            if ok_cnt > 0:
+                logger.info(f"✅ 撤销 {symbol} 条件单成功: {ok_cnt} 个")
+
+            # 轮询确认 pending 清空（最多2.0秒）
+            t0 = time.time()
+            while True:
+                try:
+                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                    d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                    left = len(d2 or [])
+                    if left == 0:
+                        break
+                except Exception:
+                    break
+                if time.time() - t0 > 2.0:
+                    break
+                time.sleep(0.2)
+
+            return True
         except Exception as e:
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
-            return False
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单异常: {e}")
+            return True
     
     def sync_all_status(self):
         """同步所有状态"""
@@ -1145,6 +1197,33 @@ class MACDStrategy:
                 factor = 1.0
             target *= factor
 
+            # 3.5) 类别加权与最小保证金/名义金额约束，避免订单太小不够覆盖手续费
+            try:
+                cat = self.get_category(symbol)
+            except Exception:
+                cat = 'unknown'
+            cat_mult_map = {'blue_chip': 1.5, 'mainnet': 1.3, 'infrastructure': 1.2, 'emerging': 1.1, 'meme': 1.0}
+            target *= float(cat_mult_map.get(cat, 1.0))
+
+            # 最小保证金（确保 required_margin ≥ MIN_MARGIN_USDT）
+            try:
+                min_margin = max(0.0, float((os.environ.get('MIN_MARGIN_USDT') or '1.0').strip()))
+            except Exception:
+                min_margin = 1.0
+            # 最小名义金额（确保订单名义金额 ≥ MIN_PROFITABLE_NOTIONAL_USDT）
+            try:
+                min_notional = max(0.0, float((os.environ.get('MIN_PROFITABLE_NOTIONAL_USDT') or '5.0').strip()))
+            except Exception:
+                min_notional = 5.0
+            try:
+                lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+            except Exception:
+                lev = 20.0
+            # 保证金阈值换算到名义金额：target ≥ min_margin * lev
+            target = max(target, min_margin * max(1.0, lev))
+            # 名义金额最低限制
+            target = max(target, min_notional)
+
             # 4) 下限/上限
             def _to_float(env_name: str, default: float) -> float:
                 try:
@@ -1185,6 +1264,64 @@ class MACDStrategy:
             logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
             return 0.0
     
+    def get_position_mode(self) -> str:
+        """
+        返回持仓模式：
+        - 双向持仓：返回 'long_short'，下单时使用 posSide=long/short
+        - 净持仓：返回 'net'，下单时不带 posSide
+        """
+        mode = getattr(self, 'position_mode', None)
+        if isinstance(mode, str):
+            m = mode.lower()
+            if m in ('long_short', 'dual', 'hedge'):
+                return 'long_short'
+            if m in ('net', 'oneway'):
+                return 'net'
+        # 默认按双向持仓处理，避免原生下单报错
+        return 'long_short'
+
+    def close_position_exchange(self, symbol: str) -> bool:
+        """本地看门狗平仓：在 OCO 失败或未挂出时，触达阈值立即以市价平仓"""
+        try:
+            pos = self.get_position(symbol, force_refresh=True)
+            size = float(pos.get('size', 0) or 0)
+            if size <= 0:
+                logger.info(f"ℹ️ {symbol} 当前无持仓，无需看门狗平仓")
+                return True
+            side_now = str(pos.get('side', 'none') or 'none').lower()
+            if side_now not in ('long', 'short'):
+                logger.warning(f"⚠️ {symbol} 持仓方向未知({side_now})，跳过看门狗平仓")
+                return False
+            inst_id = self.symbol_to_inst_id(symbol)
+            # 反向成交
+            side = 'sell' if side_now == 'long' else 'buy'
+            pos_mode = self.get_position_mode()
+            td_mode = 'cross'
+            params_okx = {
+                'instId': inst_id,
+                'tdMode': td_mode,
+                'side': side,
+                'sz': str(size),
+                'ordType': 'market',
+            }
+            if pos_mode == 'long_short':
+                params_okx['posSide'] = side_now  # 指定当前持仓方向用于减仓
+            try:
+                resp = self.exchange.privatePostTradeOrder(params_okx)
+                data = resp.get('data') if isinstance(resp, dict) else resp
+                ok = bool(data and isinstance(data, list) and data[0] and (data[0].get('sCode','0') == '0' or data[0].get('ordId')))
+                if ok:
+                    logger.info(f"🛡️ 看门狗市价平仓成功 {symbol}: {side_now}->{side} 数量={size}")
+                    return True
+                logger.warning(f"⚠️ 看门狗平仓返回异常 {symbol}: {data}")
+                return False
+            except Exception as e:
+                logger.error(f"❌ 看门狗平仓失败 {symbol}: {e}")
+                return False
+        except Exception as e:
+            logger.error(f"❌ 看门狗平仓异常 {symbol}: {e}")
+            return False
+
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
         try:
@@ -1361,29 +1498,63 @@ class MACDStrategy:
             return False
     
     def _set_initial_sl_tp(self, symbol: str, entry: float, atr: float, side: str) -> bool:
-        """初始化 SL/TP（基于 ATR 与每币参数 n/m），写入 sl_tp_state"""
+        """初始化 SL/TP（优先百分比，ATR 仅参考；含波动率自适应），写入 sl_tp_state"""
         try:
-            cfg = self.symbol_cfg.get(symbol, {})
-            n = float(cfg.get('n', 2.0))
-            m = float(cfg.get('m', 3.0))
-            atr = max(0.0, float(atr or 0.0))
             entry = float(entry or 0.0)
+            atr = max(0.0, float(atr or 0.0))
             if entry <= 0:
                 return False
 
-            if str(side).lower() == 'long':
-                sl = max(0.0, entry - n * atr)
-                tp = max(0.0, entry + m * atr)
-            else:
-                sl = max(0.0, entry + n * atr)
-                tp = max(0.0, entry - m * atr)
+            # 1) 百分比参数
+            sl_pct = float(self.stop_loss.get(symbol, 2.0) or 2.0) / 100.0
+            tp_list = self.take_profit.get(symbol, [1.5])
+            tp_pct0 = float(tp_list[0] if tp_list else 1.5) / 100.0
 
-            self.sl_tp_state[symbol] = {
-                'entry': entry,
-                'sl': sl,
-                'tp': tp
-            }
-            logger.info(f"🧩 初始化SL/TP {symbol} side={side}: entry={entry:.6f} SL={sl:.6f} TP={tp:.6f} (n={n}, m={m}, ATR={atr:.6f})")
+            # 2) 波动率自适应：低波动收紧SL、略收紧TP；高波动放宽SL、TP略远
+            try:
+                df = self.get_klines(symbol, 120)
+                if not df.empty and len(df) >= 50:
+                    vol = self.calculate_volatility(df)
+                    avg_vol = float(df['volatility'].tail(50).mean())
+                    if avg_vol and avg_vol > 0:
+                        if vol < avg_vol * 0.8:
+                            sl_pct *= 0.85
+                            tp_pct0 *= 0.95
+                            logger.debug(f"🎛️ 低波动自适应 {symbol}: SL×0.85 TP×0.95 (vol={vol:.2f} avg={avg_vol:.2f})")
+                        elif vol > avg_vol * 1.5:
+                            sl_pct *= 1.15
+                            tp_pct0 *= 1.05
+                            logger.debug(f"🎛️ 高波动自适应 {symbol}: SL×1.15 TP×1.05 (vol={vol:.2f} avg={avg_vol:.2f})")
+            except Exception:
+                pass
+
+            # 3) 1H 多头 TP 放大倍数（仅多头适用）
+            boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
+            if str(side).lower() == 'long' and boost > 1.0:
+                tp_pct0 *= boost
+
+            # 4) 计算百分比版 SL/TP
+            if str(side).lower() == 'long':
+                sl = entry * (1.0 - sl_pct)
+                tp = entry * (1.0 + tp_pct0)
+            else:
+                sl = entry * (1.0 + sl_pct)
+                tp = entry * (1.0 - tp_pct0)
+
+            # 5) ATR 作为保护（若ATR极小或极大，限制极端值）
+            if atr > 0:
+                cfg = self.symbol_cfg.get(symbol, {})
+                n = float(cfg.get('n', 2.0))
+                m = float(cfg.get('m', 3.0))
+                if str(side).lower() == 'long':
+                    sl = max(sl, entry - n * atr * 0.5)  # 不比 ATR*0.5 更紧
+                    tp = min(tp, entry + m * atr * 2.0)  # 不比 ATR*2.0 更远
+                else:
+                    sl = min(sl, entry + n * atr * 0.5)
+                    tp = max(tp, entry - m * atr * 2.0)
+
+            self.sl_tp_state[symbol] = {'entry': entry, 'sl': float(sl), 'tp': float(tp)}
+            logger.info(f"🧩 初始化SL/TP {symbol} side={side}: entry={entry:.6f} SL={sl:.6f} TP={tp:.6f} (%SL={sl_pct*100:.2f}%, %TP={tp_pct0*100:.2f}%) ATR={atr:.6f}")
             return True
         except Exception as e:
             logger.warning(f"⚠️ 初始化SL/TP失败 {symbol}: {e}")
@@ -1481,61 +1652,192 @@ class MACDStrategy:
             pass
 
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
-        """挂OKX侧TP/SL条件单"""
+        """挂OKX侧TP/SL条件单（OCO）。确保撤旧成功并 pending 清空后再挂，避免51088；一向模式不传posSide。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return False
             st = self.sl_tp_state.get(symbol, {})
-            sl = st.get('sl', 0.0)
-            tp = st.get('tp', 0.0)
+            sl = float(st.get('sl', 0.0) or 0.0)
+            tp = float(st.get('tp', 0.0) or 0.0)
             if sl <= 0 or tp <= 0:
                 return False
-            
-            sl_ticks = self.tp_sl_min_delta_ticks
-            px_prec = self.markets_info.get(symbol, {}).get('price_precision', 4)
+
+            # 检查当前仓位是否已有TP/SL订单
+            try:
+                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                data = resp.get('data') if isinstance(resp, dict) else resp
+                existing_tp_sl = []
+                for it in (data or []):
+                    ord_type = str(it.get('ordType', '')).lower()
+                    if ord_type in ('oco', 'conditional', 'stop', 'limit'):
+                        existing_tp_sl.append(it.get('algoId'))
+                
+                if existing_tp_sl:
+                    logger.info(f"🔍 发现 {symbol} 已有 {len(existing_tp_sl)} 个TP/SL订单，将先撤销")
+                    if not self.cancel_symbol_tp_sl(symbol):
+                        logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
+                        return False
+            except Exception as e:
+                logger.debug(f"检查现有TP/SL订单失败 {symbol}: {e}")
+
+            px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
             tick_sz = 10 ** (-px_prec)
-            # 应用 1H 多头 TP 放大倍数（仅多头适用）
+            # 应用 1H 多头 TP 放大倍数（仅多头）
             boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
             if side == 'long' and boost > 1.0:
-                try:
-                    tp *= boost
-                except Exception:
-                    pass
+                tp = tp * boost
+            # 获取最新价用于合规修正
+            try:
+                tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
+                if isinstance(tkr, dict):
+                    d = tkr.get('data') or []
+                    last = float(d[0].get('last') or d[0].get('lastPx') or 0.0) if d else 0.0
+                else:
+                    last = 0.0
+            except Exception:
+                last = 0.0
+            # 合规关系修正：多头 sl < last < tp；空头 tp < last < sl
+            if last > 0:
+                if side == 'long':
+                    if not (sl < last < tp):
+                        sl = min(sl, last - tick_sz)
+                        tp = max(tp, last + tick_sz)
+                else:
+                    if not (tp < last < sl):
+                        tp = min(tp, last - tick_sz)
+                        sl = max(sl, last + tick_sz)
             sl = round(sl, px_prec)
             tp = round(tp, px_prec)
-            
-            cl_prefix = self.tpsl_cl_prefix or 'TPSL_'
-            clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
-            clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
-            
+
+            # 先撤旧，并确认 pending 清空
+            if not self.cancel_symbol_tp_sl(symbol):
+                logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
+                return False
+            # 额外等待并轮询（最多2秒）
+            try:
+                t0 = time.time()
+                while True:
+                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                    d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                    left = 0
+                    for it in (d2 or []):
+                        clid = str(it.get('clOrdId') or '')
+                        if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
+                            continue
+                        left += 1
+                    if left == 0 or (time.time() - t0) > 2.0:
+                        break
+                    time.sleep(0.2)
+            except Exception:
+                pass
+
+            # 构建 OCO 参数：一向模式不传 posSide
+            pos_mode = self.get_position_mode()
             params_oco = {
                 'instId': inst_id,
                 'ordType': 'oco',
                 'side': 'sell' if side == 'long' else 'buy',
-                'posSide': side,
                 'tdMode': 'cross',
                 'tpTriggerPx': str(tp),
-                'tpOrdPx': '-1',  # 市价
+                'tpOrdPx': '-1',
                 'slTriggerPx': str(sl),
-                'slOrdPx': '-1',  # 市价
-                'closeFraction': '1',  # 全仓触发
+                'slOrdPx': '-1',
+                'closeFraction': '1',
             }
+            if pos_mode == 'long_short':
+                params_oco['posSide'] = side
+
             try:
                 resp_oco = self.exchange.privatePostTradeOrderAlgo(params_oco)
-                data_oco = resp_oco.get('data', [])[0] if resp_oco.get('data') else {}
-                if data_oco.get('sCode', '1') != '0':
+                data_oco = (resp_oco.get('data') or [{}])[0] if isinstance(resp_oco, dict) else {}
+                sc = str(data_oco.get('sCode', '1') or '1')
+                if sc != '0':
                     logger.warning(f"⚠️ 挂OCO失败 {symbol}: {data_oco.get('sMsg', '')}")
+                    # 如果是51088错误，尝试使用普通条件单
+                    if '51088' in str(data_oco.get('sCode', '')):
+                        logger.info(f"🔄 尝试使用普通条件单替代OCO {symbol}")
+                        return self._place_alternative_tp_sl(symbol, sl, tp, side, pos_mode)
                     return False
             except Exception as e:
                 logger.warning(f"⚠️ 挂OCO异常 {symbol}: {str(e)}")
                 return False
+
             self.okx_tp_sl_placed[symbol] = True
             self.tp_sl_last_placed[symbol] = time.time()
             logger.info(f"✅ 挂OCO成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
             return True
         except Exception as e:
             logger.error(f"❌ 挂TP/SL失败 {symbol}: {str(e)}")
+            return False
+    
+    def _place_alternative_tp_sl(self, symbol: str, sl: float, tp: float, side: str, pos_mode: str) -> bool:
+        """使用普通条件单替代OCO订单，避免51088错误"""
+        try:
+            inst_id = self.symbol_to_inst_id(symbol)
+            if not inst_id:
+                return False
+            
+            # 先确保所有旧订单已撤销
+            self.cancel_symbol_tp_sl(symbol)
+            time.sleep(0.5)  # 短暂等待确保撤销完成
+            
+            # 构建止损条件单
+            sl_params = {
+                'instId': inst_id,
+                'ordType': 'conditional',
+                'side': 'sell' if side == 'long' else 'buy',
+                'tdMode': 'cross',
+                'triggerPx': str(sl),
+                'ordPx': '-1',  # 市价
+                'closeFraction': '1',
+            }
+            if pos_mode == 'long_short':
+                sl_params['posSide'] = side
+            
+            # 构建止盈条件单
+            tp_params = {
+                'instId': inst_id,
+                'ordType': 'conditional',
+                'side': 'sell' if side == 'long' else 'buy',
+                'tdMode': 'cross',
+                'triggerPx': str(tp),
+                'ordPx': '-1',  # 市价
+                'closeFraction': '1',
+            }
+            if pos_mode == 'long_short':
+                tp_params['posSide'] = side
+            
+            # 先挂止损单
+            try:
+                sl_resp = self.exchange.privatePostTradeOrderAlgo(sl_params)
+                sl_data = (sl_resp.get('data') or [{}])[0] if isinstance(sl_resp, dict) else {}
+                sl_code = str(sl_data.get('sCode', '1') or '1')
+                if sl_code != '0':
+                    logger.warning(f"⚠️ 挂止损单失败 {symbol}: {sl_data.get('sMsg', '')}")
+                    return False
+            except Exception as e:
+                logger.warning(f"⚠️ 挂止损单异常 {symbol}: {str(e)}")
+                return False
+            
+            # 再挂止盈单
+            try:
+                tp_resp = self.exchange.privatePostTradeOrderAlgo(tp_params)
+                tp_data = (tp_resp.get('data') or [{}])[0] if isinstance(tp_resp, dict) else {}
+                tp_code = str(tp_data.get('sCode', '1') or '1')
+                if tp_code != '0':
+                    logger.warning(f"⚠️ 挂止盈单失败 {symbol}: {tp_data.get('sMsg', '')}")
+                    return False
+            except Exception as e:
+                logger.warning(f"⚠️ 挂止盈单异常 {symbol}: {str(e)}")
+                return False
+            
+            self.okx_tp_sl_placed[symbol] = True
+            self.tp_sl_last_placed[symbol] = time.time()
+            logger.info(f"✅ 挂普通条件单成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
+            return True
+        except Exception as e:
+            logger.error(f"❌ 挂普通条件单失败 {symbol}: {str(e)}")
             return False
     
     def calculate_volatility(self, df):
@@ -1681,6 +1983,12 @@ class MACDStrategy:
         if len(df) < 5:
             return False, "数据不足", 0
         
+        # 指标列存在性校验，避免 KeyError
+        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
+        for col in required_cols:
+            if col not in df.columns:
+                return False, "指标缺失", 0
+        
         latest = df.iloc[-1]
         previous = df.iloc[-2]
         
@@ -1742,6 +2050,12 @@ class MACDStrategy:
         """优化版做空信号检测"""
         if len(df) < 5:
             return False, "数据不足", 0
+        
+        # 指标列存在性校验，避免 KeyError
+        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
+        for col in required_cols:
+            if col not in df.columns:
+                return False, "指标缺失", 0
         
         latest = df.iloc[-1]
         previous = df.iloc[-2]
@@ -2064,6 +2378,10 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
             
             df = self.calculate_indicators(df, symbol)
+            # 边界保护：去除初期 NaN 行，确保指标完整
+            df = df.dropna()
+            if df.empty or len(df) < 5:
+                return {'signal': 'hold', 'reason': '数据不足'}
             current_position = self.get_position(symbol, force_refresh=False)
             
             # 1H 趋势门控：计算 1小时 MACD 与 RSI
@@ -2214,6 +2532,8 @@ class MACDStrategy:
                     kl = self.get_klines(symbol, 50)
                     if not kl.empty:
                         close_price = float(kl.iloc[-1]['close'])
+                        # 更新价格缓存，用于追踪价格变动
+                        self.last_price_cache[symbol] = close_price
                         ps = self.per_symbol_params.get(symbol, {})
                         atr_p = int(ps.get('atr_period', 14))
                         atr_val = calculate_atr(kl, atr_p)['atr'].iloc[-1]
@@ -2234,8 +2554,14 @@ class MACDStrategy:
                                     logger.warning(f"⚠️ 兜底初始化SL/TP异常 {symbol}: {_e0}")
                             side_now = current_position.get('side', 'long')
                             self._update_trailing_stop(symbol, close_price, atr_val, side_now)
-                            # 硬止损兜底
+                            # 硬止损兜底：若 OCO 未成功挂出，则本地看门狗立即市价平仓
                             if self._check_hard_stop(symbol, close_price, side_now):
+                                if not bool(self.okx_tp_sl_placed.get(symbol, False)):
+                                    logger.warning(f"🛡️ OCO 未挂出，触发看门狗平仓 {symbol}")
+                                    try:
+                                        self.close_position_exchange(symbol)
+                                    except Exception as _ce:
+                                        logger.error(f"❌ 看门狗平仓异常 {symbol}: {_ce}")
                                 current_position = self.get_position(symbol, force_refresh=True)
                                 continue
                             # 分批止盈
@@ -2253,9 +2579,25 @@ class MACDStrategy:
                                 except Exception:
                                     pass
                                 try:
-                                    # 仅在超过冷却时间时重挂TP/SL，避免频繁撤销/重挂
+                                    # 优化追踪止盈重挂逻辑：基于价格变动幅度和冷却时间
                                     last_ts = self.tp_sl_last_placed.get(symbol, 0.0)
-                                    if (time.time() - last_ts) >= float(self.tp_sl_refresh_interval):
+                                    time_since_last = time.time() - last_ts
+                                    cooldown_met = time_since_last >= float(self.tp_sl_refresh_interval)
+                                    
+                                    # 检查价格变动幅度，如果变动较大则缩短冷却时间
+                                    price_change_pct = 0
+                                    try:
+                                        last_price = self.last_price_cache.get(symbol, 0)
+                                        if last_price > 0:
+                                            price_change_pct = abs(close_price - last_price) / last_price * 100
+                                            # 如果价格变动超过1%，冷却时间减半
+                                            if price_change_pct > 1.0:
+                                                cooldown_met = time_since_last >= float(self.tp_sl_refresh_interval) / 2
+                                                logger.debug(f"📈 {symbol}价格变动{price_change_pct:.2f}%，冷却时间减半")
+                                    except Exception:
+                                        pass
+                                    
+                                    if cooldown_met:
                                         try:
                                             self.cancel_symbol_tp_sl(symbol)
                                         except Exception:
@@ -2265,11 +2607,16 @@ class MACDStrategy:
                                         if entry_px2 > 0:
                                             okx_ok = self.place_okx_tp_sl(symbol, entry_px2, side_now, atr_val)
                                         if okx_ok:
-                                            logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
+                                            # 根据价格变动幅度记录不同级别的日志
+                                            if price_change_pct > 1.0:
+                                                logger.info(f"🔄 价格变动大({price_change_pct:.2f}%)，提前更新追踪止盈 {symbol}")
+                                            else:
+                                                logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
                                         else:
                                             logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}")
                                     else:
-                                        logger.debug(f"⏳ 距上次挂单未达冷却({self.tp_sl_refresh_interval}s)，跳过重挂 {symbol}")
+                                        remaining_time = float(self.tp_sl_refresh_interval) - time_since_last
+                                        logger.debug(f"⏳ 距上次挂单未达冷却({remaining_time:.0f}s)，跳过重挂 {symbol}")
                                 except Exception as _e:
                                     logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}: {_e}")
                                 if side_now == 'long':
