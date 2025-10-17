@@ -1115,35 +1115,35 @@ class MACDStrategy:
             return False
     
     def calculate_order_amount(self, symbol: str, active_count: Optional[int] = None) -> float:
-        """计算下单金额 - 方案A: 平均分配"""
+        """计算下单金额 - 按信号逐币分配，不做全体平均；余额/保证金不足则跳过"""
         try:
+            balance = self.get_account_balance()
+            if balance <= 0:
+                logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
+                return 0.0
+
             # 1) 固定目标名义金额（最高优先）
             target_str = os.environ.get('TARGET_NOTIONAL_USDT', '').strip()
             if target_str:
                 try:
                     target = max(0.0, float(target_str))
                     logger.info(f"💵 使用固定目标名义金额: {target:.4f}U")
-                    return target
                 except Exception:
                     logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
-
-            # 2) 基于余额分配 - 方案A: 平均分配到11个币种
-            balance = self.get_account_balance()
-            if balance <= 0:
-                logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
-                return 0.0
-
-            # 平均分配：总余额 / 11个币种
-            num_symbols = len(self.symbols)  # 11个币种
-            allocated_amount = balance / max(1, num_symbols)
+                    target = 0.0
+            else:
+                # 2) 默认每笔订单名义金额（不平均，全额用于当前有信号的币）
+                try:
+                    target = max(0.0, float((os.environ.get('DEFAULT_ORDER_USDT') or '1.0').strip()))
+                except Exception:
+                    target = 1.0
 
             # 3) 放大因子
-            factor_str = os.environ.get('ORDER_NOTIONAL_FACTOR', '1').strip()
             try:
-                factor = max(1.0, float(factor_str or '1'))
+                factor = max(1.0, float((os.environ.get('ORDER_NOTIONAL_FACTOR') or '1').strip()))
             except Exception:
                 factor = 1.0
-            allocated_amount *= factor
+            target *= factor
 
             # 4) 下限/上限
             def _to_float(env_name: str, default: float) -> float:
@@ -1156,17 +1156,30 @@ class MACDStrategy:
             min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.1))
             max_cap = max(0.0, _to_float('MAX_PER_SYMBOL_USDT', 0.0))
 
-            if min_floor > 0 and allocated_amount < min_floor:
-                allocated_amount = min_floor
-            if max_cap > 0 and allocated_amount > max_cap:
-                allocated_amount = max_cap
+            if min_floor > 0 and target < min_floor:
+                target = min_floor
+            if max_cap > 0 and target > max_cap:
+                target = max_cap
 
-            logger.info(f"💵 资金分配: 模式=平均分配, 总余额={balance:.4f}U, 币种数={num_symbols}, 因子={factor:.2f}, 本币目标={allocated_amount:.4f}U")
-            if allocated_amount <= 0:
-                logger.warning(f"⚠️ {symbol}最终分配金额为0，跳过")
+            if target <= 0:
+                logger.warning(f"⚠️ {symbol} 目标金额为0，跳过")
                 return 0.0
 
-            return allocated_amount
+            # 5) 保证金充足性检查（不足则跳过，避免 51008/下单失败）
+            try:
+                lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+                required_margin = target / max(1.0, lev)
+                # 预留 2% 安全系数
+                if balance < required_margin * 1.02:
+                    logger.warning(f"⚠️ 保证金不足，跳过 {symbol}: 余额={balance:.4f}U 需保证金≈{required_margin:.4f}U (lev={lev:.1f}x, 目标={target:.4f}U)")
+                    return 0.0
+            except Exception:
+                # 若估算失败，不强下单
+                logger.warning(f"⚠️ 保证金估算失败，谨慎起见跳过 {symbol}")
+                return 0.0
+
+            logger.info(f"💵 单币分配: 模式=逐币下单, 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
+            return target
 
         except Exception as e:
             logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
