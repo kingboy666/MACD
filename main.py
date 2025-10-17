@@ -237,12 +237,12 @@ class MACDStrategy:
             'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '5m',
+            'WIF/USDT:USDT': '15m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '15m',
+            'PEPE/USDT:USDT': '15m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '5m',
+            'DOGE/USDT:USDT': '15m',
             'XRP/USDT:USDT': '15m',
         }
         
@@ -261,13 +261,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
             'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'XRP/USDT:USDT': {'fast': 7, 'slow': 17, 'signal': 9},
-            'ARB/USDT:USDT': {'fast': 6, 'slow': 15, 'signal': 9},
+            'ARB/USDT:USDT': {'fast': 10, 'slow': 26, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WLD/USDT:USDT': {'fast': 5, 'slow': 13, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
-            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 4, 'slow': 11, 'signal': 8}
+            'DOGE/USDT:USDT': {'fast': 9, 'slow': 25, 'signal': 9},
+            'WIF/USDT:USDT': {'fast': 8, 'slow': 21, 'signal': 9},
+            'PEPE/USDT:USDT': {'fast': 9, 'slow': 23, 'signal': 9}
         }
         
         # === 优化后的RSI参数 ===
@@ -276,13 +276,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 14,
             'SOL/USDT:USDT': 11,
             'XRP/USDT:USDT': 12,
-            'ARB/USDT:USDT': 11,
+            'ARB/USDT:USDT': 10,
             'FIL/USDT:USDT': 9,
             'ZRO/USDT:USDT': 14,
             'WLD/USDT:USDT': 9,
-            'DOGE/USDT:USDT': 7,
-            'WIF/USDT:USDT': 7,
-            'PEPE/USDT:USDT': 6
+            'DOGE/USDT:USDT': 10,
+            'WIF/USDT:USDT': 9,
+            'PEPE/USDT:USDT': 9
         }
         
         # === 动态超买超卖阈值 ===
@@ -291,12 +291,12 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'overbought': 70, 'oversold': 30},
             'SOL/USDT:USDT': {'overbought': 72, 'oversold': 28},
             'XRP/USDT:USDT': {'overbought': 70, 'oversold': 30},
-            'ARB/USDT:USDT': {'overbought': 72, 'oversold': 28},
+            'ARB/USDT:USDT': {'overbought': 75, 'oversold': 25},
             'FIL/USDT:USDT': {'overbought': 73, 'oversold': 27},
             'ZRO/USDT:USDT': {'overbought': 75, 'oversold': 25},
             'WLD/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'DOGE/USDT:USDT': {'overbought': 78, 'oversold': 22},
-            'WIF/USDT:USDT': {'overbought': 78, 'oversold': 22},
+            'DOGE/USDT:USDT': {'overbought': 75, 'oversold': 25},
+            'WIF/USDT:USDT': {'overbought': 80, 'oversold': 20},
             'PEPE/USDT:USDT': {'overbought': 80, 'oversold': 20}
         }
         
@@ -323,13 +323,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 2.0,
             'SOL/USDT:USDT': 2.5,
             'XRP/USDT:USDT': 2.3,
-            'ARB/USDT:USDT': 2.5,
+            'ARB/USDT:USDT': 0.8,
             'FIL/USDT:USDT': 2.8,
             'ZRO/USDT:USDT': 3.0,
             'WLD/USDT:USDT': 3.5,
-            'DOGE/USDT:USDT': 3.5,
-            'WIF/USDT:USDT': 4.0,
-            'PEPE/USDT:USDT': 4.5
+            'DOGE/USDT:USDT': 0.7,
+            'WIF/USDT:USDT': 0.6,
+            'PEPE/USDT:USDT': 0.6
         }
         
         self.take_profit = {
@@ -514,6 +514,12 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = 0.3
+        # 风险百分比（每笔占用余额百分比），默认0.5%，可用环境变量 RISK_PERCENT 覆盖
+        try:
+            rp_str = (os.environ.get('RISK_PERCENT') or '0.5').strip()
+            self.risk_percent = max(0.0, float(rp_str))
+        except Exception:
+            self.risk_percent = 0.5
         # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
         self.set_leverage_on_start = False
         
@@ -671,7 +677,17 @@ class MACDStrategy:
                 return func(*args, **kwargs)
             except Exception as e:
                 msg = str(e)
-                is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
+                # 扩展瞬时/限频错误的重试判断范围
+                is_rate = any(s in msg for s in (
+                    '50011',             # Too Many Requests
+                    'Too Many Requests',
+                    'rate limit',
+                    'ETIMEDOUT',
+                    'timeout',
+                    'NetworkError',
+                    'ConnectionReset',
+                    'ECONNRESET'
+                ))
                 if not is_rate or i >= retries:
                     raise
                 wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
@@ -1681,6 +1697,12 @@ class MACDStrategy:
         if len(df) < 5:
             return False, "数据不足", 0
         
+        # 指标列存在性校验，避免 KeyError
+        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
+        for col in required_cols:
+            if col not in df.columns:
+                return False, "指标缺失", 0
+        
         latest = df.iloc[-1]
         previous = df.iloc[-2]
         
@@ -1742,6 +1764,12 @@ class MACDStrategy:
         """优化版做空信号检测"""
         if len(df) < 5:
             return False, "数据不足", 0
+        
+        # 指标列存在性校验，避免 KeyError
+        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
+        for col in required_cols:
+            if col not in df.columns:
+                return False, "指标缺失", 0
         
         latest = df.iloc[-1]
         previous = df.iloc[-2]
@@ -2064,6 +2092,10 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
             
             df = self.calculate_indicators(df, symbol)
+            # 边界保护：去除初期 NaN 行，确保指标完整
+            df = df.dropna()
+            if df.empty or len(df) < 5:
+                return {'signal': 'hold', 'reason': '数据不足'}
             current_position = self.get_position(symbol, force_refresh=False)
             
             # 1H 趋势门控：计算 1小时 MACD 与 RSI
