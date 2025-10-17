@@ -1496,52 +1496,30 @@ class MACDStrategy:
             clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
             clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
             
-            params_sl = {
-                'instId': inst_id,
-                'ordType': 'conditional',
-                'side': 'sell' if side == 'long' else 'buy',
-                'posSide': side,
-                'tdMode': 'cross',
-                'slTriggerPx': str(sl),
-                'slOrdPx': '-1',  # market
-                'closeFraction': '1',  # 触发时按持仓比例全平
-            }
-            params_tp = {
+            params_oco = {
                 'instId': inst_id,
                 'ordType': 'oco',
                 'side': 'sell' if side == 'long' else 'buy',
                 'posSide': side,
                 'tdMode': 'cross',
                 'tpTriggerPx': str(tp),
-                'tpOrdPx': '-1',  # market
-                'closeFraction': '1',  # 触发时按持仓比例全平
+                'tpOrdPx': '-1',  # 市价
+                'slTriggerPx': str(sl),
+                'slOrdPx': '-1',  # 市价
+                'closeFraction': '1',  # 全仓触发
             }
-            
             try:
-                resp_sl = self.exchange.privatePostTradeOrderAlgo(params_sl)
-                data_sl = resp_sl.get('data', [])[0] if resp_sl.get('data') else {}
-                if data_sl.get('sCode', '1') != '0':
-                    logger.warning(f"⚠️ 挂SL失败 {symbol}: {data_sl.get('sMsg', '')}")
+                resp_oco = self.exchange.privatePostTradeOrderAlgo(params_oco)
+                data_oco = resp_oco.get('data', [])[0] if resp_oco.get('data') else {}
+                if data_oco.get('sCode', '1') != '0':
+                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: {data_oco.get('sMsg', '')}")
                     return False
             except Exception as e:
-                logger.warning(f"⚠️ 挂SL异常 {symbol}: {str(e)}")
+                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {str(e)}")
                 return False
-            
-            try:
-                resp_tp = self.exchange.privatePostTradeOrderAlgo(params_tp)
-                data_tp = resp_tp.get('data', [])[0] if resp_tp.get('data') else {}
-                if data_tp.get('sCode', '1') != '0':
-                    logger.warning(f"⚠️ 挂TP失败 {symbol}: {data_tp.get('sMsg', '')}")
-                    self.cancel_symbol_tp_sl(symbol)  # clean sl if tp fails
-                    return False
-            except Exception as e:
-                logger.warning(f"⚠️ 挂TP异常 {symbol}: {str(e)}")
-                self.cancel_symbol_tp_sl(symbol)
-                return False
-            
             self.okx_tp_sl_placed[symbol] = True
             self.tp_sl_last_placed[symbol] = time.time()
-            logger.info(f"✅ 挂TP/SL成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
+            logger.info(f"✅ 挂OCO成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
             return True
         except Exception as e:
             logger.error(f"❌ 挂TP/SL失败 {symbol}: {str(e)}")
