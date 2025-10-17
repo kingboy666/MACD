@@ -860,8 +860,8 @@ class MACDStrategy:
             total = 0
             for ord_type, items in groups.items():
                 ids = [x['algoId'] for x in items]
-                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'ordType': ord_type, 'instId': inst_id}
-                payload_arr = {'algoIds': ids, 'ordType': ord_type, 'instId': inst_id}
+                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
+                payload_arr = {'algoIds': ids, 'instId': inst_id}
                 ok_this = False
                 try:
                     self.exchange.privatePostTradeCancelAlgos(payload_obj)
@@ -873,7 +873,7 @@ class MACDStrategy:
                     except Exception:
                         for aid in ids:
                             try:
-                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'ordType': ord_type, 'instId': inst_id})
+                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
                                 ok_this = True
                             except Exception:
                                 continue
@@ -1505,7 +1505,6 @@ class MACDStrategy:
                 'slTriggerPx': str(sl),
                 'slOrdPx': '-1',  # market
                 'closeFraction': '1',  # 触发时按持仓比例全平
-                'clOrdId': clid_sl,
             }
             params_tp = {
                 'instId': inst_id,
@@ -1516,7 +1515,6 @@ class MACDStrategy:
                 'tpTriggerPx': str(tp),
                 'tpOrdPx': '-1',  # market
                 'closeFraction': '1',  # 触发时按持仓比例全平
-                'clOrdId': clid_tp,
             }
             
             try:
