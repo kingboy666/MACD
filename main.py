@@ -237,12 +237,12 @@ class MACDStrategy:
             'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '15m',
+            'WIF/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '15m',
-            'PEPE/USDT:USDT': '15m',
+            'ARB/USDT:USDT': '5m',
+            'PEPE/USDT:USDT': '5m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '15m',
+            'DOGE/USDT:USDT': '5m',
             'XRP/USDT:USDT': '15m',
         }
         
@@ -261,13 +261,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
             'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'XRP/USDT:USDT': {'fast': 7, 'slow': 17, 'signal': 9},
-            'ARB/USDT:USDT': {'fast': 10, 'slow': 26, 'signal': 9},
+            'ARB/USDT:USDT': {'fast': 6, 'slow': 15, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WLD/USDT:USDT': {'fast': 5, 'slow': 13, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 9, 'slow': 25, 'signal': 9},
-            'WIF/USDT:USDT': {'fast': 8, 'slow': 21, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 9, 'slow': 23, 'signal': 9}
+            'DOGE/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
+            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'PEPE/USDT:USDT': {'fast': 4, 'slow': 11, 'signal': 8}
         }
         
         # === 优化后的RSI参数 ===
@@ -276,13 +276,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 14,
             'SOL/USDT:USDT': 11,
             'XRP/USDT:USDT': 12,
-            'ARB/USDT:USDT': 10,
+            'ARB/USDT:USDT': 11,
             'FIL/USDT:USDT': 9,
             'ZRO/USDT:USDT': 14,
             'WLD/USDT:USDT': 9,
-            'DOGE/USDT:USDT': 10,
-            'WIF/USDT:USDT': 9,
-            'PEPE/USDT:USDT': 9
+            'DOGE/USDT:USDT': 7,
+            'WIF/USDT:USDT': 7,
+            'PEPE/USDT:USDT': 6
         }
         
         # === 动态超买超卖阈值 ===
@@ -291,12 +291,12 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'overbought': 70, 'oversold': 30},
             'SOL/USDT:USDT': {'overbought': 72, 'oversold': 28},
             'XRP/USDT:USDT': {'overbought': 70, 'oversold': 30},
-            'ARB/USDT:USDT': {'overbought': 75, 'oversold': 25},
+            'ARB/USDT:USDT': {'overbought': 72, 'oversold': 28},
             'FIL/USDT:USDT': {'overbought': 73, 'oversold': 27},
             'ZRO/USDT:USDT': {'overbought': 75, 'oversold': 25},
             'WLD/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'DOGE/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'WIF/USDT:USDT': {'overbought': 80, 'oversold': 20},
+            'DOGE/USDT:USDT': {'overbought': 78, 'oversold': 22},
+            'WIF/USDT:USDT': {'overbought': 78, 'oversold': 22},
             'PEPE/USDT:USDT': {'overbought': 80, 'oversold': 20}
         }
         
@@ -323,13 +323,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 2.0,
             'SOL/USDT:USDT': 2.5,
             'XRP/USDT:USDT': 2.3,
-            'ARB/USDT:USDT': 0.8,
+            'ARB/USDT:USDT': 2.5,
             'FIL/USDT:USDT': 2.8,
             'ZRO/USDT:USDT': 3.0,
             'WLD/USDT:USDT': 3.5,
-            'DOGE/USDT:USDT': 0.7,
-            'WIF/USDT:USDT': 0.6,
-            'PEPE/USDT:USDT': 0.6
+            'DOGE/USDT:USDT': 3.5,
+            'WIF/USDT:USDT': 4.0,
+            'PEPE/USDT:USDT': 4.5
         }
         
         self.take_profit = {
@@ -514,12 +514,6 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = 0.3
-        # 风险百分比（每笔占用余额百分比），默认0.5%，可用环境变量 RISK_PERCENT 覆盖
-        try:
-            rp_str = (os.environ.get('RISK_PERCENT') or '0.5').strip()
-            self.risk_percent = max(0.0, float(rp_str))
-        except Exception:
-            self.risk_percent = 0.5
         # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
         self.set_leverage_on_start = False
         
@@ -677,17 +671,7 @@ class MACDStrategy:
                 return func(*args, **kwargs)
             except Exception as e:
                 msg = str(e)
-                # 扩展瞬时/限频错误的重试判断范围
-                is_rate = any(s in msg for s in (
-                    '50011',             # Too Many Requests
-                    'Too Many Requests',
-                    'rate limit',
-                    'ETIMEDOUT',
-                    'timeout',
-                    'NetworkError',
-                    'ConnectionReset',
-                    'ECONNRESET'
-                ))
+                is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
                 if not is_rate or i >= retries:
                     raise
                 wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
@@ -850,170 +834,57 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。统一按 instId 查询，收集 algoId 批量撤销；添加必要的ordType参数。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
-                logger.info(f"⚠️ {symbol} 无法转换为有效的instId，跳过撤销条件单")
                 return True
-                
-            # 获取所有挂单
-            try:
-                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-                data = resp.get('data') if isinstance(resp, dict) else resp
-                if not data:
-                    logger.info(f"✅ {symbol} 没有待撤销的条件单")
-                    return True
-            except Exception as e:
-                logger.warning(f"⚠️ 获取 {symbol} 条件单失败: {e}")
-                return False
-            
-            # 按ordType分组收集algoId
-            conditional_ids = []
-            oco_ids = []
-            trigger_ids = []
-            move_order_stop_ids = []
-            
-            # 记录每个algoId对应的原始ordType，用于错误处理
-            id_to_type = {}
-            
+            resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+            data = resp.get('data') if isinstance(resp, dict) else resp
+            groups: Dict[str, List[Dict[str, str]]] = {}
             for it in (data or []):
                 try:
-                    if str(it.get('instId') or '') != inst_id:
+                    ord_type = str(it.get('ordType') or '').lower()
+                    if not ord_type:
+                        continue
+                    clid = str(it.get('clOrdId') or '')
+                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
                         continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
-                    if not aid:
-                        continue
-                        
-                    aid_str = str(aid)
-                    ord_type = it.get('ordType', '')
-                    id_to_type[aid_str] = ord_type
-                    
-                    # 根据订单类型分组
-                    if ord_type == 'oco':
-                        oco_ids.append(aid_str)
-                    elif ord_type == 'trigger':
-                        trigger_ids.append(aid_str)
-                    elif ord_type == 'move_order_stop':
-                        move_order_stop_ids.append(aid_str)
-                    else:
-                        # 默认为conditional类型
-                        conditional_ids.append(aid_str)
-                        
-                    logger.debug(f"找到{symbol}条件单: algoId={aid_str}, ordType={ord_type}")
-                except Exception as e:
-                    logger.debug(f"处理条件单信息异常: {e}")
+                    if aid:
+                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
+                except Exception:
                     continue
-                    
-            if not (conditional_ids or oco_ids or trigger_ids or move_order_stop_ids):
-                logger.info(f"✅ {symbol} 没有需要撤销的条件单")
+            if not groups:
                 return True
-                
-            # 分类型撤单
-            ok = True
-            
-            # 撤销conditional类型订单
-            if conditional_ids:
+            total = 0
+            for ord_type, items in groups.items():
+                ids = [x['algoId'] for x in items]
+                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
+                payload_arr = {'algoIds': ids, 'instId': inst_id}
+                ok_this = False
                 try:
-                    # 尝试批量撤销
-                    self.exchange.privatePostTradeCancelAlgos({
-                        'algoIds': conditional_ids,
-                        'instId': inst_id,
-                        'ordType': 'conditional'
-                    })
-                    logger.info(f"✅ 撤销 {symbol} conditional类型条件单: {len(conditional_ids)}个")
-                except Exception as e:
-                    logger.warning(f"⚠️ 批量撤销 {symbol} conditional类型条件单失败: {e}")
-                    # 尝试逐个撤销
-                    for aid in conditional_ids:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({
-                                'algoIds': [aid],
-                                'instId': inst_id,
-                                'ordType': 'conditional'
-                            })
-                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
-                        except Exception as e2:
-                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
-                            ok = False
-                    
-            # 撤销oco类型订单
-            if oco_ids:
-                try:
-                    self.exchange.privatePostTradeCancelAlgos({
-                        'algoIds': oco_ids,
-                        'instId': inst_id,
-                        'ordType': 'oco'
-                    })
-                    logger.info(f"✅ 撤销 {symbol} oco类型条件单: {len(oco_ids)}个")
-                except Exception as e:
-                    logger.warning(f"⚠️ 批量撤销 {symbol} oco类型条件单失败: {e}")
-                    # 尝试逐个撤销
-                    for aid in oco_ids:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({
-                                'algoIds': [aid],
-                                'instId': inst_id,
-                                'ordType': 'oco'
-                            })
-                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
-                        except Exception as e2:
-                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
-                            ok = False
-                    
-            # 撤销trigger类型订单
-            if trigger_ids:
-                try:
-                    self.exchange.privatePostTradeCancelAlgos({
-                        'algoIds': trigger_ids,
-                        'instId': inst_id,
-                        'ordType': 'trigger'
-                    })
-                    logger.info(f"✅ 撤销 {symbol} trigger类型条件单: {len(trigger_ids)}个")
-                except Exception as e:
-                    logger.warning(f"⚠️ 批量撤销 {symbol} trigger类型条件单失败: {e}")
-                    # 尝试逐个撤销
-                    for aid in trigger_ids:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({
-                                'algoIds': [aid],
-                                'instId': inst_id,
-                                'ordType': 'trigger'
-                            })
-                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
-                        except Exception as e2:
-                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
-                            ok = False
-                    
-            # 撤销move_order_stop类型订单
-            if move_order_stop_ids:
-                try:
-                    self.exchange.privatePostTradeCancelAlgos({
-                        'algoIds': move_order_stop_ids,
-                        'instId': inst_id,
-                        'ordType': 'move_order_stop'
-                    })
-                    logger.info(f"✅ 撤销 {symbol} move_order_stop类型条件单: {len(move_order_stop_ids)}个")
-                except Exception as e:
-                    logger.warning(f"⚠️ 批量撤销 {symbol} move_order_stop类型条件单失败: {e}")
-                    # 尝试逐个撤销
-                    for aid in move_order_stop_ids:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({
-                                'algoIds': [aid],
-                                'instId': inst_id,
-                                'ordType': 'move_order_stop'
-                            })
-                            logger.debug(f"✅ 单独撤销 {symbol} 条件单成功: algoId={aid}")
-                        except Exception as e2:
-                            logger.warning(f"⚠️ 单独撤销 {symbol} 条件单失败: algoId={aid}, error={e2}")
-                            ok = False
-                    
-            total_count = len(conditional_ids) + len(oco_ids) + len(trigger_ids) + len(move_order_stop_ids)
-            if ok:
-                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total_count}个")
+                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
+                    ok_this = True
+                except Exception:
+                    try:
+                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
+                        ok_this = True
+                    except Exception:
+                        for aid in ids:
+                            try:
+                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
+                                ok_this = True
+                            except Exception:
+                                continue
+                if ok_this:
+                    total += len(ids)
+                else:
+                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
+            if total > 0:
+                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
                 return True
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：部分或全部撤销失败")
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
             return False
         except Exception as e:
             logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
@@ -1314,22 +1185,6 @@ class MACDStrategy:
             logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
             return 0.0
     
-    def get_position_mode(self) -> str:
-        """
-        返回持仓模式：
-        - 双向持仓：返回 'long_short'，下单时使用 posSide=long/short
-        - 净持仓：返回 'net'，下单时不带 posSide
-        """
-        mode = getattr(self, 'position_mode', None)
-        if isinstance(mode, str):
-            m = mode.lower()
-            if m in ('long_short', 'dual', 'hedge'):
-                return 'long_short'
-            if m in ('net', 'oneway'):
-                return 'net'
-        # 默认按双向持仓处理，避免原生下单报错
-        return 'long_short'
-
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
         try:
@@ -1650,12 +1505,6 @@ class MACDStrategy:
             sl = round(sl, px_prec)
             tp = round(tp, px_prec)
             
-            # 挂单前先查询并撤旧，确保无残留TP/SL，避免51088
-            ok_cancel = self.cancel_symbol_tp_sl(symbol)
-            if not ok_cancel:
-                logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
-                return False
-
             cl_prefix = self.tpsl_cl_prefix or 'TPSL_'
             clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
             clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
@@ -1832,12 +1681,6 @@ class MACDStrategy:
         if len(df) < 5:
             return False, "数据不足", 0
         
-        # 指标列存在性校验，避免 KeyError
-        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
-        for col in required_cols:
-            if col not in df.columns:
-                return False, "指标缺失", 0
-        
         latest = df.iloc[-1]
         previous = df.iloc[-2]
         
@@ -1899,12 +1742,6 @@ class MACDStrategy:
         """优化版做空信号检测"""
         if len(df) < 5:
             return False, "数据不足", 0
-        
-        # 指标列存在性校验，避免 KeyError
-        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
-        for col in required_cols:
-            if col not in df.columns:
-                return False, "指标缺失", 0
         
         latest = df.iloc[-1]
         previous = df.iloc[-2]
@@ -2227,10 +2064,6 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
             
             df = self.calculate_indicators(df, symbol)
-            # 边界保护：去除初期 NaN 行，确保指标完整
-            df = df.dropna()
-            if df.empty or len(df) < 5:
-                return {'signal': 'hold', 'reason': '数据不足'}
             current_position = self.get_position(symbol, force_refresh=False)
             
             # 1H 趋势门控：计算 1小时 MACD 与 RSI
