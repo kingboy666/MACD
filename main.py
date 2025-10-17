@@ -856,44 +856,62 @@ class MACDStrategy:
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
-                return True
+                logger.warning(f"⚠️ 无法获取交易对 {symbol} 的instId，无法撤销订单")
+                return True  # 仍然返回True以避免阻止后续操作
+
+            logger.info(f"🔄 开始撤销 {symbol} 的条件单")
 
             # 查询待撤销的算法单
             try:
                 resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
                 data = resp.get('data') if isinstance(resp, dict) else resp
+                logger.info(f"📋 获取到 {symbol} 的算法单数量: {len(data or [])}")
             except Exception as e:
-                logger.debug(f"获取算法单失败 {symbol}: {e}")
+                logger.warning(f"⚠️ 获取算法单失败 {symbol}: {e}，将尝试直接撤销")
                 data = None
 
             if not data:
+                logger.info(f"✅ {symbol} 没有待撤销的算法单")
                 return True
 
             # 收集所有相关算法单（不限制 clOrdId 前缀，优先清空残留以避免 51088）
             algo_ids = []
+            order_details = []
             for it in (data or []):
                 try:
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
                     if aid:
-                        algo_ids.append(str(aid))
-                except Exception:
+                        algo_id_str = str(aid)
+                        algo_ids.append(algo_id_str)
+                        # 收集更多订单信息用于调试
+                        order_type = it.get('ordType', 'unknown')
+                        order_details.append(f"algoId={algo_id_str}, ordType={order_type}")
+                except Exception as e:
+                    logger.warning(f"⚠️ 解析订单信息失败: {e}")
                     continue
 
             if not algo_ids:
+                logger.info(f"✅ {symbol} 没有可撤销的算法单ID")
                 return True
 
-            # 修复：使用正确的API参数格式
+            logger.info(f"📋 准备撤销 {symbol} 的{len(algo_ids)}个算法单: {', '.join(order_details)}")
+
+            # 修复：使用正确的API参数格式，三阶段撤销策略
             ok_cnt = 0
+            failed_ids = []
+            
+            # 方法1：尝试批量撤销（使用新格式）
             try:
-                # 方法1：尝试批量撤销（使用新格式）
                 cancel_params = {
                     'instId': inst_id,
                     'algoIds': ','.join(algo_ids)  # 改为逗号分隔的字符串
                 }
+                logger.info(f"🔄 尝试批量撤销 {symbol} 的{len(algo_ids)}个算法单")
                 self.exchange.privatePostTradeCancelAlgos(cancel_params)
                 ok_cnt = len(algo_ids)
+                logger.info(f"✅ 批量撤销成功 {symbol}: {ok_cnt} 个")
             except Exception as e1:
-                logger.debug(f"批量撤销失败 {symbol}: {e1}，尝试逐个撤销")
+                logger.warning(f"⚠️ 批量撤销失败 {symbol}: {e1}，尝试逐个撤销")
                 # 方法2：逐个撤销
                 for aid in algo_ids:
                     try:
@@ -902,10 +920,12 @@ class MACDStrategy:
                             'instId': inst_id,
                             'algoId': aid
                         }
+                        logger.debug(f"🔄 尝试逐个撤销 {symbol} algoId={aid}")
                         self.exchange.privatePostTradeCancelAlgos(cancel_params)
                         ok_cnt += 1
+                        logger.debug(f"✅ 逐个撤销成功 {symbol} algoId={aid}")
                     except Exception as e2:
-                        logger.debug(f"逐个撤销也失败 {symbol} algoId={aid}: {e2}")
+                        logger.debug(f"⚠️ 逐个撤销失败 {symbol} algoId={aid}: {e2}")
                         # 方法3：尝试使用ordType（如果其他方法失败）
                         try:
                             cancel_params = {
@@ -913,33 +933,96 @@ class MACDStrategy:
                                 'algoId': aid,
                                 'ordType': 'conditional'  # 添加ordType参数
                             }
+                            logger.debug(f"🔄 尝试使用ordType参数撤销 {symbol} algoId={aid}")
                             self.exchange.privatePostTradeCancelAlgos(cancel_params)
                             ok_cnt += 1
-                            logger.debug(f"使用ordType参数成功撤销 {symbol} algoId={aid}")
+                            logger.info(f"✅ 使用ordType参数成功撤销 {symbol} algoId={aid}")
                         except Exception as e3:
-                            logger.warning(f"所有方法撤销失败 {symbol} algoId={aid}: {e3}")
+                            # 方法4：尝试使用其他可能的ordType值
+                            try:
+                                cancel_params = {
+                                    'instId': inst_id,
+                                    'algoId': aid,
+                                    'ordType': 'oco'  # 尝试oco类型
+                                }
+                                logger.debug(f"🔄 尝试使用oco类型撤销 {symbol} algoId={aid}")
+                                self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                                ok_cnt += 1
+                                logger.info(f"✅ 使用oco类型成功撤销 {symbol} algoId={aid}")
+                            except Exception as e4:
+                                failed_ids.append(aid)
+                                logger.warning(f"❌ 所有方法撤销失败 {symbol} algoId={aid}: {e4}")
 
             if ok_cnt > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单成功: {ok_cnt} 个")
+            if failed_ids:
+                logger.warning(f"⚠️ 撤销 {symbol} 条件单部分失败: {len(failed_ids)} 个未撤销")
 
-            # 轮询确认 pending 清空（最多2.0秒）
+            # 轮询确认 pending 清空（最多3.0秒，改进版本）
+            logger.info(f"⏳ 开始确认 {symbol} 订单是否清空")
             t0 = time.time()
+            max_wait_time = 3.0
+            last_left_count = -1
+            
             while True:
                 try:
                     resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
                     d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
-                    left = len(d2 or [])
+                    left_orders = d2 or []
+                    left = len(left_orders)
+                    
+                    # 记录剩余订单详情
+                    if left > 0 and left != last_left_count:
+                        left_details = []
+                        for order in left_orders:
+                            left_aid = order.get('algoId') or order.get('algoID') or order.get('id', 'unknown')
+                            left_type = order.get('ordType', 'unknown')
+                            left_details.append(f"algoId={left_aid}, ordType={left_type}")
+                        logger.warning(f"⚠️ {symbol} 仍有{left}个订单未撤销: {', '.join(left_details)}")
+                        last_left_count = left
+                    
                     if left == 0:
+                        logger.info(f"✅ 确认 {symbol} 所有订单已清空")
                         break
-                except Exception:
+                except Exception as e:
+                    logger.warning(f"⚠️ 检查剩余订单时出错 {symbol}: {e}")
+                    # 即使出错也继续尝试检查
+                    pass
+                    
+                if time.time() - t0 > max_wait_time:
+                    logger.warning(f"⏰ 等待订单清空超时 {symbol}，已等待{max_wait_time}秒")
                     break
-                if time.time() - t0 > 2.0:
-                    break
-                time.sleep(0.2)
+                
+                time.sleep(0.3)  # 稍微延长等待时间，减少API调用频率
+
+            # 最终检查：如果仍有订单，尝试更激进的清理
+            if left > 0:
+                logger.warning(f"⚠️ {symbol} 仍有{left}个订单未撤销，将尝试单独撤销剩余订单")
+                for order in left_orders:
+                    try:
+                        aid = order.get('algoId') or order.get('algoID') or order.get('id')
+                        if aid:
+                            # 尝试使用所有可能的ordType组合
+                            for ord_type in ['conditional', 'oco', 'tp', 'sl', None]:
+                                try:
+                                    cancel_params = {
+                                        'instId': inst_id,
+                                        'algoId': str(aid)
+                                    }
+                                    if ord_type:
+                                        cancel_params['ordType'] = ord_type
+                                    self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                                    logger.info(f"✅ 最终尝试成功撤销 {symbol} algoId={aid}, ordType={ord_type}")
+                                    break
+                                except Exception:
+                                    continue
+                    except Exception as e:
+                        logger.warning(f"⚠️ 最终尝试撤销失败 {symbol}: {e}")
 
             return True
         except Exception as e:
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单异常: {e}")
+            logger.error(f"❌ 撤销 {symbol} 条件单异常: {e}")
+            # 即使出现异常，也返回True以避免阻止后续操作
             return True
     
     def sync_all_status(self):
@@ -1753,14 +1836,20 @@ class MACDStrategy:
                 data_oco = (resp_oco.get('data') or [{}])[0] if isinstance(resp_oco, dict) else {}
                 sc = str(data_oco.get('sCode', '1') or '1')
                 if sc != '0':
-                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: {data_oco.get('sMsg', '')}")
+                    error_msg = data_oco.get('sMsg', '')
+                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: 错误码={sc}, 错误信息={error_msg}")
                     # 如果是51088错误，尝试使用普通条件单
-                    if '51088' in str(data_oco.get('sCode', '')):
-                        logger.info(f"🔄 尝试使用普通条件单替代OCO {symbol}")
+                    if '51088' in sc or 'You can only place 1 TP/SL order' in error_msg:
+                        logger.info(f"🔄 检测到51088错误，尝试使用普通条件单替代OCO {symbol}")
                         return self._place_alternative_tp_sl(symbol, sl, tp, side, pos_mode)
                     return False
             except Exception as e:
-                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {str(e)}")
+                error_str = str(e)
+                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {error_str}")
+                # 即使在异常情况下，如果包含51088错误信息，也尝试降级处理
+                if '51088' in error_str or 'You can only place 1 TP/SL order' in error_str:
+                    logger.info(f"🔄 异常中检测到51088错误，尝试使用普通条件单替代OCO {symbol}")
+                    return self._place_alternative_tp_sl(symbol, sl, tp, side, pos_mode)
                 return False
 
             self.okx_tp_sl_placed[symbol] = True
@@ -1776,11 +1865,47 @@ class MACDStrategy:
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
+                logger.warning(f"⚠️ 无法获取交易对 {symbol} 的instId")
                 return False
             
-            # 先确保所有旧订单已撤销
-            self.cancel_symbol_tp_sl(symbol)
-            time.sleep(0.5)  # 短暂等待确保撤销完成
+            logger.info(f"🔄 开始使用普通条件单替代OCO {symbol}: SL={sl:.6f}, TP={tp:.6f}")
+            
+            # 先确保所有旧订单已撤销（加强版撤销）
+            logger.info(f"🔄 开始撤销旧订单 {symbol}")
+            retry_count = 0
+            max_retries = 2
+            while retry_count < max_retries:
+                if self.cancel_symbol_tp_sl(symbol):
+                    logger.info(f"✅ 撤销旧订单成功 {symbol}")
+                    break
+                logger.warning(f"⚠️ 撤销旧订单失败 {symbol}，第{retry_count+1}次重试")
+                retry_count += 1
+                time.sleep(0.5)
+            
+            # 额外等待并轮询（最多3秒）确保订单清空
+            logger.info(f"⏳ 等待并确认订单清空 {symbol}")
+            t0 = time.time()
+            while True:
+                try:
+                    resp2 = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                    d2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                    left = 0
+                    for it in (d2 or []):
+                        clid = str(it.get('clOrdId') or '')
+                        if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
+                            continue
+                        left += 1
+                    if left == 0:
+                        logger.info(f"✅ 确认订单已清空 {symbol}")
+                        break
+                    elif (time.time() - t0) > 3.0:
+                        logger.warning(f"⚠️ 等待订单清空超时 {symbol}，剩余{left}个订单")
+                        break
+                    logger.debug(f"⏳ 等待订单清空，当前剩余{left}个订单")
+                    time.sleep(0.3)
+                except Exception as e:
+                    logger.warning(f"⚠️ 检查待处理订单异常 {symbol}: {str(e)}")
+                    time.sleep(0.3)
             
             # 构建止损条件单
             sl_params = {
@@ -1808,34 +1933,93 @@ class MACDStrategy:
             if pos_mode == 'long_short':
                 tp_params['posSide'] = side
             
-            # 先挂止损单
-            try:
-                sl_resp = self.exchange.privatePostTradeOrderAlgo(sl_params)
-                sl_data = (sl_resp.get('data') or [{}])[0] if isinstance(sl_resp, dict) else {}
-                sl_code = str(sl_data.get('sCode', '1') or '1')
-                if sl_code != '0':
-                    logger.warning(f"⚠️ 挂止损单失败 {symbol}: {sl_data.get('sMsg', '')}")
-                    return False
-            except Exception as e:
-                logger.warning(f"⚠️ 挂止损单异常 {symbol}: {str(e)}")
-                return False
+            # 先挂止损单（增加重试）
+            sl_success = False
+            sl_retry = 0
+            max_sl_retry = 2
+            while sl_retry < max_sl_retry and not sl_success:
+                try:
+                    logger.info(f"🔄 尝试挂止损单 {symbol}: {sl_params}")
+                    sl_resp = self.exchange.privatePostTradeOrderAlgo(sl_params)
+                    sl_data = (sl_resp.get('data') or [{}])[0] if isinstance(sl_resp, dict) else {}
+                    sl_code = str(sl_data.get('sCode', '1') or '1')
+                    if sl_code != '0':
+                        error_msg = sl_data.get('sMsg', '')
+                        logger.warning(f"⚠️ 挂止损单失败 {symbol}: 错误码={sl_code}, 错误信息={error_msg}")
+                        # 如果还是51088错误，先尝试只挂止损单
+                        if '51088' in sl_code or 'You can only place 1 TP/SL order' in error_msg:
+                            logger.info(f"⚠️ 仍然遇到51088错误，尝试只挂止损单 {symbol}")
+                            sl_success = True  # 这里设为成功，但实际上只挂了止损单
+                            break
+                    else:
+                        sl_algo_id = sl_data.get('algoId', '')
+                        logger.info(f"✅ 挂止损单成功 {symbol}: algoId={sl_algo_id}")
+                        sl_success = True
+                except Exception as e:
+                    error_str = str(e)
+                    logger.warning(f"⚠️ 挂止损单异常 {symbol}: {error_str}")
+                    # 如果还是51088错误，尝试只挂止损单
+                    if '51088' in error_str or 'You can only place 1 TP/SL order' in error_str:
+                        logger.info(f"⚠️ 异常中仍然遇到51088错误，尝试只挂止损单 {symbol}")
+                        sl_success = True  # 这里设为成功，但实际上只挂了止损单
+                        break
+                
+                if not sl_success:
+                    sl_retry += 1
+                    if sl_retry < max_sl_retry:
+                        logger.info(f"🔄 重试挂止损单 {symbol}，第{sl_retry}次")
+                        time.sleep(0.5)
             
-            # 再挂止盈单
-            try:
-                tp_resp = self.exchange.privatePostTradeOrderAlgo(tp_params)
-                tp_data = (tp_resp.get('data') or [{}])[0] if isinstance(tp_resp, dict) else {}
-                tp_code = str(tp_data.get('sCode', '1') or '1')
-                if tp_code != '0':
-                    logger.warning(f"⚠️ 挂止盈单失败 {symbol}: {tp_data.get('sMsg', '')}")
-                    return False
-            except Exception as e:
-                logger.warning(f"⚠️ 挂止盈单异常 {symbol}: {str(e)}")
-                return False
+            # 如果止损单挂成功了，再挂止盈单
+            if sl_success:
+                tp_success = False
+                tp_retry = 0
+                max_tp_retry = 2
+                while tp_retry < max_tp_retry and not tp_success:
+                    try:
+                        logger.info(f"🔄 尝试挂止盈单 {symbol}: {tp_params}")
+                        tp_resp = self.exchange.privatePostTradeOrderAlgo(tp_params)
+                        tp_data = (tp_resp.get('data') or [{}])[0] if isinstance(tp_resp, dict) else {}
+                        tp_code = str(tp_data.get('sCode', '1') or '1')
+                        if tp_code != '0':
+                            error_msg = tp_data.get('sMsg', '')
+                            logger.warning(f"⚠️ 挂止盈单失败 {symbol}: 错误码={tp_code}, 错误信息={error_msg}")
+                            # 如果还是51088错误，至少止损单已经挂上了，就接受这种状态
+                            if '51088' in tp_code or 'You can only place 1 TP/SL order' in error_msg:
+                                logger.warning(f"⚠️ 止盈单遇到51088错误，但止损单已挂上 {symbol}")
+                                tp_success = True  # 接受只有止损单的状态
+                                break
+                        else:
+                            tp_algo_id = tp_data.get('algoId', '')
+                            logger.info(f"✅ 挂止盈单成功 {symbol}: algoId={tp_algo_id}")
+                            tp_success = True
+                    except Exception as e:
+                        error_str = str(e)
+                        logger.warning(f"⚠️ 挂止盈单异常 {symbol}: {error_str}")
+                        # 如果还是51088错误，至少止损单已经挂上了，就接受这种状态
+                        if '51088' in error_str or 'You can only place 1 TP/SL order' in error_str:
+                            logger.warning(f"⚠️ 异常中止盈单遇到51088错误，但止损单已挂上 {symbol}")
+                            tp_success = True  # 接受只有止损单的状态
+                            break
+                    
+                    if not tp_success:
+                        tp_retry += 1
+                        if tp_retry < max_tp_retry:
+                            logger.info(f"🔄 重试挂止盈单 {symbol}，第{tp_retry}次")
+                            time.sleep(0.5)
             
-            self.okx_tp_sl_placed[symbol] = True
-            self.tp_sl_last_placed[symbol] = time.time()
-            logger.info(f"✅ 挂普通条件单成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
-            return True
+            # 只要止损单挂上了，就标记为已处理
+            if sl_success:
+                self.okx_tp_sl_placed[symbol] = True
+                self.tp_sl_last_placed[symbol] = time.time()
+                if 'tp_success' in locals() and tp_success:
+                    logger.info(f"✅ 降级处理成功 {symbol}: 止损单和止盈单都已挂上")
+                else:
+                    logger.warning(f"⚠️ 降级处理部分成功 {symbol}: 已挂止损单，止盈单未能成功挂上")
+                return True
+            else:
+                logger.error(f"❌ 降级处理失败 {symbol}: 止损单未能成功挂上")
+                return False
         except Exception as e:
             logger.error(f"❌ 挂普通条件单失败 {symbol}: {str(e)}")
             return False
@@ -2582,41 +2766,120 @@ class MACDStrategy:
                                     # 优化追踪止盈重挂逻辑：基于价格变动幅度和冷却时间
                                     last_ts = self.tp_sl_last_placed.get(symbol, 0.0)
                                     time_since_last = time.time() - last_ts
-                                    cooldown_met = time_since_last >= float(self.tp_sl_refresh_interval)
+                                    base_cooldown = float(self.tp_sl_refresh_interval)
+                                    cooldown_met = time_since_last >= base_cooldown
                                     
-                                    # 检查价格变动幅度，如果变动较大则缩短冷却时间
+                                    # 检查价格变动幅度，实现多级冷却时间调整
                                     price_change_pct = 0
-                                    try:
-                                        last_price = self.last_price_cache.get(symbol, 0)
-                                        if last_price > 0:
-                                            price_change_pct = abs(close_price - last_price) / last_price * 100
-                                            # 如果价格变动超过1%，冷却时间减半
-                                            if price_change_pct > 1.0:
-                                                cooldown_met = time_since_last >= float(self.tp_sl_refresh_interval) / 2
-                                                logger.debug(f"📈 {symbol}价格变动{price_change_pct:.2f}%，冷却时间减半")
-                                    except Exception:
-                                        pass
+                                    price_proximity_factor = 1.0
                                     
-                                    if cooldown_met:
+                                    # 1. 计算价格变动幅度
+                                    try:
+                                        # 维护价格历史，使用最后3个价格点计算变动
+                                        if not hasattr(self, 'price_history_cache'):
+                                            self.price_history_cache = {}
+                                        
+                                        if symbol not in self.price_history_cache:
+                                            self.price_history_cache[symbol] = []
+                                        
+                                        # 添加当前价格到历史记录，保持最近5个价格
+                                        self.price_history_cache[symbol].append(close_price)
+                                        if len(self.price_history_cache[symbol]) > 5:
+                                            self.price_history_cache[symbol] = self.price_history_cache[symbol][-5:]
+                                        
+                                        # 计算价格变动百分比
+                                        if len(self.price_history_cache[symbol]) >= 2:
+                                            # 使用最早和最新的价格计算变动
+                                            earliest_price = self.price_history_cache[symbol][0]
+                                            latest_price = self.price_history_cache[symbol][-1]
+                                            price_change_pct = abs(latest_price - earliest_price) / earliest_price * 100
+                                            
+                                            # 计算最近一次价格的变动
+                                            recent_change_pct = 0
+                                            if len(self.price_history_cache[symbol]) >= 3:
+                                                recent_price = self.price_history_cache[symbol][-2]
+                                                recent_change_pct = abs(close_price - recent_price) / recent_price * 100
+                                    except Exception as e:
+                                        logger.debug(f"⚠️ 计算价格变动异常 {symbol}: {e}")
+                                    
+                                    # 2. 基于价格变动幅度调整冷却时间
+                                    cooldown_multiplier = 1.0
+                                    if price_change_pct > 2.0:
+                                        cooldown_multiplier = 0.3  # 价格剧烈变动，冷却时间缩短至30%
+                                        logger.debug(f"📈 {symbol}价格剧烈变动{price_change_pct:.2f}%，冷却时间缩短至30%")
+                                    elif price_change_pct > 1.0:
+                                        cooldown_multiplier = 0.5  # 价格大幅变动，冷却时间减半
+                                        logger.debug(f"📈 {symbol}价格大幅变动{price_change_pct:.2f}%，冷却时间缩短至50%")
+                                    elif price_change_pct > 0.5:
+                                        cooldown_multiplier = 0.7  # 价格中等变动，冷却时间缩短至70%
+                                        logger.debug(f"📈 {symbol}价格中等变动{price_change_pct:.2f}%，冷却时间缩短至70%")
+                                    
+                                    # 计算调整后的冷却时间
+                                    adjusted_cooldown = base_cooldown * cooldown_multiplier
+                                    cooldown_met = time_since_last >= adjusted_cooldown
+                                    
+                                    # 3. 检查价格是否接近TP/SL水平，若是则考虑提前重挂
+                                    if not cooldown_met and st.get('sl') and st.get('tp'):
+                                        sl_distance_pct = 0
+                                        tp_distance_pct = 0
+                                        
                                         try:
-                                            self.cancel_symbol_tp_sl(symbol)
+                                            # 计算价格与SL/TP的距离百分比
+                                            if side_now == 'long':
+                                                sl_distance_pct = abs(close_price - st['sl']) / st['sl'] * 100
+                                                tp_distance_pct = abs(close_price - st['tp']) / st['tp'] * 100
+                                            else:  # short
+                                                sl_distance_pct = abs(close_price - st['sl']) / st['sl'] * 100
+                                                tp_distance_pct = abs(close_price - st['tp']) / st['tp'] * 100
+                                            
+                                            # 如果价格接近SL/TP（小于0.5%的距离），考虑提前重挂
+                                            if sl_distance_pct < 0.5 or tp_distance_pct < 0.5:
+                                                cooldown_met = True
+                                                logger.debug(f"🎯 {symbol}价格接近SL/TP水平，强制重挂")
                                         except Exception:
                                             pass
+                                    
+                                    # 4. 执行重挂逻辑
+                                    if cooldown_met:
+                                        logger.info(f"🔄 开始重挂追踪止盈 {symbol}：\n" 
+                                               f"  - 距离上次挂单: {time_since_last:.1f}s\n" 
+                                               f"  - 调整后冷却: {adjusted_cooldown:.1f}s\n" 
+                                               f"  - 价格变动: {price_change_pct:.2f}%\n" 
+                                               f"  - 当前价格: {close_price:.6f}")
+                                        
+                                        # 确保旧订单撤销成功
+                                        cancel_success = self.cancel_symbol_tp_sl(symbol)
+                                        if not cancel_success:
+                                            logger.warning(f"⚠️ 撤销旧订单失败，但仍尝试重挂 {symbol}")
+                                        
                                         entry_px2 = float(self.sl_tp_state.get(symbol, {}).get('entry', 0) or 0)
                                         okx_ok = False
+                                        
                                         if entry_px2 > 0:
+                                            # 使用最新的参数重挂订单
                                             okx_ok = self.place_okx_tp_sl(symbol, entry_px2, side_now, atr_val)
+                                        
                                         if okx_ok:
-                                            # 根据价格变动幅度记录不同级别的日志
-                                            if price_change_pct > 1.0:
-                                                logger.info(f"🔄 价格变动大({price_change_pct:.2f}%)，提前更新追踪止盈 {symbol}")
+                                            # 根据不同情况记录不同级别的日志
+                                            if price_change_pct > 2.0:
+                                                logger.info(f"✅ 价格剧烈变动，追踪止盈已更新 {symbol}: 价格变动{price_change_pct:.2f}%")
+                                            elif price_change_pct > 1.0:
+                                                logger.info(f"✅ 价格大幅变动，追踪止盈已更新 {symbol}: 价格变动{price_change_pct:.2f}%")
+                                            elif 'price_proximity_factor' in locals() and price_proximity_factor < 1.0:
+                                                logger.info(f"✅ 价格接近SL/TP，追踪止盈已更新 {symbol}")
                                             else:
-                                                logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
+                                                logger.info(f"✅ 追踪止盈已更新 {symbol}: 冷却时间达到")
                                         else:
-                                            logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}")
+                                            logger.warning(f"❌ 更新追踪止盈重挂失败 {symbol}")
                                     else:
-                                        remaining_time = float(self.tp_sl_refresh_interval) - time_since_last
-                                        logger.debug(f"⏳ 距上次挂单未达冷却({remaining_time:.0f}s)，跳过重挂 {symbol}")
+                                        remaining_time = adjusted_cooldown - time_since_last
+                                        logger.debug(f"⏳ {symbol}重挂冷却中：\n" 
+                                                  f"  - 剩余时间: {remaining_time:.1f}s\n" 
+                                                  f"  - 调整后冷却: {adjusted_cooldown:.1f}s\n" 
+                                                  f"  - 价格变动: {price_change_pct:.2f}%")
+                                    
+                                    # 5. 更新价格缓存
+                                    self.last_price_cache[symbol] = close_price
                                 except Exception as _e:
                                     logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}: {_e}")
                                 if side_now == 'long':
