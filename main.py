@@ -1376,6 +1376,97 @@ class MACDStrategy:
             logger.warning(f"⚠️ 初始化SL/TP失败 {symbol}: {e}")
             return False
 
+    def _update_trailing_stop(self, symbol: str, price: float, atr: float, side: str) -> None:
+        """基于峰值/谷值与每币参数动态推进追踪止损（只更新内存态，重挂由冷却机制执行）"""
+        try:
+            st = self.sl_tp_state.get(symbol)
+            if not st:
+                return
+            cfg = self.symbol_cfg.get(symbol, {})
+            trigger_pct = float(cfg.get('trigger_pct', 0.01) or 0.01)
+            trail_pct = float(cfg.get('trail_pct', 0.006) or 0.006)
+            basis = str(cfg.get('update_basis', 'close') or 'close').lower()
+
+            entry = float(st.get('entry', 0) or 0)
+            if entry <= 0 or price <= 0:
+                return
+
+            # 达到激活阈值后才开始追踪
+            activated = False
+            if side == 'long':
+                activated = (price >= entry * (1 + trigger_pct))
+                # 维护峰值
+                prev_peak = float(self.trailing_peak.get(symbol, entry) or entry)
+                now_basis = price if basis == 'close' else price  # 简化：无高低价时用 close
+                peak = max(prev_peak, now_basis)
+                self.trailing_peak[symbol] = peak
+                if activated:
+                    # 新SL跟随峰值下方 trail_pct
+                    new_sl = peak * (1 - trail_pct)
+                    # 仅在提高SL（更接近当前价）时更新
+                    if new_sl > float(st.get('sl', 0) or 0):
+                        st['sl'] = new_sl
+            else:  # short
+                activated = (price <= entry * (1 - trigger_pct))
+                # 维护谷值
+                prev_trough = float(self.trailing_trough.get(symbol, entry) or entry)
+                now_basis = price if basis == 'close' else price
+                trough = min(prev_trough, now_basis)
+                self.trailing_trough[symbol] = trough
+                if activated:
+                    # 新SL（空头）跟随谷值上方 trail_pct
+                    new_sl = trough * (1 + trail_pct)
+                    # 仅在降低SL（更接近当前价方向）时更新
+                    cur_sl = float(st.get('sl', 0) or 0)
+                    if cur_sl == 0 or new_sl < cur_sl:
+                        st['sl'] = new_sl
+        except Exception as e:
+            logger.debug(f"🔧 追踪止损更新异常 {symbol}: {e}")
+
+    def _check_hard_stop(self, symbol: str, price: float, side: str) -> bool:
+        """硬止损/止盈校验（只返回布尔结果与日志，不直接平仓）"""
+        try:
+            st = self.sl_tp_state.get(symbol)
+            if not st:
+                return False
+            sl = float(st.get('sl', 0) or 0)
+            tp = float(st.get('tp', 0) or 0)
+            if sl <= 0 or tp <= 0 or price <= 0:
+                return False
+            if side == 'long':
+                if price <= sl or price >= tp:
+                    logger.info(f"⛔ 价格触达阈值(多) {symbol}: 价={price:.6f} SL={sl:.6f} TP={tp:.6f}")
+                    return True
+            else:
+                if price >= sl or price <= tp:
+                    logger.info(f"⛔ 价格触达阈值(空) {symbol}: 价={price:.6f} SL={sl:.6f} TP={tp:.6f}")
+                    return True
+            return False
+        except Exception as e:
+            logger.debug(f"🔧 硬止损校验异常 {symbol}: {e}")
+            return False
+
+    def _maybe_partial_take_profit(self, symbol: str, price: float, atr: float, side: str) -> None:
+        """占位：程序内分批止盈（交易所侧当前为全仓TP）；如需交易所分批，需改为多档条件单"""
+        try:
+            # 可在达到 >m*ATR 时，将 TP 适度前移以提高触发概率（示例，不强制执行）
+            st = self.sl_tp_state.get(symbol)
+            if not st or atr <= 0:
+                return
+            entry = float(st.get('entry', 0) or 0)
+            profit = (price - entry) if side == 'long' else (entry - price)
+            # 轻微前移TP示例：盈利>2.0*ATR时，把TP向当前价靠近10%
+            if profit > 2.0 * atr:
+                tp0 = float(st.get('tp', 0) or 0)
+                if tp0 > 0:
+                    if side == 'long':
+                        st['tp'] = entry + (tp0 - entry) * 0.9
+                    else:
+                        st['tp'] = entry - (entry - tp0) * 0.9
+                    logger.debug(f"🎯 动态前移TP {symbol}: 新TP={st['tp']:.6f}")
+        except Exception:
+            pass
+
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
         """挂OKX侧TP/SL条件单"""
         try:
@@ -1413,6 +1504,7 @@ class MACDStrategy:
                 'tdMode': 'cross',
                 'slTriggerPx': str(sl),
                 'slOrdPx': '-1',  # market
+                'closeFraction': '1',  # 触发时按持仓比例全平
                 'clOrdId': clid_sl,
             }
             params_tp = {
@@ -1423,6 +1515,7 @@ class MACDStrategy:
                 'tdMode': 'cross',
                 'tpTriggerPx': str(tp),
                 'tpOrdPx': '-1',  # market
+                'closeFraction': '1',  # 触发时按持仓比例全平
                 'clOrdId': clid_tp,
             }
             
