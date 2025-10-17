@@ -850,7 +850,7 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。统一按 instId 查询，收集 algoId 批量撤销；不传 ordType/clOrdId。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。统一按 instId 查询，收集 algoId 批量撤销；添加必要的ordType参数。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
@@ -858,32 +858,54 @@ class MACDStrategy:
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
             ids: List[str] = []
+            order_types: Dict[str, str] = {}  # 存储每个algoId对应的ordType
+            
             for it in (data or []):
                 try:
                     if str(it.get('instId') or '') != inst_id:
                         continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
                     if aid:
-                        ids.append(str(aid))
+                        aid_str = str(aid)
+                        ids.append(aid_str)
+                        # 保存订单类型，默认为"conditional"
+                        order_types[aid_str] = it.get('ordType', 'conditional')
                 except Exception:
                     continue
+                    
             if not ids:
                 return True
-            payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
-            payload_arr = {'algoIds': ids, 'instId': inst_id}
+                
+            # 添加ordType参数到请求中
+            payload_obj = {
+                'algoIds': [{'algoId': x, 'ordType': order_types.get(x, 'conditional')} for x in ids], 
+                'instId': inst_id
+            }
+            payload_arr = {
+                'algoIds': ids, 
+                'instId': inst_id,
+                'ordType': 'conditional'  # 默认使用conditional类型
+            }
+            
             ok = False
             try:
                 self.exchange.privatePostTradeCancelAlgos(payload_obj)
                 ok = True
-            except Exception:
+            except Exception as e:
+                logger.debug(f"尝试第一种撤单方式失败: {e}")
                 try:
                     self.exchange.privatePostTradeCancelAlgos(payload_arr)
                     ok = True
-                except Exception:
+                except Exception as e:
+                    logger.debug(f"尝试第二种撤单方式失败: {e}")
                     ok_any = False
                     for aid in ids:
                         try:
-                            self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
+                            self.exchange.privatePostTradeCancelAlgos({
+                                'algoId': aid, 
+                                'instId': inst_id,
+                                'ordType': order_types.get(aid, 'conditional')
+                            })
                             ok_any = True
                         except Exception:
                             continue
