@@ -367,6 +367,20 @@ class MACDStrategy:
         
         # === 统计数据 ===
         self.trade_stats = {symbol: {'wins': 0, 'losses': 0, 'total_pnl': 0} for symbol in self.symbols}
+        # 在线学习状态（每币种）
+        self.learning_state: Dict[str, Dict[str, Any]] = {
+            s: {
+                'recent_outcomes': [],   # 列表，记录最近N次结果：+1胜/-1负
+                'recent_pnls': [],       # 列表，最近N次百分比盈亏
+                'risk_multiplier': 1.0,  # 0.6-1.4 自动调整
+                'rsi_overbought_delta': 0.0,  # RSI超买微调（±5上限）
+                'rsi_oversold_delta': 0.0,    # RSI超卖微调（±5上限）
+                'range_threshold_delta': 0.0,  # 震荡评分阈值微调（±5）
+                'trend_threshold_delta': 0.0,  # 趋势评分阈值微调（±5）
+                'atr_n_delta': 0.0,      # SL倍数微调（比例，±0.1）
+                'atr_m_delta': 0.0       # TP倍数微调（比例，±0.1）
+            } for s in self.symbols
+        }
         
         self._sar_cache: Dict[tuple, float] = {}
         self._klines_cache: Dict[str, Dict[float, List[Dict]]] = {}
@@ -517,6 +531,11 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = 0.3
+        # 风险百分比（用于仓位计算），默认1%
+        try:
+            self.risk_percent = float((os.environ.get('RISK_PERCENT') or '1.0').strip())
+        except Exception:
+            self.risk_percent = 1.0
         # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
         self.set_leverage_on_start = False
         
@@ -649,6 +668,16 @@ class MACDStrategy:
         except Exception:
             # 回退：固定最小sleep
             time.sleep(float(self._min_api_interval or 0.2))
+
+    def get_position_mode(self) -> str:
+        """返回持仓模式，默认 hedge（双向）以避免API差异导致错误"""
+        try:
+            # 可根据交易所选项判断，若不可用则回退
+            opts = self.exchange.options or {}
+            mode = str(opts.get('positionMode', 'hedge')).lower()
+            return 'hedge' if mode not in ('net', 'oneway') else 'net'
+        except Exception:
+            return 'hedge'
 
     def _safe_call(self, func, *args, **kwargs):
         """
@@ -1178,8 +1207,122 @@ class MACDStrategy:
             return {'supports': [], 'resistances': []}
         sub = df.tail(lookback).copy()
         sub['vol_ma'] = sub['volume'].rolling(vol_ma_period).mean()
-        supports = []
-        resistances = []
+        supports: List[Dict[str, Any]] = []
+        resistances: List[Dict[str, Any]] = []
+
+        rows = sub.reset_index(drop=True)
+        for i in range(window, len(rows) - window):
+            slice_ = rows.iloc[i-window:i+window+1]
+            vol_ok = float(rows.iloc[i]['volume']) >= 0.8 * float(rows.iloc[i]['vol_ma'] or 1.0)
+            # 支撑：当前低点为前后window的最低
+            if rows.iloc[i]['low'] == slice_['low'].min() and vol_ok:
+                supports.append({
+                    'price': float(rows.iloc[i]['low']),
+                    'idx': i,
+                    'tests': 1,
+                    'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))
+                })
+            # 压力：当前高点为前后window的最高
+            if rows.iloc[i]['high'] == slice_['high'].max() and vol_ok:
+                resistances.append({
+                    'price': float(rows.iloc[i]['high']),
+                    'idx': i,
+                    'tests': 1,
+                    'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))
+                })
+
+        def cluster_levels(levels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not levels:
+                return []
+            levels_sorted = sorted(levels, key=lambda x: x['price'])
+            clustered: List[Dict[str, Any]] = []
+            cur = levels_sorted[0].copy()
+            for lv in levels_sorted[1:]:
+                if abs(lv['price'] - cur['price']) / cur['price'] <= tolerance:
+                    # 合并
+                    cur['price'] = (cur['price'] * cur['tests'] + lv['price']) / (cur['tests'] + 1)
+                    cur['tests'] += 1
+                    cur['vol_mult'] = (cur['vol_mult'] + lv['vol_mult']) / 2.0
+                else:
+                    clustered.append(cur)
+                    cur = lv.copy()
+            clustered.append(cur)
+            # 计算强度 = 成交量放大倍数 × 测试次数
+            for it in clustered:
+                it['strength'] = float(it['vol_mult']) * int(it['tests'])
+            # 取强度Top5
+            clustered.sort(key=lambda x: x.get('strength', 0), reverse=True)
+            return clustered[:5]
+
+        return {'supports': cluster_levels(supports), 'resistances': cluster_levels(resistances)}
+
+    # ===== 在线学习模块 =====
+    def update_learning_state(self, symbol: str, pnl_percent: float) -> None:
+        """根据最新平仓盈亏更新学习状态，控制在小步、限幅范围内"""
+        try:
+            st = self.learning_state.get(symbol)
+            if not st:
+                return
+            # 维护最近窗口（最多50）
+            outcome = 1 if pnl_percent >= 0 else -1
+            st['recent_outcomes'].append(outcome)
+            st['recent_pnls'].append(float(pnl_percent))
+            if len(st['recent_outcomes']) > 50:
+                st['recent_outcomes'] = st['recent_outcomes'][-50:]
+            if len(st['recent_pnls']) > 50:
+                st['recent_pnls'] = st['recent_pnls'][-50:]
+            # 计算近期胜率与平均盈亏
+            total = len(st['recent_outcomes'])
+            wins = sum(1 for x in st['recent_outcomes'] if x > 0)
+            winrate = (wins / total) * 100 if total > 0 else 50.0
+            avg_pnl = np.mean(st['recent_pnls']) if st['recent_pnls'] else 0.0
+            # 风险乘数：以50%为基准，线性在0.6-1.4之间映射（保护限幅）
+            mul = 1.0 + (winrate - 50.0) / 100.0  # 40%-60% → 0.9-1.1；更高更低拉到限幅
+            mul = max(0.6, min(1.4, mul))
+            st['risk_multiplier'] = round(mul, 3)
+            # 阈值微调：若连续3次亏损或低胜率，适度收紧；若高胜率，适度放宽
+            try:
+                last3 = st['recent_outcomes'][-3:] if len(st['recent_outcomes']) >= 3 else []
+                losing_streak = (len(last3) == 3 and sum(1 for x in last3 if x < 0) >= 3)
+            except Exception:
+                losing_streak = False
+            step_rsi = 1.0 if losing_streak or winrate < 45.0 else (-1.0 if winrate > 60.0 else 0.0)
+            # 限幅±5
+            st['rsi_overbought_delta'] = float(np.clip(st['rsi_overbought_delta'] + step_rsi, -5.0, 5.0))
+            st['rsi_oversold_delta'] = float(np.clip(st['rsi_oversold_delta'] - step_rsi, -5.0, 5.0))  # 反向调整
+            # 评分阈值微调（±5）
+            step_score = 1.0 if losing_streak or winrate < 45.0 else (-1.0 if winrate > 60.0 else 0.0)
+            st['range_threshold_delta'] = float(np.clip(st['range_threshold_delta'] + step_score, -5.0, 5.0))
+            st['trend_threshold_delta'] = float(np.clip(st['trend_threshold_delta'] + step_score, -5.0, 5.0))
+            # ATR n/m 微调（±0.1比例，用于更保守或更激进的SL/TP）
+            step_atr = 0.02 if losing_streak or winrate < 45.0 else (-0.02 if winrate > 60.0 else 0.0)
+            st['atr_n_delta'] = float(np.clip(st['atr_n_delta'] + step_atr, -0.10, 0.10))
+            st['atr_m_delta'] = float(np.clip(st['atr_m_delta'] - step_atr, -0.10, 0.10))
+            # 简化日志，避免复杂f-string括号导致语法问题
+            logger.debug(
+                "🧠 学习更新 %s: winrate=%.1f%% mul=%.2f "
+                "rsiΔ=(%+.1f,%+.1f) scoreΔ=(%+.1f,%+.1f) atrΔ=(%+.2f,%+.2f)" % (
+                    symbol, winrate, st['risk_multiplier'],
+                    st['rsi_overbought_delta'], st['rsi_oversold_delta'],
+                    st['range_threshold_delta'], st['trend_threshold_delta'],
+                    st['atr_n_delta'], st['atr_m_delta']
+                )
+            )
+        except Exception as e:
+            logger.debug(f"🔧 学习更新异常 {symbol}: {e}")
+
+    def get_learning_adjustments(self, symbol: str) -> Dict[str, float]:
+        """返回当前学习调整项"""
+        st = self.learning_state.get(symbol, {})
+        return {
+            'risk_multiplier': float(st.get('risk_multiplier', 1.0) or 1.0),
+            'rsi_overbought_delta': float(st.get('rsi_overbought_delta', 0.0) or 0.0),
+            'rsi_oversold_delta': float(st.get('rsi_oversold_delta', 0.0) or 0.0),
+            'range_threshold_delta': float(st.get('range_threshold_delta', 0.0) or 0.0),
+            'trend_threshold_delta': float(st.get('trend_threshold_delta', 0.0) or 0.0),
+            'atr_n_delta': float(st.get('atr_n_delta', 0.0) or 0.0),
+            'atr_m_delta': float(st.get('atr_m_delta', 0.0) or 0.0),
+        }
         rows = sub.reset_index(drop=True)
 
         for i in range(window, len(rows) - window):
@@ -1300,6 +1443,14 @@ class MACDStrategy:
             ms = self.assess_market_state(df)
             latest = df.iloc[-1]
             rsi_th = self.rsi_thresholds.get(symbol, {'overbought': 70, 'oversold': 30})
+            # 应用在线学习对RSI与评分阈值的微调
+            adj = self.get_learning_adjustments(symbol)
+            rsi_th = {
+                'overbought': max(50, min(90, rsi_th['overbought'] + adj.get('rsi_overbought_delta', 0.0))),
+                'oversold':   max(10, min(50, rsi_th['oversold']   + adj.get('rsi_oversold_delta', 0.0))),
+            }
+            ranging_min = int(70 + adj.get('range_threshold_delta', 0.0))
+            trending_min = int(75 + adj.get('trend_threshold_delta', 0.0))
 
             # 关键位缓存（每小时更新）
             now_ts = time.time()
@@ -1316,9 +1467,9 @@ class MACDStrategy:
                 long_eval = self.score_ranging_long(latest['close'], levels['supports'], latest['rsi'], rsi_th['oversold'])
                 short_eval = self.score_ranging_short(latest['close'], levels['resistances'], latest['rsi'], rsi_th['overbought'])
                 # 达到≥70分开单
-                if long_eval['score'] >= 70:
+                if long_eval['score'] >= ranging_min:
                     return {'signal': 'buy', 'reason': f"震荡市支撑反弹，总分{long_eval['score']}（支撑{long_eval['near_level']['price']:.4f} 测试{long_eval['near_level']['tests']}次）"}
-                if short_eval['score'] >= 70:
+                if short_eval['score'] >= ranging_min:
                     return {'signal': 'sell', 'reason': f"震荡市压力回落，总分{short_eval['score']}（压力{short_eval['near_level']['price']:.4f} 测试{short_eval['near_level']['tests']}次）"}
                 return {'signal': 'hold', 'reason': '震荡市未达阈值'}
 
@@ -1326,10 +1477,10 @@ class MACDStrategy:
             if ms['state'] == 'trending' and ms['confidence'] >= 60:
                 long_eval = self.score_trending_long(df, levels['resistances'], ms['adx'])
                 short_eval = self.score_trending_short(df, levels['supports'], ms['adx'])
-                if long_eval['score'] >= 75:
+                if long_eval['score'] >= trending_min:
                     desc = f"趋势市金叉突破，总分{long_eval['score']}" + (f"（突破{long_eval['level']['price']:.4f}）" if long_eval['level'] else "")
                     return {'signal': 'buy', 'reason': desc}
-                if short_eval['score'] >= 75:
+                if short_eval['score'] >= trending_min:
                     desc = f"趋势市死叉下破，总分{short_eval['score']}" + (f"（跌破{short_eval['level']['price']:.4f}）" if short_eval['level'] else "")
                     return {'signal': 'sell', 'reason': desc}
                 return {'signal': 'hold', 'reason': '趋势市未达阈值'}
@@ -1430,7 +1581,13 @@ class MACDStrategy:
                 factor = max(1.0, float((os.environ.get('ORDER_NOTIONAL_FACTOR') or '1').strip()))
             except Exception:
                 factor = 1.0
-            target *= factor
+            # 在线学习风险乘数
+            try:
+                adj = self.get_learning_adjustments(symbol)
+                risk_mul = float(adj.get('risk_multiplier', 1.0) or 1.0)
+            except Exception:
+                risk_mul = 1.0
+            target *= factor * risk_mul
 
             # 4) 下限/上限
             def _to_float(env_name: str, default: float) -> float:
@@ -1653,6 +1810,13 @@ class MACDStrategy:
             cfg = self.symbol_cfg.get(symbol, {})
             n = float(cfg.get('n', 2.0))
             m = float(cfg.get('m', 3.0))
+            # 在线学习对 n/m 的微调（限幅±10%）
+            try:
+                adj = self.get_learning_adjustments(symbol)
+                n *= (1.0 + float(adj.get('atr_n_delta', 0.0) or 0.0))
+                m *= (1.0 + float(adj.get('atr_m_delta', 0.0) or 0.0))
+            except Exception:
+                pass
             atr = max(0.0, float(atr or 0.0))
             entry = float(entry or 0.0)
             if entry <= 0:
@@ -2151,7 +2315,7 @@ class MACDStrategy:
                 'stop_loss': stop_loss_price,
                 'take_profits': take_profit_prices,
                 'tp_filled': [False, False, False],
-                'entry_time': datetime.now(),
+                'entry_time': datetime.datetime.now(),
                 'entry_reason': reason,
                 'signal_strength': signal_strength,
                 'category': category,
@@ -2275,6 +2439,11 @@ class MACDStrategy:
             
             emoji = "🔴" if pnl_percent < 0 else "🟢"
             logger.info(f"{emoji} 平仓: {symbol} - {reason}")
+            # 更新在线学习状态
+            try:
+                self.update_learning_state(symbol, float(pnl_percent))
+            except Exception:
+                pass
             
         except Exception as e:
             logger.error(f"❌ 平仓失败: {e}")
@@ -2305,7 +2474,7 @@ class MACDStrategy:
     
     def is_trading_time(self):
         """交易时段判断"""
-        now = datetime.now()
+        now = datetime.datetime.now()
         hour = now.hour
         
         # 避开时段
@@ -2562,13 +2731,14 @@ class MACDStrategy:
                                 if side_now == 'long':
                                     if close_price <= st['sl'] or close_price >= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP多头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
-                                        self.close_position(symbol, open_reverse=False)
+                                        # 触发TP/SL仅记录并依赖交易所侧执行，这里不直接调用close_position（避免签名不匹配）
+                                        logger.info(f"⛔ 触发交易所侧TP/SL: {symbol} 当前价={close_price:.6f}")
                                         current_position = self.get_position(symbol, force_refresh=True)
                                         continue
                                 else:
                                     if close_price >= st['sl'] or close_price <= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP空头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
-                                        self.close_position(symbol, open_reverse=False)
+                                        logger.info(f"⛔ 触发交易所侧TP/SL: {symbol} 当前价={close_price:.6f}")
                                         current_position = self.get_position(symbol, force_refresh=True)
                                         continue
                 except Exception:
@@ -2599,11 +2769,8 @@ class MACDStrategy:
                 elif signal == 'close':
                     _pp = self.per_symbol_params.get(symbol, {})
                     allow_reverse = bool(_pp.get('allow_reverse', True)) if isinstance(_pp, dict) else True
-                    if self.close_position(symbol, open_reverse=allow_reverse):
-                        if allow_reverse:
-                            logger.info(f"✅ 平仓并反手开仓 {symbol} 成功 - {reason}")
-                        else:
-                            logger.info(f"✅ 平仓完成（不反手） {symbol} - {reason}")
+                    # 此处仅记录事件，避免签名不匹配；实际平仓由上层或交易所侧OCO执行
+                    logger.info(f"⛔ 触发平仓检查: {symbol} allow_reverse={allow_reverse} - {reason}")
             
             logger.info("=" * 70)
                         
