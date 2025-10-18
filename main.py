@@ -866,7 +866,7 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。优先撤本程序前缀；失败则强撤全部（不传ordType，使用algoId）。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。需携带 ordType 与 algoId；优先撤本程序前缀，失败则强撤全部。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
@@ -876,56 +876,52 @@ class MACDStrategy:
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
 
-            # 阶段1：仅撤我们前缀的单
-            ours_ids: List[str] = []
-            all_ids: List[str] = []
+            # 收集：algoId + ordType
+            ours: List[Dict[str, str]] = []
+            all_items: List[Dict[str, str]] = []
             for it in (data or []):
                 try:
-                    aid = it.get('algoId') or it.get('algoID') or it.get('id')
+                    aid = str((it.get('algoId') or it.get('algoID') or it.get('id') or ''))
+                    ord_type = str(it.get('ordType') or '').lower()
                     clid = str(it.get('clOrdId') or '')
-                    if aid:
-                        all_ids.append(str(aid))
-                        if self.tpsl_cl_prefix and clid.startswith(self.tpsl_cl_prefix):
-                            ours_ids.append(str(aid))
+                    if not aid or not ord_type:
+                        continue
+                    item = {'algoId': aid, 'ordType': ord_type}
+                    all_items.append(item)
+                    if self.tpsl_cl_prefix and clid.startswith(self.tpsl_cl_prefix):
+                        ours.append(item)
                 except Exception:
                     continue
 
-            def _cancel_ids(ids: List[str]) -> bool:
-                if not ids:
+            def _cancel(items: List[Dict[str, str]]) -> bool:
+                if not items:
                     return False
-                # 优先批量对象格式，再退化为数组格式，最后单个
-                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
-                payload_arr = {'algoIds': ids, 'instId': inst_id}
                 ok = False
+                # OKX 支持对象数组：每项含 algoId 与 ordType；需附 instId
+                payload = {'algoIds': items, 'instId': inst_id}
                 try:
-                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
+                    self.exchange.privatePostTradeCancelAlgos(payload)
                     ok = True
                 except Exception:
-                    try:
-                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
-                        ok = True
-                    except Exception:
-                        for aid in ids:
-                            try:
-                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
-                                ok = True
-                            except Exception:
-                                pass
+                    # 逐个回退
+                    for it in items:
+                        try:
+                            self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'ordType': it['ordType'], 'instId': inst_id})
+                            ok = True
+                        except Exception:
+                            pass
                 return ok
 
             total = 0
-            if ours_ids:
-                if _cancel_ids(ours_ids):
-                    total += len(ours_ids)
+            if ours and _cancel(ours):
+                total += len(ours)
 
-            # 阶段2：若未成功撤销或仍有残留，强撤全部（不按前缀）
-            if total == 0 and all_ids:
-                if _cancel_ids(all_ids):
-                    total += len(all_ids)
+            if total == 0 and all_items and _cancel(all_items):
+                total += len(all_items)
 
             if total > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
-                time.sleep(0.3)  # 等待撤单生效
+                time.sleep(0.3)
                 return True
 
             logger.info(f"ℹ️ {symbol} 当前无可撤条件单")
