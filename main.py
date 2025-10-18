@@ -1590,11 +1590,24 @@ class MACDStrategy:
                     logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
                     target = 0.0
             else:
-                # 2) 默认每笔订单名义金额（不平均，全额用于当前有信号的币）
-                try:
-                    target = max(0.0, float((os.environ.get('DEFAULT_ORDER_USDT') or '1.0').strip()))
-                except Exception:
-                    target = 1.0
+                # 2) 保证金驱动（当有活跃交易对时）：每币保证金预算=余额/active_count×MARGIN_BUDGET_FACTOR，目标名义=预算×杠杆
+                if isinstance(active_count, int) and active_count and active_count > 0:
+                    try:
+                        lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+                    except Exception:
+                        lev = 20.0
+                    try:
+                        mbf = float((os.environ.get('MARGIN_BUDGET_FACTOR') or '1.0').strip())
+                    except Exception:
+                        mbf = 1.0
+                    margin_budget = (balance / float(active_count)) * mbf
+                    target = max(0.0, margin_budget * max(1.0, lev))
+                    logger.info(f"💵 模式=保证金分配: 余额={balance:.4f}U, 活跃={active_count}, 预算≈{margin_budget:.4f}U, lev={lev:.1f}x, 名义≈{target:.4f}U")
+                else:
+                    try:
+                        target = max(0.0, float((os.environ.get('DEFAULT_ORDER_USDT') or '1.0').strip()))
+                    except Exception:
+                        target = 1.0
 
             # 3) 放大因子
             try:
@@ -1642,13 +1655,8 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 保证金估算失败，谨慎起见跳过 {symbol}")
                 return 0.0
 
-            # 并发控制：按活跃信号数量折算，避免多币同时挤爆余额
-            try:
-                if isinstance(active_count, int) and active_count and active_count > 1:
-                    target = target / float(active_count)
-            except Exception:
-                pass
-            logger.info(f"💵 单币分配: 模式=逐币下单, 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
+            # 并发控制：保证金分配模式已按active_count分摊，不再二次均分
+            logger.info(f"💵 单币分配: 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
             return target
 
         except Exception as e:
