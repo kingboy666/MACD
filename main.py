@@ -541,6 +541,8 @@ class MACDStrategy:
         
         # 交易统计
         self.stats = TradingStats()
+        # 上一轮持仓快照，用于检测 >0 → 0 的平仓事件后补记统计
+        self.prev_positions: Dict[str, Dict[str, Any]] = {}
 
         # ===== 策略分组与BB/SAR参数（第一阶段以轻量映射接入）=====
         self.strategy_by_symbol: Dict[str, str] = {
@@ -2265,6 +2267,12 @@ class MACDStrategy:
         except Exception as e:
             logger.error(f"❌ 挂TP/SL失败 {symbol}: {e}")
             return False
+        finally:
+            # 轮次末尾再补记一次，捕捉本轮内由OCO触发的平仓
+            try:
+                self._track_position_stats()
+            except Exception as _estat2:
+                logger.debug(f"🔧 统计监听末尾异常: {_estat2}")
     
     def calculate_volatility(self, df):
         """计算波动率（用于动态调整参数）"""
@@ -2961,6 +2969,75 @@ class MACDStrategy:
         except Exception as e:
             logger.warning(f"⚠️ 守护执行异常: {e}")
 
+    def _track_position_stats(self) -> None:
+        """监听持仓变化：若从>0变为0，补记一笔成交统计并触发学习更新"""
+        try:
+            for symbol in self.symbols:
+                # 当前持仓
+                pos = self.get_position(symbol, force_refresh=True)
+                cur_size = float((pos or {}).get('size', 0) or 0)
+                cur_side = str((pos or {}).get('side', '') or '')
+                cur_entry = float((pos or {}).get('entry_price', 0) or 0)
+                # 上一轮快照
+                prev = self.prev_positions.get(symbol, {'size': 0.0, 'side': '', 'entry': 0.0})
+                prev_size = float(prev.get('size', 0) or 0)
+                prev_side = str(prev.get('side', '') or '')
+                prev_entry = float(prev.get('entry', 0) or 0)
+
+                # 平仓事件：上一轮有仓，本轮无仓
+                if prev_size > 0 and cur_size <= 0:
+                    # 取收盘/最新价为close
+                    close_px = 0.0
+                    try:
+                        inst_id = self.symbol_to_inst_id(symbol)
+                        tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
+                        d = tkr.get('data') if isinstance(tkr, dict) else tkr
+                        if isinstance(d, list) and d:
+                            close_px = float(d[0].get('last') or d[0].get('lastPx') or 0.0)
+                    except Exception:
+                        close_px = 0.0
+                    if close_px <= 0:
+                        try:
+                            df_last = self.get_klines(symbol, 20)
+                            if isinstance(df_last, pd.DataFrame) and not df_last.empty:
+                                close_px = float(df_last['close'].values[-1])
+                        except Exception:
+                            close_px = 0.0
+
+                    # 估算盈亏（简化：按size为标的数量估算）
+                    entry_px = prev_entry if prev_entry > 0 else cur_entry
+                    side_use = prev_side if prev_side else (cur_side or 'long')
+                    pnl_u = 0.0
+                    pnl_pct = 0.0
+                    if entry_px > 0 and close_px > 0:
+                        if side_use == 'long':
+                            pnl_u = (close_px - entry_px) * prev_size
+                            pnl_pct = (close_px - entry_px) / entry_px * 100.0
+                        else:
+                            pnl_u = (entry_px - close_px) * prev_size
+                            pnl_pct = (entry_px - close_px) / entry_px * 100.0
+
+                    # 写入统计与学习
+                    try:
+                        self.stats.add_trade(symbol, side_use, float(pnl_u))
+                    except Exception:
+                        pass
+                    try:
+                        if hasattr(self, 'update_learning_state'):
+                            self.update_learning_state(symbol, float(pnl_pct))
+                    except Exception:
+                        pass
+
+                # 更新快照：仅在有持仓时记录
+                if cur_size > 0:
+                    self.prev_positions[symbol] = {'size': cur_size, 'side': cur_side, 'entry': cur_entry}
+                else:
+                    # 无仓则清除快照，避免重复统计
+                    if symbol in self.prev_positions:
+                        del self.prev_positions[symbol]
+        except Exception as e:
+            logger.debug(f"🔧 持仓统计监听异常: {e}")
+
     def execute_strategy(self):
         """执行策略"""
         logger.info("=" * 70)
@@ -2969,6 +3046,11 @@ class MACDStrategy:
         
         try:
             self.check_sync_needed()
+            # 每轮先补记因OCO等导致的平仓统计/学习
+            try:
+                self._track_position_stats()
+            except Exception as _estat:
+                logger.debug(f"🔧 统计监听异常: {_estat}")
             # 每轮先执行TP/SL守护，确保有持仓的币都挂好交易所侧TP/SL
             try:
                 self.ensure_tpsl_guard()
