@@ -2116,6 +2116,19 @@ class MACDStrategy:
             else:
                 if sl - tp < min_sep:
                     sl = _round_px(max(sl, tp + min_sep))
+            # 交易所方向性严格校验：SL/TP 与最新价必须满足不等式（避免 51280）
+            if side == 'long':
+                # 多头：SL < last；TP > last（至少相差1 tick）
+                if sl >= last:
+                    sl = _round_px(max(tick_sz, last - max(min_delta, min_sep) - tick_sz))
+                if tp <= last:
+                    tp = _round_px(last + max(min_delta, min_sep) + tick_sz)
+            else:
+                # 空头：SL > last；TP < last（至少相差1 tick）
+                if sl <= last:
+                    sl = _round_px(last + max(min_delta, min_sep) + tick_sz)
+                if tp >= last:
+                    tp = _round_px(max(tick_sz, last - max(min_delta, min_sep) - tick_sz))
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
