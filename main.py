@@ -866,58 +866,71 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。优先撤本程序前缀；失败则强撤全部（不传ordType，使用algoId）。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
+
+            # 拉取待撤算法单
             resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
             data = resp.get('data') if isinstance(resp, dict) else resp
-            groups: Dict[str, List[Dict[str, str]]] = {}
+
+            # 阶段1：仅撤我们前缀的单
+            ours_ids: List[str] = []
+            all_ids: List[str] = []
             for it in (data or []):
                 try:
-                    ord_type = str(it.get('ordType') or '').lower()
-                    if not ord_type:
-                        continue
-                    clid = str(it.get('clOrdId') or '')
-                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
-                        continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
+                    clid = str(it.get('clOrdId') or '')
                     if aid:
-                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
+                        all_ids.append(str(aid))
+                        if self.tpsl_cl_prefix and clid.startswith(self.tpsl_cl_prefix):
+                            ours_ids.append(str(aid))
                 except Exception:
                     continue
-            if not groups:
-                return True
-            total = 0
-            for ord_type, items in groups.items():
-                ids = [x['algoId'] for x in items]
+
+            def _cancel_ids(ids: List[str]) -> bool:
+                if not ids:
+                    return False
+                # 优先批量对象格式，再退化为数组格式，最后单个
                 payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
                 payload_arr = {'algoIds': ids, 'instId': inst_id}
-                ok_this = False
+                ok = False
                 try:
                     self.exchange.privatePostTradeCancelAlgos(payload_obj)
-                    ok_this = True
+                    ok = True
                 except Exception:
                     try:
                         self.exchange.privatePostTradeCancelAlgos(payload_arr)
-                        ok_this = True
+                        ok = True
                     except Exception:
                         for aid in ids:
                             try:
                                 self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
-                                ok_this = True
+                                ok = True
                             except Exception:
-                                continue
-                if ok_this:
-                    total += len(ids)
-                else:
-                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
+                                pass
+                return ok
+
+            total = 0
+            if ours_ids:
+                if _cancel_ids(ours_ids):
+                    total += len(ours_ids)
+
+            # 阶段2：若未成功撤销或仍有残留，强撤全部（不按前缀）
+            if total == 0 and all_ids:
+                if _cancel_ids(all_ids):
+                    total += len(all_ids)
+
             if total > 0:
                 logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
+                time.sleep(0.3)  # 等待撤单生效
                 return True
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
-            return False
+
+            logger.info(f"ℹ️ {symbol} 当前无可撤条件单")
+            return True
+
         except Exception as e:
             logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
             return False
@@ -1932,7 +1945,7 @@ class MACDStrategy:
             pass
 
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
-        """挂OKX侧TP/SL条件单（仅保持一个整仓OCO；方向校验；tick对齐；无持仓不挂单）"""
+        """挂OKX侧TP/SL条件单（仅保持一个整仓OCO；方向校验；tick对齐；无持仓不挂单；缺失时自动生成SL/TP；自适应重试51088/51023）"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
@@ -1943,21 +1956,15 @@ class MACDStrategy:
             if not pos or float(pos.get('size', 0) or 0) <= 0:
                 logger.warning(f"⚠️ 无持仓，跳过交易所侧TP/SL {symbol}")
                 return False
-            pos_side = pos.get('side', 'long')
 
-            # 读取当前策略内的 SL/TP
+            # 读取策略侧SL/TP；若缺失且提供entry/atr，则自动生成
             st = self.sl_tp_state.get(symbol, {})
             sl = float(st.get('sl', 0.0) or 0.0)
             tp = float(st.get('tp', 0.0) or 0.0)
-            if sl <= 0 or tp <= 0:
-                logger.warning(f"⚠️ 未设定有效SL/TP，跳过 {symbol}")
-                return False
 
-            # 获取最新价与精度信息
+            # 最新价与精度
             px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
             tick_sz = 10 ** (-px_prec)
-
-            # 市场最新价
             last = 0.0
             try:
                 tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
@@ -1967,49 +1974,53 @@ class MACDStrategy:
                         last = float(d[0].get('last') or d[0].get('lastPx') or 0.0)
             except Exception as _e:
                 logger.warning(f"⚠️ 获取最新价失败 {symbol}: {_e}")
-
             if last <= 0:
-                # 若最新价不可用，则使用入场价作为参考
                 last = max(0.0, float(entry or 0.0))
             if last <= 0:
                 logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
                 return False
 
+            # 缺失时自动生成 SL/TP（按ATR与固定比例）
+            if (sl <= 0 or tp <= 0) and entry > 0:
+                base_sl = max(entry * 0.005, atr if atr > 0 else last * 0.003)  # 0.5% 或 1*ATR（若无ATR，用0.3%）
+                base_tp = max(entry * 0.03, (atr * 2.0) if atr > 0 else last * 0.02)  # 3% 或 2*ATR（若无ATR，用2%）
+                if side == 'long':
+                    sl = entry - base_sl
+                    tp = entry + base_tp
+                else:
+                    sl = entry + base_sl
+                    tp = entry - base_tp
+                logger.info(f"🔧 自动生成SL/TP {symbol}: entry={entry:.6f} atr={atr:.6f} → SL={sl:.6f} TP={tp:.6f}")
+
             # 多头TP放大倍数（仅多头适用）
-            boost = 1.0
             try:
                 boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
+                if side == 'long' and boost > 1.0:
+                    tp *= boost
             except Exception:
-                boost = 1.0
-            if side == 'long' and boost > 1.0:
-                tp *= boost
+                pass
 
             # 方向与距离校验，自动纠正到合规触发价范围
             min_ticks = int(self.tp_sl_min_delta_ticks or 1)
             min_delta = tick_sz * max(1, min_ticks)
 
             def _round_px(x: float) -> float:
-                # 向价格精度对齐
                 return round(x, px_prec)
 
             if side == 'long':
-                # 多头：TP 必须高于 last，SL 必须低于 last
                 tp = max(tp, last + min_delta)
                 sl = min(sl, last - min_delta)
             else:
-                # 空头：TP 必须低于 last，SL 必须高于 last
                 tp = min(tp, last - min_delta)
                 sl = max(sl, last + min_delta)
 
             tp = _round_px(tp)
             sl = _round_px(sl)
-
-            # 若纠正后触发价不再有效（例如超出交易所范围），直接跳过
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
 
-            # 挂新单前撤旧（仅撤本程序的TP/SL）
+            # 挂新单前撤旧（先撤本程序前缀，不行则强撤全部）
             try:
                 self.cancel_symbol_tp_sl(symbol)
                 time.sleep(0.3)
@@ -2017,34 +2028,53 @@ class MACDStrategy:
                 pass
 
             # OCO参数：保证仅一组整仓TP/SL
-            params_oco = {
-                'instId': inst_id,
-                'ordType': 'oco',
-                'side': 'sell' if side == 'long' else 'buy',
-                'posSide': side,  # 与策略侧一致（long/short）
-                'tdMode': 'cross',
-                'tpTriggerPx': str(tp),
-                'tpOrdPx': '-1',   # 市价
-                'slTriggerPx': str(sl),
-                'slOrdPx': '-1',   # 市价
-                'closeFraction': '1',  # 全仓触发
-            }
-
-            # 提交 OCO
-            try:
+            def _submit_oco(use_posside: bool = True) -> Tuple[str, str]:
+                params_oco = {
+                    'instId': inst_id,
+                    'ordType': 'oco',
+                    'side': 'sell' if side == 'long' else 'buy',
+                    'tdMode': 'cross',
+                    'tpTriggerPx': str(tp),
+                    'tpOrdPx': '-1',
+                    'slTriggerPx': str(sl),
+                    'slOrdPx': '-1',
+                    'closeFraction': '1',
+                }
+                if use_posside:
+                    params_oco['posSide'] = side  # long/short
                 resp = self.exchange.privatePostTradeOrderAlgo(params_oco)
                 data = resp.get('data', []) if isinstance(resp, dict) else []
                 item = data[0] if (isinstance(data, list) and data) else {}
                 s_code = str(item.get('sCode', '1'))
                 s_msg = str(item.get('sMsg', '') or '')
+                return s_code, s_msg
+
+            # 提交 OCO，处理特定错误码
+            try:
+                s_code, s_msg = _submit_oco(use_posside=True)
                 if s_code != '0':
-                    # 51088：仅允许一个整仓TP/SL；遇到就不重试
                     if s_code == '51088':
-                        logger.warning(f"⚠️ 交易所仅允许一个整仓TP/SL {symbol}：{s_msg}（不重试）")
+                        # 强撤全部后仅重试一次
+                        logger.warning(f"⚠️ 交易所仅允许一个整仓TP/SL {symbol}：{s_msg}，尝试强撤后重试一次")
+                        try:
+                            self.cancel_symbol_tp_sl(symbol)
+                            time.sleep(0.3)
+                        except Exception:
+                            pass
+                        s_code2, s_msg2 = _submit_oco(use_posside=True)
+                        if s_code2 != '0':
+                            logger.warning(f"⚠️ 重试挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
+                            return False
+                    elif s_code == '51023':
+                        # 去掉 posSide 重试一次（净值模式）
+                        logger.warning(f"⚠️ 持仓侧匹配失败 {symbol}: {s_msg}，去掉posSide重试一次")
+                        s_code2, s_msg2 = _submit_oco(use_posside=False)
+                        if s_code2 != '0':
+                            logger.warning(f"⚠️ 去掉posSide重试失败 {symbol}: code={s_code2} msg={s_msg2}")
+                            return False
+                    else:
+                        logger.warning(f"⚠️ 挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                         return False
-                    # 51277/51250：方向或范围错误，已前置矫正；仍失败则记录
-                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
-                    return False
             except Exception as e:
                 logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
                 return False
