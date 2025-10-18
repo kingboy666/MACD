@@ -1527,12 +1527,14 @@ class MACDStrategy:
                     entry_price = float(p.get('avgPx', 0) or 0)
                     leverage = float(p.get('lever', 0) or 0)
                     unreal = float(p.get('upl', 0) or 0)
+                    margin_mode = str(p.get('mgnMode', 'cross') or 'cross').lower()
                     pos_data = {
                         'size': size,
                         'side': side,
                         'entry_price': entry_price,
                         'unrealized_pnl': unreal,
                         'leverage': leverage,
+                        'margin_mode': margin_mode,
                     }
                     self.positions_cache[symbol] = pos_data
                     return pos_data
@@ -2143,14 +2145,21 @@ class MACDStrategy:
                     'instId': inst_id,
                     'ordType': 'oco',
                     'side': 'sell' if side == 'long' else 'buy',
-                    'tdMode': 'cross',
-                    'reduceOnly': 'true',
+                    'tdMode': ('isolated' if str(pos.get('margin_mode', 'cross')).lower() == 'isolated' else 'cross'),
+                    'reduceOnly': True,
                     'tpTriggerPx': str(tp),
                     'tpOrdPx': '-1',
                     'slTriggerPx': str(sl),
                     'slOrdPx': '-1',
                     'closeFraction': '1',
                 }
+                # 在 hedge 模式下必须传正确的 posSide；net/oneway 模式不传
+                try:
+                    if self.get_position_mode() == 'hedge':
+                        ps = str(pos.get('side', 'long') or 'long')
+                        params_oco['posSide'] = 'long' if ps == 'long' else 'short'
+                except Exception:
+                    pass
                 # 不传 posSide（适配 net/oneway/hedge；避免 51023）
                 resp = self.exchange.privatePostTradeOrderAlgo(params_oco)
                 data = resp.get('data', []) if isinstance(resp, dict) else []
