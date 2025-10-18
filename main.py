@@ -2118,12 +2118,24 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
 
-            # 挂新单前撤旧（先撤本程序前缀，不行则强撤全部）
+            # 保守模式：若交易所侧已存在TP/SL，则不撤不重挂，直接跳过
             try:
-                self.cancel_symbol_tp_sl(symbol)
-                time.sleep(0.3)
+                resp_pending = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                pend = resp_pending.get('data') if isinstance(resp_pending, dict) else resp_pending
+                has_algo = False
+                for it in (pend or []):
+                    aid = (it.get('algoId') or it.get('algoID') or it.get('id'))
+                    if aid:
+                        has_algo = True
+                        break
+                if has_algo:
+                    logger.info(f"ℹ️ 已有交易所侧TP/SL，保守模式下跳过重挂 {symbol}")
+                    return True
             except Exception:
+                # 查询失败不阻断，继续后续逻辑（但仍不主动撤旧）
                 pass
+
+            # 保守模式：不执行撤单，直接尝试首次挂OCO（若不存在）
 
             # OCO参数：保证仅一组整仓TP/SL
             def _submit_oco(use_posside: bool = True):
