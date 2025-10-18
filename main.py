@@ -1642,6 +1642,12 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 保证金估算失败，谨慎起见跳过 {symbol}")
                 return 0.0
 
+            # 并发控制：按活跃信号数量折算，避免多币同时挤爆余额
+            try:
+                if isinstance(active_count, int) and active_count and active_count > 1:
+                    target = target / float(active_count)
+            except Exception:
+                pass
             logger.info(f"💵 单币分配: 模式=逐币下单, 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
             return target
 
@@ -1914,7 +1920,7 @@ class MACDStrategy:
             # 精度与最小间距、方向/不等式矫正
             px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
             tick_sz = 10 ** (-px_prec)
-            min_delta = max(10 * tick_sz, entry * 0.005)
+            min_delta = max(10 * tick_sz, entry * 0.001)  # 最小价差：0.1% 或 ≥10 ticks
             if str(side).lower() == 'long':
                 sl = min(sl, entry - min_delta)
                 tp = max(tp, entry + min_delta)
@@ -2214,8 +2220,9 @@ class MACDStrategy:
             # 触发价下限保护：至少为一个tick，避免0或负数
             tp = max(tp, tick_sz)
             sl = max(sl, tick_sz)
-            # 强制最小分隔，避免 tp/sl 太近或相等（小数币更严格）
-            min_sep = max(10 * tick_sz, last * 0.005)
+            # 强制最小分隔（百分比），避免 tp/sl 太近或相等；对小数币更友好
+            base_px = max(entry, last, tick_sz)
+            min_sep = max(10 * tick_sz, base_px * 0.001)  # 至少0.1%
             if side == 'long':
                 if tp - sl < min_sep:
                     tp = _round_px(max(tp, sl + min_sep))
@@ -2261,8 +2268,28 @@ class MACDStrategy:
                         has_algo = True
                         break
                 if has_algo:
-                    logger.info(f"ℹ️ 已有交易所侧TP/SL，保守模式下跳过重挂 {symbol}")
-                    return True
+                    # 条件性更新：若新的SL更优（多头更高/空头更低），则继续挂新OCO；否则维持现状
+                    try:
+                        cur_sl = None
+                        for it in (pend or []):
+                            if it.get('algoId') or it.get('algoID') or it.get('id'):
+                                try:
+                                    cur_sl = float(it.get('slTriggerPx') or 0.0) or cur_sl
+                                except Exception:
+                                    pass
+                        should_update = False
+                        if side == 'long' and sl > (cur_sl or 0.0):
+                            should_update = True
+                        if side == 'short' and sl < (cur_sl or 1e99):
+                            should_update = True
+                        if not should_update:
+                            logger.info(f"ℹ️ 保守模式：已有OCO且止损不更优，维持现状 {symbol}")
+                            return True
+                        else:
+                            logger.info(f"🔄 更优止损，更新交易所侧TP/SL {symbol}: oldSL={cur_sl} newSL={sl}")
+                    except Exception as _e_chk:
+                        logger.debug(f"🔧 检查现有OCO触发价异常 {symbol}: {_e_chk}")
+                    # 继续走后续OCO提交流程（若返回51088视为成功降噪）
             except Exception:
                 # 查询失败不阻断，继续后续逻辑（但仍不主动撤旧）
                 pass
@@ -2281,7 +2308,8 @@ class MACDStrategy:
                     'tpOrdPx': '-1',
                     'slTriggerPx': str(sl),
                     'slOrdPx': '-1',
-                    'closeFraction': '1',
+                    # 使用实际持仓数量sz替代closeFraction，提升兼容性
+                    'sz': str(float(pos.get('size', 0) or 0.0)),
                 }
                 # 在 hedge 模式下必须传正确的 posSide；net/oneway 模式不传
                 try:
@@ -3119,6 +3147,15 @@ class MACDStrategy:
             if size <= 0:
                 return
             side = str(pos.get('side', '')).lower()  # 'long'/'short'
+            # 严格解析交易所posSide，未知标记为none，避免 net/oneway 误判
+            try:
+                ps = str(pos.get('posSide') or pos.get('positionSide') or '').lower()
+                if ps in ('long', 'short'):
+                    side = ps
+                else:
+                    side = side if side in ('long', 'short') else 'none'
+            except Exception:
+                side = side if side in ('long', 'short') else 'none'
             entry = float(pos.get('entry_price', 0) or 0.0)
             tick_sz = float(self.get_tick_size(symbol) or 0.0)
             if entry <= 0 or tick_sz <= 0:
@@ -3140,31 +3177,31 @@ class MACDStrategy:
                         last = float(df['close'].values[-1])
                 except Exception:
                     return
-            # 关键位（T1/T2）
+            # 关键位（t1/T2）
             sup = levels.get('support', []) or []
             res = levels.get('resistance', []) or []
             # 选择下一目标位
-            T1 = None
+            t1 = None
             if side == 'long':
                 # 最近上方压力位
                 ups = [x for x in res if x and float(x) > entry]
-                T1 = min(ups) if ups else None
+                t1 = min(ups) if ups else None
             elif side == 'short':
                 dns = [x for x in sup if x and float(x) < entry]
-                T1 = max(dns) if dns else None
+                t1 = max(dns) if dns else None
             # 1R 计算（以初始SL记录或最小间距近似）
             sl_state = self.sl_tp_state.get(symbol, {})
             sl_init = float(sl_state.get('sl', 0) or 0.0)
             R = abs(entry - sl_init) if sl_init > 0 else max(entry * 0.005, 10.0 * tick_sz)
             # 状态缓存
             st = self.range_pt_state.setdefault(symbol, {'partial_done': False, 'breakeven_active': False, 'trail_anchor': entry})
-            # 分仓止盈触发条件：触达T1或达到≥0.7R
-            reach_T1 = False
-            if T1 is not None:
+            # 分仓止盈触发条件：触达t1或达到≥0.7R
+            reach_t1 = False
+            if t1 is not None:
                 tol = max(0.002 * entry, 5.0 * tick_sz)  # 0.2%或≥5tick容差
-                reach_T1 = (side == 'long' and last >= (float(T1) - tol)) or (side == 'short' and last <= (float(T1) + tol))
+                reach_t1 = (side == 'long' and last >= (float(t1) - tol)) or (side == 'short' and last <= (float(t1) + tol))
             reach_07R = (side == 'long' and (last - entry) >= 0.7 * R) or (side == 'short' and (entry - last) >= 0.7 * R)
-            if not st['partial_done'] and (reach_T1 or reach_07R):
+            if not st['partial_done'] and (reach_t1 or reach_07R):
                 # 平出60%
                 # 分仓数量按 lotSz/minSz 对齐
                 mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
@@ -3193,6 +3230,12 @@ class MACDStrategy:
                             params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
                         self.exchange.privatePostTradeOrder(params_okx)
                         logger.info(f"🎯 震荡分仓止盈60% {symbol}: side={side} size={part_sz}")
+                        # 学习：记录部分平仓收益估算
+                        try:
+                            pnl_pct = ((last - entry) / entry * 100.0) if side == 'long' else ((entry - last) / entry * 100.0)
+                            self.update_learning_state(symbol, float(pnl_pct))
+                        except Exception:
+                            pass
                         st['partial_done'] = True
                         st['breakeven_active'] = True
                         st['trail_anchor'] = last
@@ -3404,15 +3447,76 @@ class MACDStrategy:
                                 if side_now == 'long':
                                     if close_price <= st['sl'] or close_price >= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP多头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
-                                        # 触发TP/SL仅记录并依赖交易所侧执行，这里不直接调用close_position（避免签名不匹配）
-                                        logger.info(f"⛔ 触发交易所侧TP/SL: {symbol} 当前价={close_price:.6f}")
+                                        # 先交给交易所侧OCO执行，短暂等待
+                                        time.sleep(2)
                                         current_position = self.get_position(symbol, force_refresh=True)
+                                        if float(current_position.get('size', 0) or 0.0) > 0:
+                                            logger.error(f"🚨 OCO未执行，兜底市价全平 {symbol}")
+                                            try:
+                                                sell_buy = 'sell'
+                                                inst_id = self.symbol_to_inst_id(symbol)
+                                                td_mode = 'isolated' if str(current_position.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                                                # 对齐数量到 lotSz/minSz
+                                                mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                                                lot_sz = float(mi.get('lot_size') or mi.get('lotSz') or 0.0)
+                                                min_sz = float(mi.get('min_size') or mi.get('minSz') or 0.0)
+                                                rem = float(current_position.get('size', 0) or 0.0)
+                                                qty = rem
+                                                if lot_sz > 0:
+                                                    qty = float(int(rem / lot_sz) * lot_sz)
+                                                qty = min(qty, rem)
+                                                if qty > 0 and (min_sz <= 0 or qty >= min_sz):
+                                                    params_okx = {
+                                                        'instId': inst_id,
+                                                        'tdMode': td_mode,
+                                                        'side': sell_buy,
+                                                        'sz': str(qty),
+                                                        'ordType': 'market',
+                                                        'reduceOnly': True,
+                                                    }
+                                                    if self.get_position_mode() == 'hedge':
+                                                        params_okx['posSide'] = 'long'
+                                                    self.exchange.privatePostTradeOrder(params_okx)
+                                                else:
+                                                    logger.warning(f"⚠️ 兜底平仓数量未达最小单位，跳过 {symbol}: rem={rem} qty={qty}")
+                                            except Exception as _e_close:
+                                                logger.error(f"❌ 兜底平仓失败 {symbol}: {_e_close}")
                                         continue
                                 else:
                                     if close_price >= st['sl'] or close_price <= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP空头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
-                                        logger.info(f"⛔ 触发交易所侧TP/SL: {symbol} 当前价={close_price:.6f}")
+                                        time.sleep(2)
                                         current_position = self.get_position(symbol, force_refresh=True)
+                                        if float(current_position.get('size', 0) or 0.0) > 0:
+                                            logger.error(f"🚨 OCO未执行，兜底市价全平 {symbol}")
+                                            try:
+                                                sell_buy = 'buy'
+                                                inst_id = self.symbol_to_inst_id(symbol)
+                                                td_mode = 'isolated' if str(current_position.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                                                mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                                                lot_sz = float(mi.get('lot_size') or mi.get('lotSz') or 0.0)
+                                                min_sz = float(mi.get('min_size') or mi.get('minSz') or 0.0)
+                                                rem = float(current_position.get('size', 0) or 0.0)
+                                                qty = rem
+                                                if lot_sz > 0:
+                                                    qty = float(int(rem / lot_sz) * lot_sz)
+                                                qty = min(qty, rem)
+                                                if qty > 0 and (min_sz <= 0 or qty >= min_sz):
+                                                    params_okx = {
+                                                        'instId': inst_id,
+                                                        'tdMode': td_mode,
+                                                        'side': sell_buy,
+                                                        'sz': str(qty),
+                                                        'ordType': 'market',
+                                                        'reduceOnly': True,
+                                                    }
+                                                    if self.get_position_mode() == 'hedge':
+                                                        params_okx['posSide'] = 'short'
+                                                    self.exchange.privatePostTradeOrder(params_okx)
+                                                else:
+                                                    logger.warning(f"⚠️ 兜底平仓数量未达最小单位，跳过 {symbol}: rem={rem} qty={qty}")
+                                            except Exception as _e_close:
+                                                logger.error(f"❌ 兜底平仓失败 {symbol}: {_e_close}")
                                         continue
                 except Exception:
                     pass
@@ -3426,6 +3530,25 @@ class MACDStrategy:
                     if amount > 0:
                         if self.create_order(symbol, 'buy', amount):
                             logger.info(f"🚀 开多{symbol}成功 - {reason}")
+                            # 开仓后立即挂交易所侧TP/SL，避免裸奔
+                            try:
+                                time.sleep(1)
+                                pos_now = self.get_position(symbol, force_refresh=True) or {}
+                                if float(pos_now.get('size', 0) or 0.0) > 0:
+                                    df_now = self.get_klines(symbol, 50)
+                                    atr_val = 0.0
+                                    try:
+                                        df_ind = self.calculate_indicators(df_now, symbol)
+                                        atr_val = float(df_ind['atr'].values[-1])
+                                    except Exception:
+                                        pass
+                                    try:
+                                        self._set_initial_sl_tp(symbol, float(pos_now.get('entry_price', 0) or 0.0), atr_val, 'long')
+                                    except Exception:
+                                        pass
+                                    self.place_okx_tp_sl(symbol, float(pos_now.get('entry_price', 0) or 0.0), 'long', atr_val)
+                            except Exception as _e_init:
+                                logger.debug(f"🔧 开仓后挂TP/SL异常 {symbol}: {_e_init}")
                             self.last_position_state[symbol] = 'long'
                 
                 elif signal == 'sell':
