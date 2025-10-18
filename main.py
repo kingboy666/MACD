@@ -25,6 +25,7 @@ import math
 import traceback
 import random
 import re
+# 绘图支持（按需懒加载，避免环境缺库报错）
 
 # 配置日志 - 使用中国时区和UTF-8编码
 class ChinaTimeFormatter(logging.Formatter):
@@ -237,12 +238,12 @@ class MACDStrategy:
             'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '15m',
+            'WIF/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '15m',
-            'PEPE/USDT:USDT': '15m',
+            'ARB/USDT:USDT': '5m',
+            'PEPE/USDT:USDT': '5m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '15m',
+            'DOGE/USDT:USDT': '5m',
             'XRP/USDT:USDT': '15m',
         }
         
@@ -261,13 +262,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
             'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'XRP/USDT:USDT': {'fast': 7, 'slow': 17, 'signal': 9},
-            'ARB/USDT:USDT': {'fast': 10, 'slow': 26, 'signal': 9},
+            'ARB/USDT:USDT': {'fast': 6, 'slow': 15, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WLD/USDT:USDT': {'fast': 5, 'slow': 13, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 9, 'slow': 25, 'signal': 9},
-            'WIF/USDT:USDT': {'fast': 8, 'slow': 21, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 9, 'slow': 23, 'signal': 9}
+            'DOGE/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
+            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'PEPE/USDT:USDT': {'fast': 4, 'slow': 11, 'signal': 8}
         }
         
         # === 优化后的RSI参数 ===
@@ -276,13 +277,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 14,
             'SOL/USDT:USDT': 11,
             'XRP/USDT:USDT': 12,
-            'ARB/USDT:USDT': 10,
+            'ARB/USDT:USDT': 11,
             'FIL/USDT:USDT': 9,
             'ZRO/USDT:USDT': 14,
             'WLD/USDT:USDT': 9,
-            'DOGE/USDT:USDT': 10,
-            'WIF/USDT:USDT': 9,
-            'PEPE/USDT:USDT': 9
+            'DOGE/USDT:USDT': 7,
+            'WIF/USDT:USDT': 7,
+            'PEPE/USDT:USDT': 6
         }
         
         # === 动态超买超卖阈值 ===
@@ -291,12 +292,12 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'overbought': 70, 'oversold': 30},
             'SOL/USDT:USDT': {'overbought': 72, 'oversold': 28},
             'XRP/USDT:USDT': {'overbought': 70, 'oversold': 30},
-            'ARB/USDT:USDT': {'overbought': 75, 'oversold': 25},
+            'ARB/USDT:USDT': {'overbought': 72, 'oversold': 28},
             'FIL/USDT:USDT': {'overbought': 73, 'oversold': 27},
             'ZRO/USDT:USDT': {'overbought': 75, 'oversold': 25},
             'WLD/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'DOGE/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'WIF/USDT:USDT': {'overbought': 80, 'oversold': 20},
+            'DOGE/USDT:USDT': {'overbought': 78, 'oversold': 22},
+            'WIF/USDT:USDT': {'overbought': 78, 'oversold': 22},
             'PEPE/USDT:USDT': {'overbought': 80, 'oversold': 20}
         }
         
@@ -323,13 +324,13 @@ class MACDStrategy:
             'ETH/USDT:USDT': 2.0,
             'SOL/USDT:USDT': 2.5,
             'XRP/USDT:USDT': 2.3,
-            'ARB/USDT:USDT': 0.8,
+            'ARB/USDT:USDT': 2.5,
             'FIL/USDT:USDT': 2.8,
             'ZRO/USDT:USDT': 3.0,
             'WLD/USDT:USDT': 3.5,
-            'DOGE/USDT:USDT': 0.7,
-            'WIF/USDT:USDT': 0.6,
-            'PEPE/USDT:USDT': 0.6
+            'DOGE/USDT:USDT': 3.5,
+            'WIF/USDT:USDT': 4.0,
+            'PEPE/USDT:USDT': 4.5
         }
         
         self.take_profit = {
@@ -504,6 +505,8 @@ class MACDStrategy:
         self.open_orders_cache: Dict[str, List[Dict[str, Any]]] = {}
         self.last_sync_time: float = 0
         self.sync_interval: int = 60
+        # 关键位缓存：每币种每小时更新一次
+        self.key_levels_cache: Dict[str, Dict[str, Any]] = {}
         
         # 市场信息缓存
         self.markets_info: Dict[str, Dict[str, Any]] = {}
@@ -514,12 +517,6 @@ class MACDStrategy:
 
         # 每币种微延时，降低瞬时调用密度
         self.symbol_loop_delay = 0.3
-        # 风险百分比（每笔占用余额百分比），默认0.5%，可用环境变量 RISK_PERCENT 覆盖
-        try:
-            rp_str = (os.environ.get('RISK_PERCENT') or '0.5').strip()
-            self.risk_percent = max(0.0, float(rp_str))
-        except Exception:
-            self.risk_percent = 0.5
         # 启动时是否逐币设置杠杆（可设为 false 减少启动阶段私有接口调用）
         self.set_leverage_on_start = False
         
@@ -677,17 +674,7 @@ class MACDStrategy:
                 return func(*args, **kwargs)
             except Exception as e:
                 msg = str(e)
-                # 扩展瞬时/限频错误的重试判断范围
-                is_rate = any(s in msg for s in (
-                    '50011',             # Too Many Requests
-                    'Too Many Requests',
-                    'rate limit',
-                    'ETIMEDOUT',
-                    'timeout',
-                    'NetworkError',
-                    'ConnectionReset',
-                    'ECONNRESET'
-                ))
+                is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
                 if not is_rate or i >= retries:
                     raise
                 wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
@@ -850,65 +837,61 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序的单；不传 ordType；用 algoIds+instId 撤销，并短暂等待生效。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。仅撤本程序挂的单（clOrdId前缀），携带 instId，按 ordType 分组撤销。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return True
-
-            # 查询待撤销的算法单
-            try:
-                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-                data = resp.get('data') if isinstance(resp, dict) else resp
-            except Exception as e:
-                logger.debug(f"获取算法单失败 {symbol}: {e}")
-                data = None
-
-            if not data:
-                return True
-
-            # 仅撤销本程序挂的单（clOrdId 前缀）
-            algo_ids = []
+            resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+            data = resp.get('data') if isinstance(resp, dict) else resp
+            groups: Dict[str, List[Dict[str, str]]] = {}
             for it in (data or []):
                 try:
+                    ord_type = str(it.get('ordType') or '').lower()
+                    if not ord_type:
+                        continue
                     clid = str(it.get('clOrdId') or '')
-                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and clid and not clid.startswith(self.tpsl_cl_prefix):
+                    if self.safe_cancel_only_our_tpsl and self.tpsl_cl_prefix and (not clid.startswith(self.tpsl_cl_prefix)):
                         continue
                     aid = it.get('algoId') or it.get('algoID') or it.get('id')
                     if aid:
-                        algo_ids.append(str(aid))
+                        groups.setdefault(ord_type, []).append({'algoId': str(aid), 'clOrdId': clid})
                 except Exception:
                     continue
-
-            if not algo_ids:
+            if not groups:
                 return True
-
-            # 批量撤销（不传 ordType）
-            try:
-                self.exchange.privatePostTradeCancelAlgos({'algoIds': algo_ids, 'instId': inst_id})
-                logger.info(f"✅ 撤销 {symbol} 条件单成功: {len(algo_ids)} 个")
-            except Exception as e1:
-                logger.debug(f"批量撤销失败，逐个撤销 {symbol}: {e1}")
-                ok_cnt = 0
-                for aid in algo_ids:
+            total = 0
+            for ord_type, items in groups.items():
+                ids = [x['algoId'] for x in items]
+                payload_obj = {'algoIds': [{'algoId': x} for x in ids], 'instId': inst_id}
+                payload_arr = {'algoIds': ids, 'instId': inst_id}
+                ok_this = False
+                try:
+                    self.exchange.privatePostTradeCancelAlgos(payload_obj)
+                    ok_this = True
+                except Exception:
                     try:
-                        self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
-                        ok_cnt += 1
-                    except Exception as e2:
-                        logger.warning(f"撤销 {symbol} 条件单失败 algoId={aid}: {e2}")
-                if ok_cnt > 0:
-                    logger.info(f"✅ 撤销 {symbol} 条件单成功(逐个): {ok_cnt} 个")
-
-            # 等待撤销在交易所侧落地，避免立刻重挂触发 51088
-            try:
-                time.sleep(0.2)
-            except Exception:
-                pass
-
-            return True
+                        self.exchange.privatePostTradeCancelAlgos(payload_arr)
+                        ok_this = True
+                    except Exception:
+                        for aid in ids:
+                            try:
+                                self.exchange.privatePostTradeCancelAlgos({'algoId': aid, 'instId': inst_id})
+                                ok_this = True
+                            except Exception:
+                                continue
+                if ok_this:
+                    total += len(ids)
+                else:
+                    logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：ordType={ord_type}")
+            if total > 0:
+                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
+                return True
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败：未知原因")
+            return False
         except Exception as e:
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单异常: {e}")
-            return True
+            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
+            return False
     
     def sync_all_status(self):
         """同步所有状态"""
@@ -1082,6 +1065,287 @@ class MACDStrategy:
             result.sort(key=lambda x: x['timestamp'])
             df = pd.DataFrame(result)
             return df
+
+    # ====== 自适应策略指标与关键位模块 ======
+    def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
+        """计算ADX（平均趋向指标） - 返回最新值"""
+        if len(df) < period + 2:
+            return 0.0
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        plus_dm = (high.diff()).clip(lower=0)
+        minus_dm = (-low.diff()).clip(lower=0)
+        plus_dm[plus_dm < minus_dm] = 0
+        minus_dm[minus_dm < plus_dm] = 0
+        tr1 = (high - low)
+        tr2 = (high - close.shift()).abs()
+        tr3 = (low - close.shift()).abs()
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(period).mean()
+        plus_di = 100 * (plus_dm.rolling(period).sum() / atr)
+        minus_di = 100 * (minus_dm.rolling(period).sum() / atr)
+        dx = (abs(plus_di - minus_di) / (plus_di + minus_di).replace(0, np.nan)) * 100
+        adx = dx.rolling(period).mean()
+        try:
+            return float(adx.iloc[-1])
+        except Exception:
+            return 0.0
+
+    def calculate_bb_width(self, df: pd.DataFrame, period: int = 20, k: float = 2.0) -> float:
+        """计算布林带宽度：(上轨-下轨)/中轨，返回最新值（比例）"""
+        if len(df) < period + 1:
+            return 0.0
+        mid = df['close'].rolling(period).mean()
+        std = df['close'].rolling(period).std(ddof=0)
+        upper = mid + k * std
+        lower = mid - k * std
+        width = (upper - lower) / mid.replace(0, np.nan)
+        w = float(width.iloc[-1]) if not np.isnan(width.iloc[-1]) else 0.0
+        return max(0.0, w)
+
+    def ema_alignment(self, df: pd.DataFrame) -> str:
+        """EMA9/20/50排列：bull/bear/neutral"""
+        if len(df) < 50:
+            return 'neutral'
+        latest = df.iloc[-1]
+        if latest['ema_9'] > latest['ema_20'] > latest['ema_50']:
+            return 'bull'
+        if latest['ema_9'] < latest['ema_20'] < latest['ema_50']:
+            return 'bear'
+        return 'neutral'
+
+    def price_range_metric(self, df: pd.DataFrame, lookback: int = 30) -> float:
+        """近30根K线波动幅度：(最高-最低)/最低，返回比例"""
+        if len(df) < lookback:
+            return 0.0
+        sub = df.tail(lookback)
+        hi = float(sub['high'].max())
+        lo = float(sub['low'].min())
+        if lo <= 0:
+            return 0.0
+        return (hi - lo) / lo
+
+    def assess_market_state(self, df: pd.DataFrame) -> Dict[str, Any]:
+        """综合判断市场状态与置信度"""
+        adx = self.calculate_adx(df, period=14)
+        bb_w = self.calculate_bb_width(df, period=20, k=2.0)
+        ema_align = self.ema_alignment(df)
+        pr = self.price_range_metric(df, lookback=30)
+
+        # 打分：趋势/震荡各自累加
+        trend_score = 0
+        range_score = 0
+
+        # ADX
+        if adx > 25: trend_score += 40
+        elif adx < 20: range_score += 40
+        else: trend_score += 15; range_score += 15  # 20-25不明确
+
+        # BB宽度（用比例）
+        if bb_w > 0.06: trend_score += 25
+        elif bb_w < 0.03: range_score += 25
+        else: trend_score += 10; range_score += 10
+
+        # EMA排列
+        if ema_align == 'bull' or ema_align == 'bear':
+            trend_score += 20
+        else:
+            range_score += 15
+
+        # 价格区间
+        if pr > 0.10: trend_score += 15
+        else: range_score += 15
+
+        if trend_score >= range_score and trend_score >= 60:
+            state = 'trending'
+            confidence = trend_score
+        elif range_score > trend_score and range_score >= 60:
+            state = 'ranging'
+            confidence = range_score
+        else:
+            state = 'unclear'
+            confidence = max(trend_score, range_score)
+
+        return {'state': state, 'confidence': confidence, 'adx': adx, 'bb_width': bb_w, 'ema_align': ema_align, 'price_range': pr}
+
+    def identify_key_levels(self, df: pd.DataFrame, window: int = 5, vol_ma_period: int = 20, tolerance: float = 0.005, lookback: int = 100) -> Dict[str, List[Dict[str, Any]]]:
+        """支撑/压力识别 + 价格聚类，返回 {supports:[], resistances:[]}；每项含 price, tests, strength"""
+        if len(df) < max(vol_ma_period + window + 5, lookback):
+            return {'supports': [], 'resistances': []}
+        sub = df.tail(lookback).copy()
+        sub['vol_ma'] = sub['volume'].rolling(vol_ma_period).mean()
+        supports = []
+        resistances = []
+        rows = sub.reset_index(drop=True)
+
+        for i in range(window, len(rows) - window):
+            slice_ = rows.iloc[i-window:i+window+1]
+            vol_ok = float(rows.iloc[i]['volume']) >= 0.8 * float(rows.iloc[i]['vol_ma'] or 1.0)
+            # 支撑：当前低点为前后window的最低
+            if rows.iloc[i]['low'] == slice_['low'].min() and vol_ok:
+                supports.append({'price': float(rows.iloc[i]['low']), 'idx': i, 'tests': 1, 'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))})
+            # 压力：当前高点为前后window的最高
+            if rows.iloc[i]['high'] == slice_['high'].max() and vol_ok:
+                resistances.append({'price': float(rows.iloc[i]['high']), 'idx': i, 'tests': 1, 'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))})
+
+        def cluster_levels(levels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            if not levels:
+                return []
+            levels_sorted = sorted(levels, key=lambda x: x['price'])
+            clustered: List[Dict[str, Any]] = []
+            cur = levels_sorted[0].copy()
+            for lv in levels_sorted[1:]:
+                if abs(lv['price'] - cur['price']) / cur['price'] <= tolerance:
+                    # 合并
+                    cur['price'] = (cur['price'] * cur['tests'] + lv['price']) / (cur['tests'] + 1)
+                    cur['tests'] += 1
+                    cur['vol_mult'] = (cur['vol_mult'] + lv['vol_mult']) / 2.0
+                else:
+                    clustered.append(cur)
+                    cur = lv.copy()
+            clustered.append(cur)
+            # 计算强度 = 成交量放大倍数 × 测试次数
+            for it in clustered:
+                it['strength'] = float(it['vol_mult']) * int(it['tests'])
+            # 取强度Top5
+            clustered.sort(key=lambda x: x.get('strength', 0), reverse=True)
+            return clustered[:5]
+
+        return {'supports': cluster_levels(supports), 'resistances': cluster_levels(resistances)}
+
+    def score_ranging_long(self, price: float, supports: List[Dict[str, Any]], rsi: float, rsi_threshold: float) -> Dict[str, Any]:
+        """震荡市做多评分"""
+        if price <= 0 or not supports:
+            return {'score': 0, 'near_level': None}
+        nearest = min(supports, key=lambda x: abs(price - x['price']))
+        dist_pct = abs(price - nearest['price']) / nearest['price']
+        score = 0
+        if dist_pct < 0.01:
+            score += 60
+            if rsi < rsi_threshold:
+                score += 25
+            score += min(15, 5 * int(nearest.get('tests', 1)))
+        return {'score': score, 'near_level': nearest}
+
+    def score_ranging_short(self, price: float, resistances: List[Dict[str, Any]], rsi: float, rsi_threshold: float) -> Dict[str, Any]:
+        """震荡市做空评分"""
+        if price <= 0 or not resistances:
+            return {'score': 0, 'near_level': None}
+        nearest = min(resistances, key=lambda x: abs(price - x['price']))
+        dist_pct = abs(price - nearest['price']) / nearest['price']
+        score = 0
+        if dist_pct < 0.01:
+            score += 60
+            if rsi > rsi_threshold:
+                score += 25
+            score += min(15, 5 * int(nearest.get('tests', 1)))
+        return {'score': score, 'near_level': nearest}
+
+    def score_trending_long(self, df: pd.DataFrame, resistances: List[Dict[str, Any]], adx: float) -> Dict[str, Any]:
+        """趋势市做多评分：MACD金叉 + 压力位突破 + 成交量放大"""
+        if len(df) < 5:
+            return {'score': 0, 'level': None}
+        latest = df.iloc[-1]; prev = df.iloc[-2]
+        macd_gc = (prev['macd_diff'] <= prev['macd_dea'] and latest['macd_diff'] > latest['macd_dea'])
+        if not macd_gc:
+            return {'score': 0, 'level': None}
+        # 选择最近压力位
+        level = None
+        if resistances:
+            level = min(resistances, key=lambda x: abs(latest['close'] - x['price']))
+            broke = (prev['close'] < level['price'] and latest['close'] > level['price'])
+        else:
+            broke = True  # 无明确压力位时仅依赖金叉与量
+        vol_ok = latest.get('volume_ratio', 1.0) > 1.2
+        if broke and vol_ok:
+            score = 75 + 20 + (10 if adx > 30 else 0)
+            return {'score': score, 'level': level}
+        return {'score': 0, 'level': None}
+
+    def score_trending_short(self, df: pd.DataFrame, supports: List[Dict[str, Any]], adx: float) -> Dict[str, Any]:
+        """趋势市做空评分：MACD死叉 + 支撑位跌破 + 成交量放大"""
+        if len(df) < 5:
+            return {'score': 0, 'level': None}
+        latest = df.iloc[-1]; prev = df.iloc[-2]
+        macd_dc = (prev['macd_diff'] >= prev['macd_dea'] and latest['macd_diff'] < latest['macd_dea'])
+        if not macd_dc:
+            return {'score': 0, 'level': None}
+        level = None
+        if supports:
+            level = min(supports, key=lambda x: abs(latest['close'] - x['price']))
+            broke = (prev['close'] > level['price'] and latest['close'] < level['price'])
+        else:
+            broke = True
+        vol_ok = latest.get('volume_ratio', 1.0) > 1.2
+        if broke and vol_ok:
+            score = 75 + 20 + (10 if adx > 30 else 0)
+            return {'score': score, 'level': level}
+        return {'score': 0, 'level': None}
+
+
+
+    def analyze_symbol_adaptive(self, symbol: str) -> Dict[str, str]:
+        """自适应策略分析：震荡/趋势/保守三套逻辑"""
+        try:
+            df = self.get_klines(symbol, 150)
+            if df.empty or len(df) < 60:
+                return {'signal': 'hold', 'reason': '数据不足'}
+            df = self.calculate_indicators(df, symbol)
+
+            # 市场状态评估
+            ms = self.assess_market_state(df)
+            latest = df.iloc[-1]
+            rsi_th = self.rsi_thresholds.get(symbol, {'overbought': 70, 'oversold': 30})
+
+            # 关键位缓存（每小时更新）
+            now_ts = time.time()
+            cache = self.key_levels_cache.get(symbol, {})
+            if (not cache) or (now_ts - float(cache.get('ts', 0)) > 3600):
+                levels = self.identify_key_levels(df, window=5, vol_ma_period=self.vol_ma_period, tolerance=0.005, lookback=100)
+                self.key_levels_cache[symbol] = {'ts': now_ts, 'supports': levels['supports'], 'resistances': levels['resistances']}
+                logger.info(f"📐 更新关键位 {symbol}: 支撑{len(levels['supports'])} 压力{len(levels['resistances'])}")
+            else:
+                levels = {'supports': cache.get('supports', []), 'resistances': cache.get('resistances', [])}
+
+            # 震荡市逻辑
+            if ms['state'] == 'ranging' and ms['confidence'] >= 60:
+                long_eval = self.score_ranging_long(latest['close'], levels['supports'], latest['rsi'], rsi_th['oversold'])
+                short_eval = self.score_ranging_short(latest['close'], levels['resistances'], latest['rsi'], rsi_th['overbought'])
+                # 达到≥70分开单
+                if long_eval['score'] >= 70:
+                    return {'signal': 'buy', 'reason': f"震荡市支撑反弹，总分{long_eval['score']}（支撑{long_eval['near_level']['price']:.4f} 测试{long_eval['near_level']['tests']}次）"}
+                if short_eval['score'] >= 70:
+                    return {'signal': 'sell', 'reason': f"震荡市压力回落，总分{short_eval['score']}（压力{short_eval['near_level']['price']:.4f} 测试{short_eval['near_level']['tests']}次）"}
+                return {'signal': 'hold', 'reason': '震荡市未达阈值'}
+
+            # 趋势市逻辑
+            if ms['state'] == 'trending' and ms['confidence'] >= 60:
+                long_eval = self.score_trending_long(df, levels['resistances'], ms['adx'])
+                short_eval = self.score_trending_short(df, levels['supports'], ms['adx'])
+                if long_eval['score'] >= 75:
+                    desc = f"趋势市金叉突破，总分{long_eval['score']}" + (f"（突破{long_eval['level']['price']:.4f}）" if long_eval['level'] else "")
+                    return {'signal': 'buy', 'reason': desc}
+                if short_eval['score'] >= 75:
+                    desc = f"趋势市死叉下破，总分{short_eval['score']}" + (f"（跌破{short_eval['level']['price']:.4f}）" if short_eval['level'] else "")
+                    return {'signal': 'sell', 'reason': desc}
+                return {'signal': 'hold', 'reason': '趋势市未达阈值'}
+
+            # 保守策略（不明确时）
+            # 当 ADX在20-25之间，或指标冲突时：MACD叉 + RSI不极端
+            prev = df.iloc[-2]
+            macd_gc = (prev['macd_diff'] <= prev['macd_dea'] and latest['macd_diff'] > latest['macd_dea'])
+            macd_dc = (prev['macd_diff'] >= prev['macd_dea'] and latest['macd_diff'] < latest['macd_dea'])
+            if macd_gc and latest['rsi'] < rsi_th['overbought']:
+                return {'signal': 'buy', 'reason': '保守策略：金叉+RSI不过热（降低仓位）'}
+            if macd_dc and latest['rsi'] > rsi_th['oversold']:
+                return {'signal': 'sell', 'reason': '保守策略：死叉+RSI不过冷（降低仓位）'}
+
+            return {'signal': 'hold', 'reason': '市场不明确/无信号'}
+
+        except Exception as e:
+            logger.error(f"❌ 自适应分析失败 {symbol}: {e}")
+            return {'signal': 'hold', 'reason': f'分析异常: {e}'}
         except Exception as e:
             logger.error(f"❌ 获取{symbol}K线数据失败: {e}")
             return pd.DataFrame()
@@ -1205,64 +1469,6 @@ class MACDStrategy:
             logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
             return 0.0
     
-    def get_position_mode(self) -> str:
-        """
-        返回持仓模式：
-        - 双向持仓：返回 'long_short'，下单时使用 posSide=long/short
-        - 净持仓：返回 'net'，下单时不带 posSide
-        """
-        mode = getattr(self, 'position_mode', None)
-        if isinstance(mode, str):
-            m = mode.lower()
-            if m in ('long_short', 'dual', 'hedge'):
-                return 'long_short'
-            if m in ('net', 'oneway'):
-                return 'net'
-        # 默认按双向持仓处理，避免原生下单报错
-        return 'long_short'
-
-    def close_position_exchange(self, symbol: str) -> bool:
-        """本地看门狗平仓：在 OCO 失败或未挂出时，触达阈值立即以市价平仓"""
-        try:
-            pos = self.get_position(symbol, force_refresh=True)
-            size = float(pos.get('size', 0) or 0)
-            if size <= 0:
-                logger.info(f"ℹ️ {symbol} 当前无持仓，无需看门狗平仓")
-                return True
-            side_now = str(pos.get('side', 'none') or 'none').lower()
-            if side_now not in ('long', 'short'):
-                logger.warning(f"⚠️ {symbol} 持仓方向未知({side_now})，跳过看门狗平仓")
-                return False
-            inst_id = self.symbol_to_inst_id(symbol)
-            # 反向成交
-            side = 'sell' if side_now == 'long' else 'buy'
-            pos_mode = self.get_position_mode()
-            td_mode = 'cross'
-            params_okx = {
-                'instId': inst_id,
-                'tdMode': td_mode,
-                'side': side,
-                'sz': str(size),
-                'ordType': 'market',
-            }
-            if pos_mode == 'long_short':
-                params_okx['posSide'] = side_now  # 指定当前持仓方向用于减仓
-            try:
-                resp = self.exchange.privatePostTradeOrder(params_okx)
-                data = resp.get('data') if isinstance(resp, dict) else resp
-                ok = bool(data and isinstance(data, list) and data[0] and (data[0].get('sCode','0') == '0' or data[0].get('ordId')))
-                if ok:
-                    logger.info(f"🛡️ 看门狗市价平仓成功 {symbol}: {side_now}->{side} 数量={size}")
-                    return True
-                logger.warning(f"⚠️ 看门狗平仓返回异常 {symbol}: {data}")
-                return False
-            except Exception as e:
-                logger.error(f"❌ 看门狗平仓失败 {symbol}: {e}")
-                return False
-        except Exception as e:
-            logger.error(f"❌ 看门狗平仓异常 {symbol}: {e}")
-            return False
-
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
         try:
@@ -1439,63 +1645,29 @@ class MACDStrategy:
             return False
     
     def _set_initial_sl_tp(self, symbol: str, entry: float, atr: float, side: str) -> bool:
-        """初始化 SL/TP（优先百分比，ATR 仅参考；含波动率自适应），写入 sl_tp_state"""
+        """初始化 SL/TP（基于 ATR 与每币参数 n/m），写入 sl_tp_state"""
         try:
-            entry = float(entry or 0.0)
+            cfg = self.symbol_cfg.get(symbol, {})
+            n = float(cfg.get('n', 2.0))
+            m = float(cfg.get('m', 3.0))
             atr = max(0.0, float(atr or 0.0))
+            entry = float(entry or 0.0)
             if entry <= 0:
                 return False
 
-            # 1) 百分比参数
-            sl_pct = float(self.stop_loss.get(symbol, 2.0) or 2.0) / 100.0
-            tp_list = self.take_profit.get(symbol, [1.5])
-            tp_pct0 = float(tp_list[0] if tp_list else 1.5) / 100.0
-
-            # 2) 波动率自适应：低波动收紧SL、略收紧TP；高波动放宽SL、TP略远
-            try:
-                df = self.get_klines(symbol, 120)
-                if not df.empty and len(df) >= 50:
-                    vol = self.calculate_volatility(df)
-                    avg_vol = float(df['volatility'].tail(50).mean())
-                    if avg_vol and avg_vol > 0:
-                        if vol < avg_vol * 0.8:
-                            sl_pct *= 0.85
-                            tp_pct0 *= 0.95
-                            logger.debug(f"🎛️ 低波动自适应 {symbol}: SL×0.85 TP×0.95 (vol={vol:.2f} avg={avg_vol:.2f})")
-                        elif vol > avg_vol * 1.5:
-                            sl_pct *= 1.15
-                            tp_pct0 *= 1.05
-                            logger.debug(f"🎛️ 高波动自适应 {symbol}: SL×1.15 TP×1.05 (vol={vol:.2f} avg={avg_vol:.2f})")
-            except Exception:
-                pass
-
-            # 3) 1H 多头 TP 放大倍数（仅多头适用）
-            boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
-            if str(side).lower() == 'long' and boost > 1.0:
-                tp_pct0 *= boost
-
-            # 4) 计算百分比版 SL/TP
             if str(side).lower() == 'long':
-                sl = entry * (1.0 - sl_pct)
-                tp = entry * (1.0 + tp_pct0)
+                sl = max(0.0, entry - n * atr)
+                tp = max(0.0, entry + m * atr)
             else:
-                sl = entry * (1.0 + sl_pct)
-                tp = entry * (1.0 - tp_pct0)
+                sl = max(0.0, entry + n * atr)
+                tp = max(0.0, entry - m * atr)
 
-            # 5) ATR 作为保护（若ATR极小或极大，限制极端值）
-            if atr > 0:
-                cfg = self.symbol_cfg.get(symbol, {})
-                n = float(cfg.get('n', 2.0))
-                m = float(cfg.get('m', 3.0))
-                if str(side).lower() == 'long':
-                    sl = max(sl, entry - n * atr * 0.5)  # 不比 ATR*0.5 更紧
-                    tp = min(tp, entry + m * atr * 2.0)  # 不比 ATR*2.0 更远
-                else:
-                    sl = min(sl, entry + n * atr * 0.5)
-                    tp = max(tp, entry - m * atr * 2.0)
-
-            self.sl_tp_state[symbol] = {'entry': entry, 'sl': float(sl), 'tp': float(tp)}
-            logger.info(f"🧩 初始化SL/TP {symbol} side={side}: entry={entry:.6f} SL={sl:.6f} TP={tp:.6f} (%SL={sl_pct*100:.2f}%, %TP={tp_pct0*100:.2f}%) ATR={atr:.6f}")
+            self.sl_tp_state[symbol] = {
+                'entry': entry,
+                'sl': sl,
+                'tp': tp
+            }
+            logger.info(f"🧩 初始化SL/TP {symbol} side={side}: entry={entry:.6f} SL={sl:.6f} TP={tp:.6f} (n={n}, m={m}, ATR={atr:.6f})")
             return True
         except Exception as e:
             logger.warning(f"⚠️ 初始化SL/TP失败 {symbol}: {e}")
@@ -1617,16 +1789,6 @@ class MACDStrategy:
             sl = round(sl, px_prec)
             tp = round(tp, px_prec)
             
-            # 挂单前先查询并撤旧，确保无残留TP/SL，避免51088
-            ok_cancel = self.cancel_symbol_tp_sl(symbol)
-            if not ok_cancel:
-                logger.warning(f"⚠️ 撤旧TP/SL失败 {symbol}，跳过重挂以避免51088")
-                return False
-            try:
-                time.sleep(0.2)
-            except Exception:
-                pass
-
             cl_prefix = self.tpsl_cl_prefix or 'TPSL_'
             clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
             clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
@@ -1803,12 +1965,6 @@ class MACDStrategy:
         if len(df) < 5:
             return False, "数据不足", 0
         
-        # 指标列存在性校验，避免 KeyError
-        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
-        for col in required_cols:
-            if col not in df.columns:
-                return False, "指标缺失", 0
-        
         latest = df.iloc[-1]
         previous = df.iloc[-2]
         
@@ -1870,12 +2026,6 @@ class MACDStrategy:
         """优化版做空信号检测"""
         if len(df) < 5:
             return False, "数据不足", 0
-        
-        # 指标列存在性校验，避免 KeyError
-        required_cols = ['macd_diff','macd_dea','macd_histogram','rsi','ema_20','volume','volume_ma','volume_ratio']
-        for col in required_cols:
-            if col not in df.columns:
-                return False, "指标缺失", 0
         
         latest = df.iloc[-1]
         previous = df.iloc[-2]
@@ -2198,10 +2348,6 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
             
             df = self.calculate_indicators(df, symbol)
-            # 边界保护：去除初期 NaN 行，确保指标完整
-            df = df.dropna()
-            if df.empty or len(df) < 5:
-                return {'signal': 'hold', 'reason': '数据不足'}
             current_position = self.get_position(symbol, force_refresh=False)
             
             # 1H 趋势门控：计算 1小时 MACD 与 RSI
@@ -2323,7 +2469,7 @@ class MACDStrategy:
             
             signals = {}
             for symbol in self.symbols:
-                signals[symbol] = self.analyze_symbol(symbol)
+                signals[symbol] = self.analyze_symbol_adaptive(symbol)
                 position = self.get_position(symbol, force_refresh=False)
                 open_orders = self.get_open_orders(symbol)
                 
@@ -2372,14 +2518,8 @@ class MACDStrategy:
                                     logger.warning(f"⚠️ 兜底初始化SL/TP异常 {symbol}: {_e0}")
                             side_now = current_position.get('side', 'long')
                             self._update_trailing_stop(symbol, close_price, atr_val, side_now)
-                            # 硬止损兜底：若 OCO 未成功挂出，则本地看门狗立即市价平仓
+                            # 硬止损兜底
                             if self._check_hard_stop(symbol, close_price, side_now):
-                                if not bool(self.okx_tp_sl_placed.get(symbol, False)):
-                                    logger.warning(f"🛡️ OCO 未挂出，触发看门狗平仓 {symbol}")
-                                    try:
-                                        self.close_position_exchange(symbol)
-                                    except Exception as _ce:
-                                        logger.error(f"❌ 看门狗平仓异常 {symbol}: {_ce}")
                                 current_position = self.get_position(symbol, force_refresh=True)
                                 continue
                             # 分批止盈
