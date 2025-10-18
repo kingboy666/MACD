@@ -1944,6 +1944,89 @@ class MACDStrategy:
         except Exception:
             pass
 
+    def compute_sl_tp_from_levels(self, symbol: str, side: str, entry: float, atr: float = 0.0) -> tuple[float, float]:
+        """基于关键位（支撑/压力）生成SL/TP，并结合ATR底线与tick对齐；返回 (sl, tp)，无可用则返回(0,0)"""
+        try:
+            if entry <= 0:
+                return 0.0, 0.0
+            # 读取精度信息
+            px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
+            tick_sz = 10 ** (-px_prec)
+            # 获取关键位（优先缓存，否则重算）
+            levels = {}
+            try:
+                cache = self.key_levels_cache.get(symbol, {})
+                levels = {'supports': cache.get('supports', []), 'resistances': cache.get('resistances', [])}
+                if not levels['supports'] and not levels['resistances']:
+                    df = self.get_klines(symbol, 120)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        levels = self.identify_key_levels(df)
+            except Exception:
+                df = self.get_klines(symbol, 120)
+                if isinstance(df, pd.DataFrame) and not df.empty:
+                    try:
+                        levels = self.identify_key_levels(df)
+                    except Exception:
+                        levels = {'supports': [], 'resistances': []}
+            supports = levels.get('supports') or []
+            resistances = levels.get('resistances') or []
+            # 选择最近关键位
+            sup_below = [x for x in supports if float(x.get('price', 0) or 0) < entry]
+            res_above = [x for x in resistances if float(x.get('price', 0) or 0) > entry]
+            sup_below.sort(key=lambda x: entry - float(x.get('price', 0) or 0))
+            res_above.sort(key=lambda x: float(x.get('price', 0) or 0) - entry)
+            sl = 0.0
+            tp = 0.0
+            # 规则：震荡市风格化（固定0.5%偏移；无下一个关键位则用固定比例）
+            if side == 'long':
+                if sup_below:
+                    base_sup = float(sup_below[0].get('price', 0) or 0)
+                    sl = base_sup * 0.995  # 支撑下方0.5%
+                else:
+                    sl = entry * (1 - 0.005)
+                if res_above:
+                    tp = float(res_above[0].get('price', 0) or 0)  # 下一压力位
+                else:
+                    tp = entry * (1 + 0.05)
+            else:
+                if res_above:
+                    base_res = float(res_above[0].get('price', 0) or 0)
+                    sl = base_res * 1.005  # 压力上方0.5%
+                else:
+                    sl = entry * (1 + 0.005)
+                if sup_below:
+                    tp = float(sup_below[0].get('price', 0) or 0)  # 下一个支撑位
+                else:
+                    tp = entry * (1 - 0.05)
+            # ATR底线约束（SL≥0.8ATR，TP≥1.5ATR）
+            min_sl = (atr * 0.8) if atr > 0 else (entry * 0.005)
+            min_tp = (atr * 1.5) if atr > 0 else (entry * 0.03)
+            if side == 'long':
+                sl = min(sl, entry - min_sl)
+                tp = max(tp, entry + min_tp)
+            else:
+                sl = max(sl, entry + min_sl)
+                tp = min(tp, entry - min_tp)
+            # 方向与间距校验
+            min_delta = max(tick_sz, entry * 0.001)
+            if side == 'long':
+                if sl >= entry: sl = entry - min_delta
+                if tp <= entry: tp = entry + min_delta
+            else:
+                if sl <= entry: sl = entry + min_delta
+                if tp >= entry: tp = entry - min_delta
+            # 精度与下限保护
+            sl = round(sl, px_prec)
+            tp = round(tp, px_prec)
+            sl = max(sl, tick_sz)
+            tp = max(tp, tick_sz)
+            # 有效性检查
+            if sl <= 0 or tp <= 0 or abs(tp - sl) < tick_sz:
+                return 0.0, 0.0
+            return sl, tp
+        except Exception:
+            return 0.0, 0.0
+
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
         """挂OKX侧TP/SL条件单（仅保持一个整仓OCO；方向校验；tick对齐；无持仓不挂单；缺失时自动生成SL/TP；自适应重试51088/51023）"""
         try:
@@ -1980,17 +2063,27 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
                 return False
 
-            # 缺失时自动生成 SL/TP（按ATR与固定比例）
+            # 缺失时自动生成 SL/TP（优先关键位，其次ATR/比例；由在线学习权重决定）
             if (sl <= 0 or tp <= 0) and entry > 0:
-                base_sl = max(entry * 0.005, atr if atr > 0 else last * 0.003)  # 0.5% 或 1*ATR（若无ATR，用0.3%）
-                base_tp = max(entry * 0.03, (atr * 2.0) if atr > 0 else last * 0.02)  # 3% 或 2*ATR（若无ATR，用2%）
-                if side == 'long':
-                    sl = entry - base_sl
-                    tp = entry + base_tp
+                try:
+                    adj = self.get_learning_adjustments(symbol)
+                    use_w = float(adj.get('use_levels_weight', 0.6) or 0.6)
+                except Exception:
+                    use_w = 0.6
+                sl2, tp2 = self.compute_sl_tp_from_levels(symbol, side, entry, atr)
+                if sl2 > 0 and tp2 > 0 and use_w >= 0.5:
+                    sl, tp = sl2, tp2
+                    logger.info(f"🔧 关键位生成SL/TP {symbol}: entry={entry:.6f} → SL={sl:.6f} TP={tp:.6f}")
                 else:
-                    sl = entry + base_sl
-                    tp = entry - base_tp
-                logger.info(f"🔧 自动生成SL/TP {symbol}: entry={entry:.6f} atr={atr:.6f} → SL={sl:.6f} TP={tp:.6f}")
+                    base_sl = max(entry * 0.005, atr if atr > 0 else last * 0.003)
+                    base_tp = max(entry * 0.03, (atr * 2.0) if atr > 0 else last * 0.02)
+                    if side == 'long':
+                        sl = entry - base_sl
+                        tp = entry + base_tp
+                    else:
+                        sl = entry + base_sl
+                        tp = entry - base_tp
+                    logger.info(f"🔧 ATR/比例生成SL/TP {symbol}: entry={entry:.6f} atr={atr:.6f} → SL={sl:.6f} TP={tp:.6f}")
 
             # 多头TP放大倍数（仅多头适用）
             try:
