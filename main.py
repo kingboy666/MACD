@@ -589,6 +589,11 @@ class MACDStrategy:
         # SL/TP 状态缓存
         self.sl_tp_state: Dict[str, Dict[str, float]] = {}
         self.okx_tp_sl_placed: Dict[str, bool] = {}
+        # 震荡分仓止盈状态与监控集合
+        self.range_pt_state: Dict[str, Dict[str, Any]] = {}
+        self.watchlist_symbols = list(self.symbols)
+        self.market_state: Dict[str, str] = {}
+        self.key_levels: Dict[str, Dict[str, List[float]]] = {}
         # 1H多头时TP放大倍数(默认1.0)
         self.tp_boost_map: Dict[str, float] = {s: 1.0 for s in self.symbols}
         # TP/SL重挂冷却与阈值
@@ -1726,6 +1731,10 @@ class MACDStrategy:
                 lev = float(self.symbol_leverage.get(symbol, 20) or 20)
                 est_cost0 = float(contract_size * current_price)
                 est_margin0 = est_cost0 / max(1.0, lev)
+                # 预估保证金门槛：不足0.5U直接跳过，避免手续费都不够
+                if est_margin0 < 0.5:
+                    logger.warning(f"⚠️ 预估保证金过低(<0.5U)，跳过下单 {symbol}: est_margin={est_margin0:.4f}U 价格={current_price:.6f} 数量={contract_size:.8f} 杠杆={lev}")
+                    return False
                 avail = float(self.get_account_balance() or 0.0)
                 # 预留一点安全系数（98%）
                 if avail > 0 and est_margin0 > avail * 0.98:
@@ -1797,9 +1806,30 @@ class MACDStrategy:
                 size_adj = max(min_amount, steps * lot_sz) if steps > 0 else max(min_amount, lot_sz)
             else:
                 size_adj = max(min_amount, size_adj)
-            if last_px > 0 and size_adj * last_px < 1.0:
-                logger.warning(f"⚠️ 名义金额过小(<1U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
+            # 名义金额与可用余额门槛（≥0.5U）；以及反向持仓防打架
+            if last_px > 0 and size_adj * last_px < 0.5:
+                logger.warning(f"⚠️ 名义金额过小(<0.5U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
                 return False
+            # 可用余额门槛
+            try:
+                avail_chk = float(self.get_account_balance() or 0.0)
+                if avail_chk < 0.5:
+                    logger.warning(f"⚠️ 可用余额不足(<0.5U)，跳过下单 {symbol}: available={avail_chk:.4f}U")
+                    return False
+            except Exception:
+                pass
+            # 防打架：已有持仓且方向相反时拒绝新开仓
+            try:
+                pos_cur = self.get_position(symbol, force_refresh=False) or {}
+                pos_sz = float(pos_cur.get('size', 0) or 0.0)
+                pos_side_cur = str(pos_cur.get('side', '')).lower()  # 'long'/'short'
+                want_side = ('long' if str(side).lower() in ('buy','long') else 'short')
+                if pos_sz > 0 and pos_side_cur and pos_side_cur != want_side:
+                    logger.warning(f"⚠️ 已有{pos_side_cur}持仓，拒绝反向开仓 {symbol}: 现有size={pos_sz}")
+                    return False
+            except Exception:
+                pass
+
             contract_size = size_adj
 
             native_only = (os.environ.get('USE_OKX_NATIVE_ONLY', '').strip().lower() in ('1', 'true', 'yes'))
@@ -2275,7 +2305,7 @@ class MACDStrategy:
                     pass  # 成功
                 elif s_code == '51088':
                     # 已有整仓TP/SL，视为成功（保守模式不重挂）
-                    logger.info(f"ℹ️ 已存在整仓TP/SL，视为成功 {symbol}: code={s_code} msg={s_msg}")
+                    logger.debug(f"ℹ️ 已存在整仓TP/SL，视为成功 {symbol}: code={s_code} msg={s_msg}")
                 elif s_code == '51023':
                     logger.warning(f"⚠️ 挂OCO失败(51023) {symbol}: {s_msg}")
                     return False
@@ -2446,6 +2476,14 @@ class MACDStrategy:
         except Exception:
             pass
         return 'unknown'
+
+    def get_tick_size(self, symbol: str) -> float:
+        """根据 price_precision 返回最小跳动单位"""
+        try:
+            px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
+            return 10 ** (-px_prec)
+        except Exception:
+            return 0.0001
 
     def check_long_signal(self, df, symbol):
         """优化版做多信号检测"""
@@ -3230,13 +3268,21 @@ class MACDStrategy:
                 self.ensure_tpsl_guard()
             except Exception as _e_guard:
                 logger.debug(f"🔧 守护执行异常: {_e_guard}")
-            # 震荡市止盈管理（分仓/保本/温和跟踪）
+            # 震荡市止盈管理（分仓/保本/温和跟踪）- 安全获取关键位与状态
             try:
-                for symbol in list(self.watchlist_symbols):
+                for symbol in self.symbols:
                     pos = self.get_position(symbol, force_refresh=False) or {}
-                    ms = self.market_state.get(symbol, '')
-                    lv = self.key_levels.get(symbol, {'support': [], 'resistance': []})
-                    self.manage_ranging_exits(symbol, pos, ms, lv)
+                    # 获取关键位（从缓存）
+                    cache = self.key_levels_cache.get(symbol, {})
+                    sup = [float(x['price']) for x in (cache.get('supports') or [])]
+                    res = [float(x['price']) for x in (cache.get('resistances') or [])]
+                    # 获取市场状态（即时评估）
+                    df_ex = self.get_klines(symbol, 120)
+                    if df_ex is None or df_ex.empty:
+                        continue
+                    df_ex = self.calculate_indicators(df_ex, symbol)
+                    ms_ex = self.assess_market_state(df_ex).get('state', 'unclear')
+                    self.manage_ranging_exits(symbol, pos, ms_ex, {'support': sup, 'resistance': res})
             except Exception as _e_range:
                 logger.debug(f"🔧 震荡止盈管理异常: {_e_range}")
             
