@@ -580,7 +580,7 @@ class MACDStrategy:
         # 撤单/标记 安全控制
         self.allow_cancel_pending = True
         self.safe_cancel_only_our_tpsl = True
-        self.tpsl_cl_prefix = 'MACD_TPSL_'
+        self.tpsl_cl_prefix = 'MACDTPSL'
         
         # ATR 止盈止损参数
         self.atr_sl_n = 1.8
@@ -890,7 +890,7 @@ class MACDStrategy:
                 try:
                     aid = str((it.get('algoId') or it.get('algoID') or it.get('id') or ''))
                     ord_type = str(it.get('ordType') or '').lower()
-                    clid = str(it.get('clOrdId') or '')
+                    clid = str(it.get('clOrdId') or it.get('algoClOrdId') or '')
                     if not aid or not ord_type:
                         continue
                     item = {'algoId': aid, 'ordType': ord_type}
@@ -1617,7 +1617,7 @@ class MACDStrategy:
                 except Exception:
                     return default
 
-            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.1))
+            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.02))
             max_cap = max(0.0, _to_float('MAX_PER_SYMBOL_USDT', 0.0))
 
             if min_floor > 0 and target < min_floor:
@@ -1737,7 +1737,7 @@ class MACDStrategy:
                 lev = float(self.symbol_leverage.get(symbol, 20) or 20)
                 est_cost0 = float(contract_size * current_price)
                 est_margin0 = est_cost0 / max(1.0, lev)
-                min_margin_floor = float((os.environ.get('MIN_MARGIN_FLOOR') or '0.1').strip())
+                min_margin_floor = float((os.environ.get('MIN_MARGIN_FLOOR') or '0.02').strip())
                 # 预估保证金门槛：不足min_margin_floor直接跳过，避免手续费都不够
                 if est_margin0 < min_margin_floor:
                     logger.warning(f"⚠️ 预估保证金过低(<{min_margin_floor}U)，跳过下单 {symbol}: est_margin={est_margin0:.4f}U 价格={current_price:.6f} 数量={contract_size:.8f} 杠杆={lev}")
@@ -1814,14 +1814,14 @@ class MACDStrategy:
             else:
                 size_adj = max(min_amount, size_adj)
             # 名义金额与可用余额门槛（≥0.5U）；以及反向持仓防打架
-            min_notional_floor = float((os.environ.get('MIN_NOTIONAL_FLOOR') or '0.1').strip())
+            min_notional_floor = float((os.environ.get('MIN_NOTIONAL_FLOOR') or '0.02').strip())
             if last_px > 0 and size_adj * last_px < min_notional_floor:
                 logger.warning(f"⚠️ 名义金额过小(<{min_notional_floor}U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
                 return False
             # 可用余额门槛
             try:
                 avail_chk = float(self.get_account_balance() or 0.0)
-                min_available_floor = float((os.environ.get('MIN_AVAILABLE_FLOOR') or '0.1').strip())
+                min_available_floor = float((os.environ.get('MIN_AVAILABLE_FLOOR') or '0.02').strip())
                 if avail_chk < min_available_floor:
                     logger.warning(f"⚠️ 可用余额不足(<{min_available_floor}U)，跳过下单 {symbol}: available={avail_chk:.4f}U")
                     return False
@@ -2338,8 +2338,8 @@ class MACDStrategy:
                     'slOrdPx': '-1',
                     # 使用实际持仓数量sz替代closeFraction，提升兼容性
                     'sz': str(float(pos.get('size', 0) or 0.0)),
-                    # 附带客户端订单ID前缀，便于后续识别和撤销
-                    'clOrdId': f"{self.tpsl_cl_prefix}{int(time.time())}",
+                    # 附带算法客户端ID（纯字母数字，≤32），用于识别和撤销
+                    'algoClOrdId': f"{self.tpsl_cl_prefix}{int(time.time()*1000)}",
                 }
                 # 在 hedge 模式下必须传正确的 posSide；net/oneway 模式不传
                 try:
@@ -3420,6 +3420,37 @@ class MACDStrategy:
             logger.info("-" * 70)
             logger.info("⚡ 执行交易操作...")
             logger.info("")
+            # 优先级分配：按“总分XX”提取评分，仅Top K分配资金，并在Top内均分
+            active_list = []
+            try:
+                import re
+            except Exception:
+                re = None
+            for s, info in signals.items():
+                sig = str(info.get('signal') or '')
+                if sig in ('buy', 'sell'):
+                    reason_s = str(info.get('reason') or '')
+                    score = 0
+                    try:
+                        if re:
+                            m = re.search(r'总分(\d+)', reason_s)
+                            if m:
+                                score = int(m.group(1))
+                        if score == 0 and ('保守策略' in reason_s):
+                            score = 65
+                    except Exception:
+                        pass
+                    active_list.append({'symbol': s, 'signal': sig, 'reason': reason_s, 'score': score})
+            try:
+                top_k = int((os.environ.get('TOP_K_ACTIVE') or '3').strip())
+            except Exception:
+                top_k = 3
+            active_list.sort(key=lambda x: x['score'], reverse=True)
+            top_active = active_list[:top_k] if top_k > 0 else active_list
+            top_symbols = set(x['symbol'] for x in top_active)
+            active_count = len(top_active)
+            if active_count > 0:
+                logger.info(f"🎯 本轮Top{active_count}信号: " + ", ".join([f"{x['symbol']}({x['score']})" for x in top_active]))
             
             for symbol, signal_info in signals.items():
                 signal = signal_info['signal']
@@ -3551,12 +3582,16 @@ class MACDStrategy:
                 except Exception:
                     pass
                 
+                # 非Top币的买卖信号跳过，集中资金到Top集合
+                if signal in ('buy','sell') and 'top_symbols' in locals() and active_count > 0 and symbol not in top_symbols:
+                    logger.info(f"⏭️ 跳过非Top信号 {symbol} ({signal})，集中资金到Top集合")
+                    continue
                 if signal == 'buy':
                     if current_position['size'] > 0 and current_position['side'] == 'long':
                         logger.info(f"ℹ️ {symbol}已有多头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol)
+                    amount = self.calculate_order_amount(symbol, active_count)
                     if amount > 0:
                         if self.create_order(symbol, 'buy', amount):
                             logger.info(f"🚀 开多{symbol}成功 - {reason}")
@@ -3586,7 +3621,7 @@ class MACDStrategy:
                         logger.info(f"ℹ️ {symbol}已有空头持仓，跳过重复开仓")
                         continue
                     
-                    amount = self.calculate_order_amount(symbol)
+                    amount = self.calculate_order_amount(symbol, active_count)
                     if amount > 0:
                         if self.create_order(symbol, 'sell', amount):
                             logger.info(f"📉 开空{symbol}成功 - {reason}")
