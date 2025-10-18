@@ -3073,6 +3073,145 @@ class MACDStrategy:
         except Exception as e:
             logger.debug(f"🔧 持仓统计监听异常: {e}")
 
+    def manage_ranging_exits(self, symbol: str, pos: dict, market_state: str, levels: dict) -> None:
+        try:
+            if str(market_state) != 'ranging':
+                return
+            size = float(pos.get('size', 0) or 0.0)
+            if size <= 0:
+                return
+            side = str(pos.get('side', '')).lower()  # 'long'/'short'
+            entry = float(pos.get('entry_price', 0) or 0.0)
+            tick_sz = float(self.get_tick_size(symbol) or 0.0)
+            if entry <= 0 or tick_sz <= 0:
+                return
+            # 读取当前价
+            last = 0.0
+            try:
+                inst_id = self.symbol_to_inst_id(symbol)
+                tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
+                d = tkr.get('data') if isinstance(tkr, dict) else tkr
+                if isinstance(d, list) and d:
+                    last = float(d[0].get('last') or d[0].get('lastPx') or 0.0)
+            except Exception:
+                pass
+            if last <= 0:
+                try:
+                    df = self.get_klines(symbol, 10)
+                    if isinstance(df, pd.DataFrame) and not df.empty:
+                        last = float(df['close'].values[-1])
+                except Exception:
+                    return
+            # 关键位（T1/T2）
+            sup = levels.get('support', []) or []
+            res = levels.get('resistance', []) or []
+            # 选择下一目标位
+            T1 = None
+            if side == 'long':
+                # 最近上方压力位
+                ups = [x for x in res if x and float(x) > entry]
+                T1 = min(ups) if ups else None
+            elif side == 'short':
+                dns = [x for x in sup if x and float(x) < entry]
+                T1 = max(dns) if dns else None
+            # 1R 计算（以初始SL记录或最小间距近似）
+            sl_state = self.sl_tp_state.get(symbol, {})
+            sl_init = float(sl_state.get('sl', 0) or 0.0)
+            R = abs(entry - sl_init) if sl_init > 0 else max(entry * 0.005, 10.0 * tick_sz)
+            # 状态缓存
+            st = self.range_pt_state.setdefault(symbol, {'partial_done': False, 'breakeven_active': False, 'trail_anchor': entry})
+            # 分仓止盈触发条件：触达T1或达到≥0.7R
+            reach_T1 = False
+            if T1 is not None:
+                tol = max(0.002 * entry, 5.0 * tick_sz)  # 0.2%或≥5tick容差
+                reach_T1 = (side == 'long' and last >= (float(T1) - tol)) or (side == 'short' and last <= (float(T1) + tol))
+            reach_07R = (side == 'long' and (last - entry) >= 0.7 * R) or (side == 'short' and (entry - last) >= 0.7 * R)
+            if not st['partial_done'] and (reach_T1 or reach_07R):
+                # 平出60%
+                part_sz = round(size * 0.6, 8)
+                if part_sz > 0:
+                    try:
+                        sell_buy = 'sell' if side == 'long' else 'buy'
+                        inst_id = self.symbol_to_inst_id(symbol)
+                        td_mode = 'isolated' if str(pos.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                        params_okx = {
+                            'instId': inst_id,
+                            'tdMode': td_mode,
+                            'side': sell_buy,
+                            'sz': str(part_sz),
+                            'ordType': 'market',
+                            'reduceOnly': True,
+                        }
+                        # hedge模式附带posSide
+                        if self.get_position_mode() == 'hedge':
+                            params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
+                        self.exchange.privatePostTradeOrder(params_okx)
+                        logger.info(f"🎯 震荡分仓止盈60% {symbol}: side={side} size={part_sz}")
+                        st['partial_done'] = True
+                        st['breakeven_active'] = True
+                        st['trail_anchor'] = last
+                    except Exception as e:
+                        logger.warning(f"⚠️ 分仓止盈失败 {symbol}: {str(e)}")
+            # 保本与温和跟踪（余仓）
+            if st['partial_done']:
+                # 保本：价格回撤至入场价或更差则平掉余仓
+                rem_sz = float(pos.get('size', 0) or 0.0)
+                if rem_sz > 0 and st['breakeven_active']:
+                    need_exit = (side == 'long' and last <= entry) or (side == 'short' and last >= entry)
+                    if need_exit:
+                        try:
+                            sell_buy = 'sell' if side == 'long' else 'buy'
+                            inst_id = self.symbol_to_inst_id(symbol)
+                            td_mode = 'isolated' if str(pos.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                            params_okx = {
+                                'instId': inst_id,
+                                'tdMode': td_mode,
+                                'side': sell_buy,
+                                'sz': str(rem_sz),
+                                'ordType': 'market',
+                                'reduceOnly': True,
+                            }
+                            if self.get_position_mode() == 'hedge':
+                                params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
+                            self.exchange.privatePostTradeOrder(params_okx)
+                            logger.info(f"🛡️ 保本退出余仓 {symbol}: side={side} size={rem_sz}")
+                            st['breakeven_active'] = False
+                        except Exception as e:
+                            logger.warning(f"⚠️ 保本退出失败 {symbol}: {str(e)}")
+                # 温和跟踪：若创新高/低则更新锚点；随后回撤≥阈值触发退出
+                anchor = float(st.get('trail_anchor', entry) or entry)
+                # 更新锚点
+                if side == 'long' and last > anchor:
+                    st['trail_anchor'] = last
+                elif side == 'short' and last < anchor:
+                    st['trail_anchor'] = last
+                # 回撤检测
+                trail_tol = max(0.003 * entry, 10.0 * tick_sz)  # 0.3%或≥10tick
+                rem_sz2 = float(pos.get('size', 0) or 0.0)
+                if rem_sz2 > 0:
+                    recoil = (side == 'long' and (st['trail_anchor'] - last) >= trail_tol) or (side == 'short' and (last - st['trail_anchor']) >= trail_tol)
+                    if recoil:
+                        try:
+                            sell_buy = 'sell' if side == 'long' else 'buy'
+                            inst_id = self.symbol_to_inst_id(symbol)
+                            td_mode = 'isolated' if str(pos.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                            params_okx = {
+                                'instId': inst_id,
+                                'tdMode': td_mode,
+                                'side': sell_buy,
+                                'sz': str(rem_sz2),
+                                'ordType': 'market',
+                                'reduceOnly': True,
+                            }
+                            if self.get_position_mode() == 'hedge':
+                                params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
+                            self.exchange.privatePostTradeOrder(params_okx)
+                            logger.info(f"📉 温和跟踪触发退出 {symbol}: side={side} size={rem_sz2}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ 跟踪退出失败 {symbol}: {str(e)}")
+        except Exception as e:
+            logger.warning(f"⚠️ 震荡止盈管理异常 {symbol}: {str(e)}")
+        
     def execute_strategy(self):
         """执行策略"""
         logger.info("=" * 70)
@@ -3091,6 +3230,15 @@ class MACDStrategy:
                 self.ensure_tpsl_guard()
             except Exception as _e_guard:
                 logger.debug(f"🔧 守护执行异常: {_e_guard}")
+            # 震荡市止盈管理（分仓/保本/温和跟踪）
+            try:
+                for symbol in list(self.watchlist_symbols):
+                    pos = self.get_position(symbol, force_refresh=False) or {}
+                    ms = self.market_state.get(symbol, '')
+                    lv = self.key_levels.get(symbol, {'support': [], 'resistance': []})
+                    self.manage_ranging_exits(symbol, pos, ms, lv)
+            except Exception as _e_range:
+                logger.debug(f"🔧 震荡止盈管理异常: {_e_range}")
             
             balance = self.get_account_balance()
             logger.info(f"💰 当前账户余额: {balance:.2f} USDT")
