@@ -897,19 +897,17 @@ class MACDStrategy:
                 if not items:
                     return False
                 ok = False
-                # OKX 支持对象数组：每项含 algoId 与 ordType；需附 instId
-                payload = {'algoIds': items, 'instId': inst_id}
-                try:
-                    self.exchange.privatePostTradeCancelAlgos(payload)
-                    ok = True
-                except Exception:
-                    # 逐个回退
-                    for it in items:
+                # 逐条撤销优先（algoId+ordType），遇51000再以algoId-only回退
+                for it in items:
+                    try:
+                        self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'ordType': it['ordType'], 'instId': inst_id})
+                        ok = True
+                    except Exception as e1:
                         try:
-                            self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'ordType': it['ordType'], 'instId': inst_id})
+                            self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'instId': inst_id})
                             ok = True
-                        except Exception:
-                            pass
+                        except Exception as e2:
+                            logger.debug(f"🔧 撤销失败 {symbol}: algoId={it['algoId']} ordType={it['ordType']} err1={e1} err2={e2}")
                 return ok
 
             total = 0
@@ -2108,6 +2106,14 @@ class MACDStrategy:
             # 触发价下限保护：至少为一个tick，避免0或负数
             tp = max(tp, tick_sz)
             sl = max(sl, tick_sz)
+            # 强制最小分隔，避免 tp/sl 太近或相等（小数币更严格）
+            min_sep = max(tick_sz, last * 0.001) * 2
+            if side == 'long':
+                if tp - sl < min_sep:
+                    tp = _round_px(max(tp, sl + min_sep))
+            else:
+                if sl - tp < min_sep:
+                    sl = _round_px(max(sl, tp + min_sep))
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
@@ -2126,6 +2132,7 @@ class MACDStrategy:
                     'ordType': 'oco',
                     'side': 'sell' if side == 'long' else 'buy',
                     'tdMode': 'cross',
+                    'reduceOnly': 'true',
                     'tpTriggerPx': str(tp),
                     'tpOrdPx': '-1',
                     'slTriggerPx': str(sl),
