@@ -2089,7 +2089,7 @@ class MACDStrategy:
 
             # 方向与距离校验，自动纠正到合规触发价范围
             min_ticks = int(self.tp_sl_min_delta_ticks or 1)
-            min_delta = max(tick_sz, last * 0.001)
+            min_delta = max(10 * tick_sz, last * 0.005)
 
             def _round_px(x: float) -> float:
                 return round(x, px_prec)
@@ -2151,12 +2151,7 @@ class MACDStrategy:
                     'slOrdPx': '-1',
                     'closeFraction': '1',
                 }
-                # 仅在 hedge（双向）模式下附带 posSide；net/oneway 不传，避免 51023
-                try:
-                    if use_posside and (self.get_position_mode() == 'hedge'):
-                        params_oco['posSide'] = side  # long/short
-                except Exception:
-                    pass
+                # 不传 posSide（适配 net/oneway/hedge；避免 51023）
                 resp = self.exchange.privatePostTradeOrderAlgo(params_oco)
                 data = resp.get('data', []) if isinstance(resp, dict) else []
                 item = data[0] if (isinstance(data, list) and data) else {}
@@ -2173,16 +2168,8 @@ class MACDStrategy:
                     # 已有整仓TP/SL，视为成功（保守模式不重挂）
                     logger.info(f"ℹ️ 已存在整仓TP/SL，视为成功 {symbol}: code={s_code} msg={s_msg}")
                 elif s_code == '51023':
-                    # 去掉posSide重试一次
-                    logger.info(f"🔁 去掉posSide重试挂OCO {symbol}: 首次失败 code={s_code} msg={s_msg}")
-                    s_code2, s_msg2 = _submit_oco(use_posside=False)
-                    if s_code2 == '0':
-                        pass
-                    elif s_code2 == '51088':
-                        logger.info(f"ℹ️ 重试时已存在整仓TP/SL，视为成功 {symbol}: code={s_code2} msg={s_msg2}")
-                    else:
-                        logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
-                        return False
+                    logger.warning(f"⚠️ 挂OCO失败(51023) {symbol}: {s_msg}")
+                    return False
                 else:
                     logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                     return False
@@ -2192,19 +2179,8 @@ class MACDStrategy:
                 if '51088' in emsg:
                     logger.info(f"ℹ️ 已存在整仓TP/SL（异常返回），视为成功 {symbol}: {emsg}")
                 elif '51023' in emsg:
-                    logger.info(f"🔁 异常提示51023，去掉posSide重试 {symbol}")
-                    try:
-                        s_code2, s_msg2 = _submit_oco(use_posside=False)
-                        if s_code2 == '0':
-                            pass
-                        elif s_code2 == '51088':
-                            logger.info(f"ℹ️ 重试时已存在整仓TP/SL，视为成功 {symbol}: code={s_code2} msg={s_msg2}")
-                        else:
-                            logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
-                            return False
-                    except Exception as e2:
-                        logger.warning(f"⚠️ 重试挂OCO异常 {symbol}: {e2}")
-                        return False
+                    logger.warning(f"⚠️ 挂OCO失败(51023异常) {symbol}: {emsg}")
+                    return False
                 else:
                     logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
                     return False
