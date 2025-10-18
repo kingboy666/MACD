@@ -2002,7 +2002,7 @@ class MACDStrategy:
                 sl = max(sl, entry + min_sl)
                 tp = min(tp, entry - min_tp)
             # 方向与间距校验
-            min_delta = max(tick_sz, entry * 0.001)
+            min_delta = max(10 * tick_sz, entry * 0.005)
             if side == 'long':
                 if sl >= entry: sl = entry - min_delta
                 if tp <= entry: tp = entry + min_delta
@@ -2107,7 +2107,7 @@ class MACDStrategy:
             tp = max(tp, tick_sz)
             sl = max(sl, tick_sz)
             # 强制最小分隔，避免 tp/sl 太近或相等（小数币更严格）
-            min_sep = max(tick_sz, last * 0.001) * 2
+            min_sep = max(10 * tick_sz, last * 0.005)
             if side == 'long':
                 if tp - sl < min_sep:
                     tp = _round_px(max(tp, sl + min_sep))
@@ -2151,8 +2151,12 @@ class MACDStrategy:
                     'slOrdPx': '-1',
                     'closeFraction': '1',
                 }
-                if use_posside:
-                    params_oco['posSide'] = side  # long/short
+                # 仅在 hedge（双向）模式下附带 posSide；net/oneway 不传，避免 51023
+                try:
+                    if use_posside and (self.get_position_mode() == 'hedge'):
+                        params_oco['posSide'] = side  # long/short
+                except Exception:
+                    pass
                 resp = self.exchange.privatePostTradeOrderAlgo(params_oco)
                 data = resp.get('data', []) if isinstance(resp, dict) else []
                 item = data[0] if (isinstance(data, list) and data) else {}
@@ -2183,8 +2187,27 @@ class MACDStrategy:
                     logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                     return False
             except Exception as e:
-                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
-                return False
+                emsg = str(e)
+                # 异常也可能包含 sCode/sMsg，做兼容解析
+                if '51088' in emsg:
+                    logger.info(f"ℹ️ 已存在整仓TP/SL（异常返回），视为成功 {symbol}: {emsg}")
+                elif '51023' in emsg:
+                    logger.info(f"🔁 异常提示51023，去掉posSide重试 {symbol}")
+                    try:
+                        s_code2, s_msg2 = _submit_oco(use_posside=False)
+                        if s_code2 == '0':
+                            pass
+                        elif s_code2 == '51088':
+                            logger.info(f"ℹ️ 重试时已存在整仓TP/SL，视为成功 {symbol}: code={s_code2} msg={s_msg2}")
+                        else:
+                            logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
+                            return False
+                    except Exception as e2:
+                        logger.warning(f"⚠️ 重试挂OCO异常 {symbol}: {e2}")
+                        return False
+                else:
+                    logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
+                    return False
 
             self.okx_tp_sl_placed[symbol] = True
             self.tp_sl_last_placed[symbol] = time.time()
@@ -2758,9 +2781,9 @@ class MACDStrategy:
                     ema_down = down.ewm(com=rsi_win-1, min_periods=rsi_win).mean()
                     rs = ema_up / ema_down.replace(0, np.nan)
                     rsi1h = 100 - (100 / (1 + rs))
-                    latest_diff_1h = float(macd_diff_1h.iloc[-1])
-                    latest_dea_1h = float(macd_dea_1h.iloc[-1])
-                    latest_rsi_1h = float(rsi1h.iloc[-1])
+                    latest_diff_1h = float(macd_diff_1h.values[-1])
+                    latest_dea_1h = float(macd_dea_1h.values[-1])
+                    latest_rsi_1h = float(rsi1h.values[-1])
                     bullish_1h = (latest_diff_1h > latest_dea_1h and latest_rsi_1h > 50)
                     bearish_1h = (latest_diff_1h < latest_dea_1h and latest_rsi_1h < 50)
                     if bullish_1h:
