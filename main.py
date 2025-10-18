@@ -2286,7 +2286,7 @@ class MACDStrategy:
                 emsg = str(e)
                 # 异常也可能包含 sCode/sMsg，做兼容解析
                 if '51088' in emsg:
-                    logger.info(f"ℹ️ 已存在整仓TP/SL（异常返回），视为成功 {symbol}: {emsg}")
+                    logger.debug(f"ℹ️ 已存在整仓TP/SL（异常返回），视为成功 {symbol}: {emsg}")
                 elif '51023' in emsg:
                     logger.warning(f"⚠️ 挂OCO失败(51023异常) {symbol}: {emsg}")
                     return False
