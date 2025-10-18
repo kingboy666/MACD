@@ -1932,61 +1932,130 @@ class MACDStrategy:
             pass
 
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
-        """挂OKX侧TP/SL条件单"""
+        """挂OKX侧TP/SL条件单（仅保持一个整仓OCO；方向校验；tick对齐；无持仓不挂单）"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return False
-            st = self.sl_tp_state.get(symbol, {})
-            sl = st.get('sl', 0.0)
-            tp = st.get('tp', 0.0)
-            if sl <= 0 or tp <= 0:
+
+            # 必须有持仓才挂交易所侧TP/SL
+            pos = self.get_position(symbol, force_refresh=True)
+            if not pos or float(pos.get('size', 0) or 0) <= 0:
+                logger.warning(f"⚠️ 无持仓，跳过交易所侧TP/SL {symbol}")
                 return False
-            
-            sl_ticks = self.tp_sl_min_delta_ticks
-            px_prec = self.markets_info.get(symbol, {}).get('price_precision', 4)
+            pos_side = pos.get('side', 'long')
+
+            # 读取当前策略内的 SL/TP
+            st = self.sl_tp_state.get(symbol, {})
+            sl = float(st.get('sl', 0.0) or 0.0)
+            tp = float(st.get('tp', 0.0) or 0.0)
+            if sl <= 0 or tp <= 0:
+                logger.warning(f"⚠️ 未设定有效SL/TP，跳过 {symbol}")
+                return False
+
+            # 获取最新价与精度信息
+            px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
             tick_sz = 10 ** (-px_prec)
-            # 应用 1H 多头 TP 放大倍数（仅多头适用）
-            boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
+
+            # 市场最新价
+            last = 0.0
+            try:
+                tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
+                if isinstance(tkr, dict):
+                    d = tkr.get('data') or []
+                    if isinstance(d, list) and d:
+                        last = float(d[0].get('last') or d[0].get('lastPx') or 0.0)
+            except Exception as _e:
+                logger.warning(f"⚠️ 获取最新价失败 {symbol}: {_e}")
+
+            if last <= 0:
+                # 若最新价不可用，则使用入场价作为参考
+                last = max(0.0, float(entry or 0.0))
+            if last <= 0:
+                logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
+                return False
+
+            # 多头TP放大倍数（仅多头适用）
+            boost = 1.0
+            try:
+                boost = float(self.tp_boost_map.get(symbol, 1.0) or 1.0)
+            except Exception:
+                boost = 1.0
             if side == 'long' and boost > 1.0:
-                try:
-                    tp *= boost
-                except Exception:
-                    pass
-            sl = round(sl, px_prec)
-            tp = round(tp, px_prec)
-            
-            cl_prefix = self.tpsl_cl_prefix or 'TPSL_'
-            clid_sl = f"{cl_prefix}SL_{random.randint(1000,9999)}"
-            clid_tp = f"{cl_prefix}TP_{random.randint(1000,9999)}"
-            
+                tp *= boost
+
+            # 方向与距离校验，自动纠正到合规触发价范围
+            min_ticks = int(self.tp_sl_min_delta_ticks or 1)
+            min_delta = tick_sz * max(1, min_ticks)
+
+            def _round_px(x: float) -> float:
+                # 向价格精度对齐
+                return round(x, px_prec)
+
+            if side == 'long':
+                # 多头：TP 必须高于 last，SL 必须低于 last
+                tp = max(tp, last + min_delta)
+                sl = min(sl, last - min_delta)
+            else:
+                # 空头：TP 必须低于 last，SL 必须高于 last
+                tp = min(tp, last - min_delta)
+                sl = max(sl, last + min_delta)
+
+            tp = _round_px(tp)
+            sl = _round_px(sl)
+
+            # 若纠正后触发价不再有效（例如超出交易所范围），直接跳过
+            if tp <= 0 or sl <= 0 or tp == sl:
+                logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
+                return False
+
+            # 挂新单前撤旧（仅撤本程序的TP/SL）
+            try:
+                self.cancel_symbol_tp_sl(symbol)
+                time.sleep(0.3)
+            except Exception:
+                pass
+
+            # OCO参数：保证仅一组整仓TP/SL
             params_oco = {
                 'instId': inst_id,
                 'ordType': 'oco',
                 'side': 'sell' if side == 'long' else 'buy',
-                'posSide': side,
+                'posSide': side,  # 与策略侧一致（long/short）
                 'tdMode': 'cross',
                 'tpTriggerPx': str(tp),
-                'tpOrdPx': '-1',  # 市价
+                'tpOrdPx': '-1',   # 市价
                 'slTriggerPx': str(sl),
-                'slOrdPx': '-1',  # 市价
+                'slOrdPx': '-1',   # 市价
                 'closeFraction': '1',  # 全仓触发
             }
+
+            # 提交 OCO
             try:
-                resp_oco = self.exchange.privatePostTradeOrderAlgo(params_oco)
-                data_oco = resp_oco.get('data', [])[0] if resp_oco.get('data') else {}
-                if data_oco.get('sCode', '1') != '0':
-                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: {data_oco.get('sMsg', '')}")
+                resp = self.exchange.privatePostTradeOrderAlgo(params_oco)
+                data = resp.get('data', []) if isinstance(resp, dict) else []
+                item = data[0] if (isinstance(data, list) and data) else {}
+                s_code = str(item.get('sCode', '1'))
+                s_msg = str(item.get('sMsg', '') or '')
+                if s_code != '0':
+                    # 51088：仅允许一个整仓TP/SL；遇到就不重试
+                    if s_code == '51088':
+                        logger.warning(f"⚠️ 交易所仅允许一个整仓TP/SL {symbol}：{s_msg}（不重试）")
+                        return False
+                    # 51277/51250：方向或范围错误，已前置矫正；仍失败则记录
+                    logger.warning(f"⚠️ 挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                     return False
             except Exception as e:
-                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {str(e)}")
+                logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
                 return False
+
             self.okx_tp_sl_placed[symbol] = True
             self.tp_sl_last_placed[symbol] = time.time()
-            logger.info(f"✅ 挂OCO成功 {symbol}: SL={sl:.6f} TP={tp:.6f}")
+            logger.info(f"✅ 挂OCO成功 {symbol}: side={side} last={last:.6f} SL={sl:.6f} TP={tp:.6f}")
             return True
+
         except Exception as e:
-            logger.error(f"❌ 挂TP/SL失败 {symbol}: {str(e)}")
+            logger.error(f"❌ 挂TP/SL失败 {symbol}: {e}")
             return False
     
     def calculate_volatility(self, df):
