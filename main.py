@@ -1065,6 +1065,9 @@ class MACDStrategy:
             result.sort(key=lambda x: x['timestamp'])
             df = pd.DataFrame(result)
             return df
+        except Exception as e:
+            logger.error(f"❌ 获取{symbol}K线数据失败: {e}")
+            return pd.DataFrame()
 
     # ====== 自适应策略指标与关键位模块 ======
     def calculate_adx(self, df: pd.DataFrame, period: int = 14) -> float:
