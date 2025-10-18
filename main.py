@@ -2160,10 +2160,26 @@ class MACDStrategy:
                 s_msg = str(item.get('sMsg', '') or '')
                 return s_code, s_msg
 
-            # 提交 OCO，处理特定错误码
+            # 提交 OCO，处理特定错误码（51088视为成功；51023去掉posSide重试一次）
             try:
                 s_code, s_msg = _submit_oco(use_posside=True)
-                if s_code != '0':
+                if s_code == '0':
+                    pass  # 成功
+                elif s_code == '51088':
+                    # 已有整仓TP/SL，视为成功（保守模式不重挂）
+                    logger.info(f"ℹ️ 已存在整仓TP/SL，视为成功 {symbol}: code={s_code} msg={s_msg}")
+                elif s_code == '51023':
+                    # 去掉posSide重试一次
+                    logger.info(f"🔁 去掉posSide重试挂OCO {symbol}: 首次失败 code={s_code} msg={s_msg}")
+                    s_code2, s_msg2 = _submit_oco(use_posside=False)
+                    if s_code2 == '0':
+                        pass
+                    elif s_code2 == '51088':
+                        logger.info(f"ℹ️ 重试时已存在整仓TP/SL，视为成功 {symbol}: code={s_code2} msg={s_msg2}")
+                    else:
+                        logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
+                        return False
+                else:
                     logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                     return False
             except Exception as e:
