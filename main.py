@@ -1524,7 +1524,11 @@ class MACDStrategy:
                 if p.get('instId') == inst_id and float(p.get('pos', 0) or 0) != 0:
                     size = abs(float(p.get('pos', 0) or 0))
                     side = 'long' if p.get('posSide') == 'long' else 'short'
-                    entry_price = float(p.get('avgPx', 0) or 0)
+                    # 均价优先：避免出现0导致初始化无效
+                    try:
+                        entry_price = float(p.get('avgPx') or p.get('lastAvgPrice') or p.get('avgPrice') or 0)
+                    except Exception:
+                        entry_price = float(p.get('avgPx', 0) or 0)
                     leverage = float(p.get('lever', 0) or 0)
                     unreal = float(p.get('upl', 0) or 0)
                     margin_mode = str(p.get('mgnMode', 'cross') or 'cross').lower()
@@ -1766,8 +1770,9 @@ class MACDStrategy:
             if not native_only:
                 # CCXT方式
                 try:
+                    side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
                     params = {'type': 'market', 'reduceOnly': False, 'posSide': pos_side}
-                    order = self.exchange.create_order(symbol, 'market', side, contract_size, params=params)
+                    order = self.exchange.create_order(symbol, 'market', side_ccxt, contract_size, params=params)
                     order_id = order.get('id')
                 except Exception as e:
                     last_err = e
@@ -1784,10 +1789,11 @@ class MACDStrategy:
                         td_mode = 'cross'
                         pos_side_okx = 'net'
                     
+                    side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
                     params_okx = {
                         'instId': inst_id,
                         'tdMode': td_mode,
-                        'side': side,
+                        'side': side_ccxt,
                         'sz': str(contract_size),
                         'ordType': 'market'
                     }
@@ -1837,6 +1843,27 @@ class MACDStrategy:
             else:
                 sl = max(0.0, entry + n * atr)
                 tp = max(0.0, entry - m * atr)
+
+            # 精度与最小间距、方向/不等式矫正
+            px_prec = int(self.markets_info.get(symbol, {}).get('price_precision', 4) or 4)
+            tick_sz = 10 ** (-px_prec)
+            min_delta = max(10 * tick_sz, entry * 0.005)
+            if str(side).lower() == 'long':
+                sl = min(sl, entry - min_delta)
+                tp = max(tp, entry + min_delta)
+            else:
+                sl = max(sl, entry + min_delta)
+                tp = min(tp, entry - min_delta)
+            sl = round(max(sl, tick_sz), px_prec)
+            tp = round(max(tp, tick_sz), px_prec)
+            # 若仍相等或无效，按多个tick强制拉开
+            if sl <= 0 or tp <= 0 or sl == tp:
+                if str(side).lower() == 'long':
+                    sl = round(max(tick_sz, entry - (min_delta + 5 * tick_sz)), px_prec)
+                    tp = round(entry + (min_delta + 5 * tick_sz), px_prec)
+                else:
+                    sl = round(entry + (min_delta + 5 * tick_sz), px_prec)
+                    tp = round(max(tick_sz, entry - (min_delta + 5 * tick_sz)), px_prec)
 
             self.sl_tp_state[symbol] = {
                 'entry': entry,
@@ -2064,8 +2091,12 @@ class MACDStrategy:
                 except Exception:
                     pass
             if last <= tick_sz:
-                logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
-                return False
+                # 若持仓均价有效，则用 entry 兜底作为参考价
+                if float(entry or 0.0) > tick_sz:
+                    last = float(entry)
+                else:
+                    logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
+                    return False
 
             # 缺失时自动生成 SL/TP（优先关键位，其次ATR/比例；由在线学习权重决定）
             if (sl <= 0 or tp <= 0) and entry > 0:
@@ -2798,9 +2829,9 @@ class MACDStrategy:
                     ema_down = down.ewm(com=rsi_win-1, min_periods=rsi_win).mean()
                     rs = ema_up / ema_down.replace(0, np.nan)
                     rsi1h = 100 - (100 / (1 + rs))
-                    latest_diff_1h = float(macd_diff_1h.values[-1])
-                    latest_dea_1h = float(macd_dea_1h.values[-1])
-                    latest_rsi_1h = float(rsi1h.values[-1])
+                    latest_diff_1h = float(macd_diff_1h.iloc[-1] if hasattr(macd_diff_1h, 'iloc') else macd_diff_1h)
+                    latest_dea_1h = float(macd_dea_1h.iloc[-1] if hasattr(macd_dea_1h, 'iloc') else macd_dea_1h)
+                    latest_rsi_1h = float(rsi1h.iloc[-1] if hasattr(rsi1h, 'iloc') else rsi1h)
                     bullish_1h = (latest_diff_1h > latest_dea_1h and latest_rsi_1h > 50)
                     bearish_1h = (latest_diff_1h < latest_dea_1h and latest_rsi_1h < 50)
                     if bullish_1h:
@@ -2888,7 +2919,24 @@ class MACDStrategy:
                     # 无TP/SL则补挂
                     entry0 = float(pos.get('entry_price', 0) or 0)
                     if entry0 <= 0:
-                        continue
+                        # 用最近K线或ticker兜底参考价
+                        try:
+                            df_last = self.get_klines(symbol, 20)
+                            if df_last is not None and not df_last.empty:
+                                entry0 = float(df_last['close'].values[-1])
+                        except Exception:
+                            pass
+                        if entry0 <= 0:
+                            try:
+                                inst_id2 = self.symbol_to_inst_id(symbol)
+                                tkr2 = self.exchange.publicGetMarketTicker({'instId': inst_id2})
+                                d2 = tkr2.get('data') if isinstance(tkr2, dict) else tkr2
+                                if isinstance(d2, list) and d2:
+                                    entry0 = float(d2[0].get('last') or d2[0].get('lastPx') or 0.0)
+                            except Exception:
+                                entry0 = 0.0
+                        if entry0 <= 0:
+                            continue
                     try:
                         kl = self.get_klines(symbol, 50)
                         if kl is not None and not kl.empty:
