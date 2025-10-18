@@ -736,9 +736,9 @@ class MACDStrategy:
             if self.set_leverage_on_start:
                 for symbol in self.symbols:
                     try:
-                        # Cancel existing TP/SL algo orders first
-                        self.cancel_symbol_tp_sl(symbol)
-                        time.sleep(0.5)  # Short delay to avoid rate limits
+                        # 保守模式：不撤交易所侧TP/SL，避免51000/51088；仅设置杠杆
+                        # self.cancel_symbol_tp_sl(symbol)
+                        # time.sleep(0.5)  # Short delay to avoid rate limits
                         
                         lev = self.symbol_leverage.get(symbol, 20)
                         inst_id = self.symbol_to_inst_id(symbol)
@@ -2164,28 +2164,8 @@ class MACDStrategy:
             try:
                 s_code, s_msg = _submit_oco(use_posside=True)
                 if s_code != '0':
-                    if s_code == '51088':
-                        # 强撤全部后仅重试一次
-                        logger.warning(f"⚠️ 交易所仅允许一个整仓TP/SL {symbol}：{s_msg}，尝试强撤后重试一次")
-                        try:
-                            self.cancel_symbol_tp_sl(symbol)
-                            time.sleep(0.3)
-                        except Exception:
-                            pass
-                        s_code2, s_msg2 = _submit_oco(use_posside=True)
-                        if s_code2 != '0':
-                            logger.warning(f"⚠️ 重试挂OCO失败 {symbol}: code={s_code2} msg={s_msg2}")
-                            return False
-                    elif s_code == '51023':
-                        # 去掉 posSide 重试一次（净值模式）
-                        logger.warning(f"⚠️ 持仓侧匹配失败 {symbol}: {s_msg}，去掉posSide重试一次")
-                        s_code2, s_msg2 = _submit_oco(use_posside=False)
-                        if s_code2 != '0':
-                            logger.warning(f"⚠️ 去掉posSide重试失败 {symbol}: code={s_code2} msg={s_msg2}")
-                            return False
-                    else:
-                        logger.warning(f"⚠️ 挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
-                        return False
+                    logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
+                    return False
             except Exception as e:
                 logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
                 return False
@@ -2919,23 +2899,8 @@ class MACDStrategy:
                                 except Exception:
                                     pass
                                 try:
-                                    # 仅在超过冷却时间时重挂TP/SL，避免频繁撤销/重挂
-                                    last_ts = self.tp_sl_last_placed.get(symbol, 0.0)
-                                    if (time.time() - last_ts) >= float(self.tp_sl_refresh_interval):
-                                        try:
-                                            self.cancel_symbol_tp_sl(symbol)
-                                        except Exception:
-                                            pass
-                                        entry_px2 = float(self.sl_tp_state.get(symbol, {}).get('entry', 0) or 0)
-                                        okx_ok = False
-                                        if entry_px2 > 0:
-                                            okx_ok = self.place_okx_tp_sl(symbol, entry_px2, side_now, atr_val)
-                                        if okx_ok:
-                                            logger.info(f"🔄 更新追踪止盈：冷却达到，已重挂 {symbol}")
-                                        else:
-                                            logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}")
-                                    else:
-                                        logger.debug(f"⏳ 距上次挂单未达冷却({self.tp_sl_refresh_interval}s)，跳过重挂 {symbol}")
+                                    # 保守模式：禁用冷却后的撤旧+重挂，避免51000/51088链式报错
+                                    logger.debug(f"ℹ️ 保守模式：不重挂交易所侧TP/SL {symbol}（仅首次挂单）")
                                 except Exception as _e:
                                     logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}: {_e}")
                                 if side_now == 'long':
