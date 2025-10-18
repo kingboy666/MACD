@@ -2002,7 +2002,7 @@ class MACDStrategy:
 
             # 方向与距离校验，自动纠正到合规触发价范围
             min_ticks = int(self.tp_sl_min_delta_ticks or 1)
-            min_delta = tick_sz * max(1, min_ticks)
+            min_delta = max(tick_sz, last * 0.001)
 
             def _round_px(x: float) -> float:
                 return round(x, px_prec)
@@ -2016,6 +2016,9 @@ class MACDStrategy:
 
             tp = _round_px(tp)
             sl = _round_px(sl)
+            # 触发价下限保护：至少为一个tick，避免0或负数
+            tp = max(tp, tick_sz)
+            sl = max(sl, tick_sz)
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
@@ -2028,7 +2031,7 @@ class MACDStrategy:
                 pass
 
             # OCO参数：保证仅一组整仓TP/SL
-            def _submit_oco(use_posside: bool = True) -> Tuple[str, str]:
+            def _submit_oco(use_posside: bool = True):
                 params_oco = {
                     'instId': inst_id,
                     'ordType': 'oco',
