@@ -2055,7 +2055,15 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 获取最新价失败 {symbol}: {_e}")
             if last <= 0:
                 last = max(0.0, float(entry or 0.0))
-            if last <= 0:
+            # 若last依旧无效或过小，使用最近K线收盘价兜底
+            if last <= tick_sz:
+                try:
+                    df_last = self.get_klines(symbol, 20)
+                    if df_last is not None and not df_last.empty:
+                        last = float(df_last['close'].values[-1])
+                except Exception:
+                    pass
+            if last <= tick_sz:
                 logger.warning(f"⚠️ 无有效价格参考，跳过 {symbol}")
                 return False
 
@@ -2129,6 +2137,17 @@ class MACDStrategy:
                     sl = _round_px(last + max(min_delta, min_sep) + tick_sz)
                 if tp >= last:
                     tp = _round_px(max(tick_sz, last - max(min_delta, min_sep) - tick_sz))
+            # 最终严格矫正：若仍未满足不等式，按多个tick强制偏移
+            if side == 'long':
+                if sl >= last:
+                    sl = _round_px(max(tick_sz, last - max(min_delta, min_sep) - 5 * tick_sz))
+                if tp <= last:
+                    tp = _round_px(last + max(min_delta, min_sep) + 5 * tick_sz)
+            else:
+                if sl <= last:
+                    sl = _round_px(last + max(min_delta, min_sep) + 5 * tick_sz)
+                if tp >= last:
+                    tp = _round_px(max(tick_sz, last - max(min_delta, min_sep) - 5 * tick_sz))
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
