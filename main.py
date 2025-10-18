@@ -2822,6 +2822,56 @@ class MACDStrategy:
             logger.error(f"❌ 分析{symbol}失败: {e}")
             return {'signal': 'hold', 'reason': f'分析异常: {e}'}
     
+    def ensure_tpsl_guard(self) -> None:
+        """守护：逐币检查持仓，若交易所侧无TP/SL则立即补挂（保守模式：只挂一次，不撤不重挂）"""
+        try:
+            for symbol in self.symbols:
+                try:
+                    pos = self.get_position(symbol, force_refresh=True)
+                    if not pos or float(pos.get('size', 0) or 0) <= 0:
+                        continue
+                    inst_id = self.symbol_to_inst_id(symbol)
+                    # 查询交易所侧是否已有任何TP/SL
+                    has_algo = False
+                    try:
+                        resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                        pend = resp.get('data') if isinstance(resp, dict) else resp
+                        for it in (pend or []):
+                            if (it.get('algoId') or it.get('algoID') or it.get('id')):
+                                has_algo = True
+                                break
+                    except Exception:
+                        has_algo = False
+                    if has_algo:
+                        continue
+                    # 无TP/SL则补挂
+                    entry0 = float(pos.get('entry_price', 0) or 0)
+                    if entry0 <= 0:
+                        continue
+                    try:
+                        kl = self.get_klines(symbol, 50)
+                        if kl is not None and not kl.empty:
+                            ps = self.per_symbol_params.get(symbol, {})
+                            atr_p = int(ps.get('atr_period', 14))
+                            atr_val = calculate_atr(kl, atr_p)['atr'].iloc[-1]
+                        else:
+                            atr_val = 0.0
+                    except Exception:
+                        atr_val = 0.0
+                    # 若策略侧未初始化，则先初始化
+                    st0 = self.sl_tp_state.get(symbol)
+                    if not st0 and atr_val > 0 and entry0 > 0:
+                        self._set_initial_sl_tp(symbol, entry0, atr_val, pos.get('side', 'long'))
+                    ok = self.place_okx_tp_sl(symbol, entry0, pos.get('side', 'long'), atr_val)
+                    if ok:
+                        logger.info(f"📌 守护补挂TP/SL成功 {symbol}")
+                    else:
+                        logger.warning(f"⚠️ 守护补挂TP/SL失败 {symbol}")
+                except Exception as _e:
+                    logger.debug(f"🔧 守护检查异常 {symbol}: {_e}")
+        except Exception as e:
+            logger.warning(f"⚠️ 守护执行异常: {e}")
+
     def execute_strategy(self):
         """执行策略"""
         logger.info("=" * 70)
@@ -2830,6 +2880,11 @@ class MACDStrategy:
         
         try:
             self.check_sync_needed()
+            # 每轮先执行TP/SL守护，确保有持仓的币都挂好交易所侧TP/SL
+            try:
+                self.ensure_tpsl_guard()
+            except Exception as _e_guard:
+                logger.debug(f"🔧 守护执行异常: {_e_guard}")
             
             balance = self.get_account_balance()
             logger.info(f"💰 当前账户余额: {balance:.2f} USDT")
