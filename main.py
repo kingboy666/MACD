@@ -1737,9 +1737,10 @@ class MACDStrategy:
                 lev = float(self.symbol_leverage.get(symbol, 20) or 20)
                 est_cost0 = float(contract_size * current_price)
                 est_margin0 = est_cost0 / max(1.0, lev)
-                # 预估保证金门槛：不足0.5U直接跳过，避免手续费都不够
-                if est_margin0 < 0.5:
-                    logger.warning(f"⚠️ 预估保证金过低(<0.5U)，跳过下单 {symbol}: est_margin={est_margin0:.4f}U 价格={current_price:.6f} 数量={contract_size:.8f} 杠杆={lev}")
+                min_margin_floor = float((os.environ.get('MIN_MARGIN_FLOOR') or '0.1').strip())
+                # 预估保证金门槛：不足min_margin_floor直接跳过，避免手续费都不够
+                if est_margin0 < min_margin_floor:
+                    logger.warning(f"⚠️ 预估保证金过低(<{min_margin_floor}U)，跳过下单 {symbol}: est_margin={est_margin0:.4f}U 价格={current_price:.6f} 数量={contract_size:.8f} 杠杆={lev}")
                     return False
                 avail = float(self.get_account_balance() or 0.0)
                 # 预留一点安全系数（98%）
@@ -1813,14 +1814,16 @@ class MACDStrategy:
             else:
                 size_adj = max(min_amount, size_adj)
             # 名义金额与可用余额门槛（≥0.5U）；以及反向持仓防打架
-            if last_px > 0 and size_adj * last_px < 0.5:
-                logger.warning(f"⚠️ 名义金额过小(<0.5U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
+            min_notional_floor = float((os.environ.get('MIN_NOTIONAL_FLOOR') or '0.1').strip())
+            if last_px > 0 and size_adj * last_px < min_notional_floor:
+                logger.warning(f"⚠️ 名义金额过小(<{min_notional_floor}U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
                 return False
             # 可用余额门槛
             try:
                 avail_chk = float(self.get_account_balance() or 0.0)
-                if avail_chk < 0.5:
-                    logger.warning(f"⚠️ 可用余额不足(<0.5U)，跳过下单 {symbol}: available={avail_chk:.4f}U")
+                min_available_floor = float((os.environ.get('MIN_AVAILABLE_FLOOR') or '0.1').strip())
+                if avail_chk < min_available_floor:
+                    logger.warning(f"⚠️ 可用余额不足(<{min_available_floor}U)，跳过下单 {symbol}: available={avail_chk:.4f}U")
                     return False
             except Exception:
                 pass
@@ -2257,7 +2260,7 @@ class MACDStrategy:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
 
-            # 保守模式：若交易所侧已存在TP/SL，则不撤不重挂，直接跳过
+            # 保守模式：若交易所侧已存在TP/SL，则默认不重挂；可通过环境变量开启更新并加冷却与阈值
             try:
                 resp_pending = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
                 pend = resp_pending.get('data') if isinstance(resp_pending, dict) else resp_pending
@@ -2268,7 +2271,14 @@ class MACDStrategy:
                         has_algo = True
                         break
                 if has_algo:
-                    # 条件性更新：若新的SL更优（多头更高/空头更低），则继续挂新OCO；否则维持现状
+                    allow_update = (os.environ.get('ALLOW_OCO_UPDATE', 'false').strip().lower() in ('1','true','yes'))
+                    # 冷却期：默认禁用更新，或在冷却窗口内不刷新
+                    now_ts = time.time()
+                    last_ts = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                    if (not allow_update) or ((now_ts - last_ts) < float(self.tp_sl_refresh_interval or 300)):
+                        logger.debug(f"ℹ️ 已有OCO，禁用自动重挂或冷却期内不刷新 {symbol}")
+                        return True
+                    # 条件性更新：只有止损改善达到阈值才更新
                     try:
                         cur_sl = None
                         for it in (pend or []):
@@ -2277,16 +2287,34 @@ class MACDStrategy:
                                     cur_sl = float(it.get('slTriggerPx') or 0.0) or cur_sl
                                 except Exception:
                                     pass
+                        # 改善幅度 ≥ MIN_OCO_SL_IMPROVE_TICKS * tick_sz 才更新
+                        improve_ticks = 0
+                        try:
+                            improve_ticks = int((os.environ.get('MIN_OCO_SL_IMPROVE_TICKS') or '3').strip())
+                        except Exception:
+                            improve_ticks = 3
+                        min_improve = max(1, improve_ticks) * tick_sz
                         should_update = False
-                        if side == 'long' and sl > (cur_sl or 0.0):
+                        if side == 'long' and sl > (cur_sl or 0.0) + min_improve:
                             should_update = True
-                        if side == 'short' and sl < (cur_sl or 1e99):
+                        if side == 'short' and sl < (cur_sl if cur_sl is not None else 1e99) - min_improve:
                             should_update = True
                         if not should_update:
-                            logger.info(f"ℹ️ 保守模式：已有OCO且止损不更优，维持现状 {symbol}")
+                            logger.info(f"ℹ️ 已有OCO且止损改善不足阈值，维持现状 {symbol} (oldSL={cur_sl} newSL={sl})")
                             return True
                         else:
-                            logger.info(f"🔄 更优止损，更新交易所侧TP/SL {symbol}: oldSL={cur_sl} newSL={sl}")
+                            logger.info(f"🔄 止损显著改善，更新交易所侧TP/SL {symbol}: oldSL={cur_sl} newSL={sl} (≥{min_improve:.8f})")
+                            # 在更新前先撤销旧的OCO，避免累积重复挂单（默认开启，可通过环境变量关闭）
+                            try:
+                                do_cancel = (os.environ.get('CANCEL_OLD_OCO_BEFORE_UPDATE', 'true').strip().lower() in ('1','true','yes'))
+                            except Exception:
+                                do_cancel = True
+                            if do_cancel:
+                                try:
+                                    self.cancel_symbol_tp_sl(symbol)
+                                    time.sleep(0.3)
+                                except Exception as _e_cancel:
+                                    logger.debug(f"🔧 撤销旧OCO异常 {symbol}: {_e_cancel}")
                     except Exception as _e_chk:
                         logger.debug(f"🔧 检查现有OCO触发价异常 {symbol}: {_e_chk}")
                     # 继续走后续OCO提交流程（若返回51088视为成功降噪）
@@ -2310,6 +2338,8 @@ class MACDStrategy:
                     'slOrdPx': '-1',
                     # 使用实际持仓数量sz替代closeFraction，提升兼容性
                     'sz': str(float(pos.get('size', 0) or 0.0)),
+                    # 附带客户端订单ID前缀，便于后续识别和撤销
+                    'clOrdId': f"{self.tpsl_cl_prefix}{int(time.time())}",
                 }
                 # 在 hedge 模式下必须传正确的 posSide；net/oneway 模式不传
                 try:
