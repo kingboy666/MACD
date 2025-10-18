@@ -1617,7 +1617,7 @@ class MACDStrategy:
                 except Exception:
                     return default
 
-            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 0.02))
+            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 1.0))
             max_cap = max(0.0, _to_float('MAX_PER_SYMBOL_USDT', 0.0))
 
             if min_floor > 0 and target < min_floor:
@@ -1737,7 +1737,7 @@ class MACDStrategy:
                 lev = float(self.symbol_leverage.get(symbol, 20) or 20)
                 est_cost0 = float(contract_size * current_price)
                 est_margin0 = est_cost0 / max(1.0, lev)
-                min_margin_floor = float((os.environ.get('MIN_MARGIN_FLOOR') or '0.02').strip())
+                min_margin_floor = float((os.environ.get('MIN_MARGIN_FLOOR') or '0.2').strip())
                 # 预估保证金门槛：不足min_margin_floor直接跳过，避免手续费都不够
                 if est_margin0 < min_margin_floor:
                     logger.warning(f"⚠️ 预估保证金过低(<{min_margin_floor}U)，跳过下单 {symbol}: est_margin={est_margin0:.4f}U 价格={current_price:.6f} 数量={contract_size:.8f} 杠杆={lev}")
@@ -2132,6 +2132,16 @@ class MACDStrategy:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
                 return False
+
+            # 冷却短路：若已挂且未超过冷却时间，直接返回，避免重复挂单
+            try:
+                last_ts = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                refresh_sec = float(self.tp_sl_refresh_interval or 300)
+                if bool(self.okx_tp_sl_placed.get(symbol, False)) and (time.time() - last_ts) < refresh_sec:
+                    logger.debug(f"ℹ️ 冷却期内不重复挂TP/SL {symbol}")
+                    return True
+            except Exception:
+                pass
 
             # 必须有持仓才挂交易所侧TP/SL
             pos = self.get_position(symbol, force_refresh=True)
@@ -3053,7 +3063,16 @@ class MACDStrategy:
                                 break
                     except Exception:
                         has_algo = False
+                        # 查询失败则跳过本轮补挂，避免重复尝试导致频繁挂单
+                        logger.debug(f"🔧 查询算法单异常，跳过补挂 {symbol}")
+                        continue
                     if has_algo:
+                        # 标记为已挂并记录时间，避免重复补挂
+                        try:
+                            self.okx_tp_sl_placed[symbol] = True
+                            self.tp_sl_last_placed[symbol] = time.time()
+                        except Exception:
+                            pass
                         continue
                     # 无TP/SL则补挂
                     entry0 = float(pos.get('entry_price', 0) or 0)
@@ -3090,8 +3109,22 @@ class MACDStrategy:
                     st0 = self.sl_tp_state.get(symbol)
                     if not st0 and atr_val > 0 and entry0 > 0:
                         self._set_initial_sl_tp(symbol, entry0, atr_val, pos.get('side', 'long'))
+                    # 冷却守卫：若已标记且冷却期内，跳过补挂
+                    try:
+                        last_ts2 = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                        refresh_sec2 = float(self.tp_sl_refresh_interval or 300)
+                        if bool(self.okx_tp_sl_placed.get(symbol, False)) and (time.time() - last_ts2) < refresh_sec2:
+                            logger.debug(f"ℹ️ 冷却期内守护不重复补挂 {symbol}")
+                            continue
+                    except Exception:
+                        pass
                     ok = self.place_okx_tp_sl(symbol, entry0, pos.get('side', 'long'), atr_val)
                     if ok:
+                        try:
+                            self.okx_tp_sl_placed[symbol] = True
+                            self.tp_sl_last_placed[symbol] = time.time()
+                        except Exception:
+                            pass
                         logger.info(f"📌 守护补挂TP/SL成功 {symbol}")
                     else:
                         logger.warning(f"⚠️ 守护补挂TP/SL失败 {symbol}")
