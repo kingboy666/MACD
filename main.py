@@ -1767,6 +1767,41 @@ class MACDStrategy:
             order_id = None
             last_err = None
 
+            # 名义金额≥1U守卫与步进/下限对齐
+            try:
+                mi = self.markets_info.get(symbol, {}) or {}
+                min_amount = float(mi.get('min_amount', 0) or 0.0)
+                lot_sz_val = mi.get('lot_size')
+                lot_sz = float(lot_sz_val) if (lot_sz_val not in (None, '')) else 0.0
+            except Exception:
+                min_amount, lot_sz = 0.0, 0.0
+            last_px = 0.0
+            try:
+                inst_id_np = self.symbol_to_inst_id(symbol)
+                tkr_np = self.exchange.publicGetMarketTicker({'instId': inst_id_np})
+                d_np = tkr_np.get('data') if isinstance(tkr_np, dict) else tkr_np
+                if isinstance(d_np, list) and d_np:
+                    last_px = float(d_np[0].get('last') or d_np[0].get('lastPx') or 0.0)
+            except Exception:
+                last_px = 0.0
+            if last_px <= 0:
+                try:
+                    df_np = self.get_klines(symbol, 10)
+                    if isinstance(df_np, pd.DataFrame) and not df_np.empty:
+                        last_px = float(df_np['close'].values[-1])
+                except Exception:
+                    last_px = 0.0
+            size_adj = float(contract_size)
+            if lot_sz and lot_sz > 0:
+                steps = int(size_adj / lot_sz)
+                size_adj = max(min_amount, steps * lot_sz) if steps > 0 else max(min_amount, lot_sz)
+            else:
+                size_adj = max(min_amount, size_adj)
+            if last_px > 0 and size_adj * last_px < 1.0:
+                logger.warning(f"⚠️ 名义金额过小(<1U)，跳过下单 {symbol}: size={size_adj} last={last_px:.6f} notional={size_adj*last_px:.4f}U")
+                return False
+            contract_size = size_adj
+
             native_only = (os.environ.get('USE_OKX_NATIVE_ONLY', '').strip().lower() in ('1', 'true', 'yes'))
 
             if not native_only:
