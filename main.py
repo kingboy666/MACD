@@ -3166,8 +3166,16 @@ class MACDStrategy:
             reach_07R = (side == 'long' and (last - entry) >= 0.7 * R) or (side == 'short' and (entry - last) >= 0.7 * R)
             if not st['partial_done'] and (reach_T1 or reach_07R):
                 # 平出60%
-                part_sz = round(size * 0.6, 8)
-                if part_sz > 0:
+                # 分仓数量按 lotSz/minSz 对齐
+                mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                lot_sz = float(mi.get('lot_size') or mi.get('lotSz') or 0.0)
+                min_sz = float(mi.get('min_size') or mi.get('minSz') or 0.0)
+                raw_part = float(size * 0.6)
+                part_sz = float(int(raw_part / lot_sz) * lot_sz) if lot_sz > 0 else round(raw_part, 8)
+                part_sz = min(part_sz, size)
+                if part_sz <= 0 or (min_sz > 0 and part_sz < min_sz):
+                    pass  # 跳过分仓
+                else:
                     try:
                         sell_buy = 'sell' if side == 'long' else 'buy'
                         inst_id = self.symbol_to_inst_id(symbol)
@@ -3201,11 +3209,21 @@ class MACDStrategy:
                             sell_buy = 'sell' if side == 'long' else 'buy'
                             inst_id = self.symbol_to_inst_id(symbol)
                             td_mode = 'isolated' if str(pos.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                            # 对齐余仓数量到 lotSz，并不低于 minSz
+                            mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                            lot_sz = float(mi.get('lot_size') or mi.get('lotSz') or 0.0)
+                            min_sz = float(mi.get('min_size') or mi.get('minSz') or 0.0)
+                            aligned_sz = float(rem_sz)
+                            if lot_sz > 0:
+                                aligned_sz = float(int(rem_sz / lot_sz) * lot_sz)
+                            aligned_sz = min(aligned_sz, rem_sz)
+                            if aligned_sz <= 0 or (min_sz > 0 and aligned_sz < min_sz):
+                                raise Exception("余仓数量未达最小下单单位，跳过保本退出")
                             params_okx = {
                                 'instId': inst_id,
                                 'tdMode': td_mode,
                                 'side': sell_buy,
-                                'sz': str(rem_sz),
+                                'sz': str(aligned_sz),
                                 'ordType': 'market',
                                 'reduceOnly': True,
                             }
@@ -3233,11 +3251,21 @@ class MACDStrategy:
                             sell_buy = 'sell' if side == 'long' else 'buy'
                             inst_id = self.symbol_to_inst_id(symbol)
                             td_mode = 'isolated' if str(pos.get('margin_mode','cross')).lower() == 'isolated' else 'cross'
+                            # 对齐余仓数量到 lotSz，并不低于 minSz
+                            mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                            lot_sz = float(mi.get('lot_size') or mi.get('lotSz') or 0.0)
+                            min_sz = float(mi.get('min_size') or mi.get('minSz') or 0.0)
+                            aligned_sz2 = float(rem_sz2)
+                            if lot_sz > 0:
+                                aligned_sz2 = float(int(rem_sz2 / lot_sz) * lot_sz)
+                            aligned_sz2 = min(aligned_sz2, rem_sz2)
+                            if aligned_sz2 <= 0 or (min_sz > 0 and aligned_sz2 < min_sz):
+                                raise Exception("余仓数量未达最小下单单位，跳过温和跟踪退出")
                             params_okx = {
                                 'instId': inst_id,
                                 'tdMode': td_mode,
                                 'side': sell_buy,
-                                'sz': str(rem_sz2),
+                                'sz': str(aligned_sz2),
                                 'ordType': 'market',
                                 'reduceOnly': True,
                             }
