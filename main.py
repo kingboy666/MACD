@@ -600,12 +600,19 @@ class MACDStrategy:
         self.tp_sl_last_placed: Dict[str, float] = {}
         self.tp_sl_refresh_interval = 300
         self.tp_sl_min_delta_ticks = 2
+        # OCO生效宽限（秒）：刚挂出的一段时间内由交易所OCO接管，不触发策略内兜底平仓
+        try:
+            self.tpsl_activation_grace_sec = int((os.environ.get('TPSL_ACTIVATION_GRACE_SEC') or '15').strip())
+        except Exception:
+            self.tpsl_activation_grace_sec = 15
         # 开仓冷却，避免刚被止损/止盈后立刻再开
         try:
             self.order_cooldown_sec = int((os.environ.get('ORDER_COOLDOWN_SEC') or '60').strip())
         except Exception:
             self.order_cooldown_sec = 60
         self.order_last_ts: Dict[str, float] = {}
+        # 记录每币种最近一次开仓时间（用于兜底触发的最小持仓存活时长判断）
+        self.position_open_ts: Dict[str, float] = {}
         
         # ===== 每币种配置(用于追踪止损) =====
         self.symbol_cfg: Dict[str, Dict[str, float | str]] = {
@@ -1932,6 +1939,10 @@ class MACDStrategy:
             logger.info(f"🚀 下单成功 {symbol}: ID={order_id} {side} {contract_size:.8f} @{current_price:.6f}")
             try:
                 self.order_last_ts[symbol] = time.time()
+                # 记录开仓时间用于兜底的最小存活时长判断
+                if not hasattr(self, 'position_open_ts'):
+                    self.position_open_ts = {}
+                self.position_open_ts[symbol] = time.time()
             except Exception:
                 pass
             # 开仓成功后输出参考关键位（Top2）
@@ -2337,6 +2348,15 @@ class MACDStrategy:
             if tp <= 0 or sl <= 0 or tp == sl:
                 logger.warning(f"⚠️ 触发价无效，跳过 {symbol}: last={last:.6f} tp={tp:.6f} sl={sl:.6f}")
                 return False
+            # 同步策略内SL/TP与即将提交的OCO触发价，保持一致，避免策略内误判触发
+            try:
+                stw = self.sl_tp_state.get(symbol) or {}
+                stw['entry'] = float(entry or stw.get('entry', 0) or 0.0)
+                stw['sl'] = float(sl)
+                stw['tp'] = float(tp)
+                self.sl_tp_state[symbol] = stw
+            except Exception:
+                pass
 
             # 保守模式：若交易所侧已存在TP/SL，则默认不重挂；可通过环境变量开启更新并加冷却与阈值
             try:
@@ -3221,6 +3241,9 @@ class MACDStrategy:
                     # 刚发生平仓事件：记录冷却时间，避免立刻再开
                     try:
                         self.order_last_ts[symbol] = time.time()
+                        # 清零开仓时间戳，避免用旧值
+                        if hasattr(self, 'position_open_ts'):
+                            self.position_open_ts[symbol] = 0.0
                     except Exception:
                         pass
                     # 取收盘/最新价为close
@@ -3612,6 +3635,49 @@ class MACDStrategy:
                                 except Exception as _e:
                                     logger.warning(f"⚠️ 更新追踪止盈重挂失败 {symbol}: {_e}")
                                 if side_now == 'long':
+                                    # 宽限：刚挂出OCO的一段时间内不触发策略内兜底，由交易所OCO接管
+                                    try:
+                                        last_ts_gr = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                                        grace = int(self.tpsl_activation_grace_sec or 0)
+                                        if grace > 0 and (time.time() - last_ts_gr) < grace:
+                                            logger.debug(f"⏳ OCO生效宽限内(多) 跳过策略兜底平仓 {symbol}")
+                                            continue
+                                    except Exception:
+                                        pass
+                                    # 使用真实持仓均价作为基准，且最小存活时长与最小偏离门槛保护
+                                    try:
+                                        current_position = self.get_position(symbol, force_refresh=True)
+                                        entry_ex = float(current_position.get('avgPx') or current_position.get('avg_price') or current_position.get('entryPrice') or 0.0)
+                                        if entry_ex > 0:
+                                            st['entry'] = entry_ex
+                                        # 存活时长门槛（默认>=10s）
+                                        open_ts = 0.0
+                                        try:
+                                            open_ts = float(getattr(self, 'position_open_ts', {}).get(symbol, 0.0) or 0.0)
+                                        except Exception:
+                                            open_ts = 0.0
+                                        if open_ts > 0 and (time.time() - open_ts) < 10:
+                                            logger.debug(f"⏳ 持仓存活<10s 跳过兜底 {symbol}")
+                                            continue
+                                        # 计算最小偏离
+                                        mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                                        tick_sz = float(mi.get('tick_size') or mi.get('tickSz') or 0.0)
+                                        base = st.get('entry') or entry_ex or close_price
+                                        base = float(base or 0.0)
+                                        atr_safe = None
+                                        try:
+                                            atr_safe = float(atr_val) if 'atr_val' in locals() and atr_val is not None else None
+                                        except Exception:
+                                            atr_safe = None
+                                        comp_tick = (3.0 * tick_sz) if tick_sz and tick_sz > 0 else (base * 0.001)
+                                        comp_pct = base * 0.002
+                                        comp_atr = atr_safe if (atr_safe is not None and atr_safe > 0) else 0.0
+                                        min_dist = max(comp_tick, comp_pct, comp_atr)
+                                        if base > 0 and abs(close_price - base) < min_dist:
+                                            logger.debug(f"⛳ 偏离不足(min_dist={min_dist:.6f}) 跳过兜底 {symbol}")
+                                            continue
+                                    except Exception:
+                                        pass
                                     if close_price <= st['sl'] or close_price >= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP多头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
                                         # 先交给交易所侧OCO执行，短暂等待
@@ -3650,6 +3716,49 @@ class MACDStrategy:
                                                 logger.error(f"❌ 兜底平仓失败 {symbol}: {_e_close}")
                                         continue
                                 else:
+                                    # 宽限：刚挂出OCO的一段时间内不触发策略内兜底，由交易所OCO接管
+                                    try:
+                                        last_ts_gr = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                                        grace = int(self.tpsl_activation_grace_sec or 0)
+                                        if grace > 0 and (time.time() - last_ts_gr) < grace:
+                                            logger.debug(f"⏳ OCO生效宽限内(空) 跳过策略兜底平仓 {symbol}")
+                                            continue
+                                    except Exception:
+                                        pass
+                                    # 使用真实持仓均价作为基准，且最小存活时长与最小偏离门槛保护
+                                    try:
+                                        current_position = self.get_position(symbol, force_refresh=True)
+                                        entry_ex = float(current_position.get('avgPx') or current_position.get('avg_price') or current_position.get('entryPrice') or 0.0)
+                                        if entry_ex > 0:
+                                            st['entry'] = entry_ex
+                                        # 存活时长门槛（默认>=10s）
+                                        open_ts = 0.0
+                                        try:
+                                            open_ts = float(getattr(self, 'position_open_ts', {}).get(symbol, 0.0) or 0.0)
+                                        except Exception:
+                                            open_ts = 0.0
+                                        if open_ts > 0 and (time.time() - open_ts) < 10:
+                                            logger.debug(f"⏳ 持仓存活<10s 跳过兜底 {symbol}")
+                                            continue
+                                        # 计算最小偏离
+                                        mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
+                                        tick_sz = float(mi.get('tick_size') or mi.get('tickSz') or 0.0)
+                                        base = st.get('entry') or entry_ex or close_price
+                                        base = float(base or 0.0)
+                                        atr_safe = None
+                                        try:
+                                            atr_safe = float(atr_val) if 'atr_val' in locals() and atr_val is not None else None
+                                        except Exception:
+                                            atr_safe = None
+                                        comp_tick = (3.0 * tick_sz) if tick_sz and tick_sz > 0 else (base * 0.001)
+                                        comp_pct = base * 0.002
+                                        comp_atr = atr_safe if (atr_safe is not None and atr_safe > 0) else 0.0
+                                        min_dist = max(comp_tick, comp_pct, comp_atr)
+                                        if base > 0 and abs(close_price - base) < min_dist:
+                                            logger.debug(f"⛳ 偏离不足(min_dist={min_dist:.6f}) 跳过兜底 {symbol}")
+                                            continue
+                                    except Exception:
+                                        pass
                                     if close_price >= st['sl'] or close_price <= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP空头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
                                         time.sleep(2)
