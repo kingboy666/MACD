@@ -891,67 +891,96 @@ class MACDStrategy:
             return False
 
     def cancel_symbol_tp_sl(self, symbol: str) -> bool:
-        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。需携带 ordType 与 algoId；优先撤本程序前缀，失败则强撤全部。"""
+        """撤销该交易对在OKX侧已挂的TP/SL（算法单）。只使用algoId撤销，避免ordType参数错误。"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
+                logger.debug(f"🔧 无效的instId，跳过撤销 {symbol}")
                 return True
 
-            # 拉取待撤算法单
-            resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
-            data = resp.get('data') if isinstance(resp, dict) else resp
+            # 获取待撤销的算法单
+            try:
+                resp = self.exchange.privateGetTradeOrdersAlgoPending({'instType': 'SWAP', 'instId': inst_id})
+                data = resp.get('data') if isinstance(resp, dict) else resp
+            except Exception as e:
+                logger.warning(f"⚠️ 获取 {symbol} 条件单失败: {e}")
+                return False
 
-            # 收集：algoId + ordType
-            ours: List[Dict[str, str]] = []
-            all_items: List[Dict[str, str]] = []
-            for it in (data or []):
+            if not data:
+                logger.info(f"ℹ️ {symbol} 当前无待撤销条件单")
+                return True
+
+            # 收集算法单ID
+            our_algos = []  # 本程序创建的
+            all_algos = []  # 所有的
+            
+            for item in data:
                 try:
-                    aid = str((it.get('algoId') or it.get('algoID') or it.get('id') or ''))
-                    ord_type = str(it.get('ordType') or '').lower()
-                    clid = str(it.get('clOrdId') or it.get('algoClOrdId') or '')
-                    if not aid or not ord_type:
+                    algo_id = str(item.get('algoId') or item.get('algoID') or item.get('id') or '')
+                    cl_ord_id = str(item.get('clOrdId') or item.get('algoClOrdId') or '')
+                    
+                    if not algo_id:
                         continue
-                    item = {'algoId': aid, 'ordType': ord_type}
-                    all_items.append(item)
-                    if self.tpsl_cl_prefix and clid.startswith(self.tpsl_cl_prefix):
-                        ours.append(item)
-                except Exception:
+                        
+                    all_algos.append(algo_id)
+                    
+                    # 检查是否是本程序创建的订单
+                    if self.tpsl_cl_prefix and cl_ord_id.startswith(self.tpsl_cl_prefix):
+                        our_algos.append(algo_id)
+                        
+                except Exception as e:
+                    logger.debug(f"🔧 解析算法单信息失败: {e}")
                     continue
 
-            def _cancel(items: List[Dict[str, str]]) -> bool:
-                if not items:
-                    return False
-                ok = False
-                # 逐条撤销优先（algoId+ordType），遇51000再以algoId-only回退
-                for it in items:
+            # 撤销函数：只使用algoId和instId
+            def _cancel_algos(algo_ids: List[str], desc: str) -> int:
+                success_count = 0
+                for algo_id in algo_ids:
                     try:
-                        self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'ordType': it['ordType'], 'instId': inst_id})
-                        ok = True
-                    except Exception as e1:
-                        try:
-                            self.exchange.privatePostTradeCancelAlgos({'algoId': it['algoId'], 'instId': inst_id})
-                            ok = True
-                        except Exception as e2:
-                            logger.debug(f"🔧 撤销失败 {symbol}: algoId={it['algoId']} ordType={it['ordType']} err1={e1} err2={e2}")
-                return ok
+                        cancel_params = {
+                            'algoId': algo_id,
+                            'instId': inst_id
+                        }
+                        self.exchange.privatePostTradeCancelAlgos(cancel_params)
+                        success_count += 1
+                        logger.debug(f"✅ 撤销成功 {symbol} {desc}: algoId={algo_id}")
+                        
+                    except Exception as e:
+                        error_msg = str(e)
+                        # 如果订单已经不存在或已撤销，也算成功
+                        if any(code in error_msg for code in ['51400', '51401', '51402']):
+                            logger.debug(f"ℹ️ {symbol} 算法单已不存在: algoId={algo_id}")
+                            success_count += 1
+                        else:
+                            logger.warning(f"⚠️ 撤销失败 {symbol} {desc}: algoId={algo_id} error={e}")
+                
+                return success_count
 
-            total = 0
-            if ours and _cancel(ours):
-                total += len(ours)
+            total_cancelled = 0
+            
+            # 优先撤销本程序创建的订单
+            if our_algos:
+                cancelled = _cancel_algos(our_algos, "本程序订单")
+                total_cancelled += cancelled
+                logger.info(f"📋 撤销 {symbol} 本程序条件单: {cancelled}/{len(our_algos)}")
+            
+            # 如果本程序订单撤销失败或没有本程序订单，尝试撤销所有订单
+            if total_cancelled == 0 and all_algos:
+                cancelled = _cancel_algos(all_algos, "所有订单")
+                total_cancelled += cancelled
+                logger.info(f"📋 撤销 {symbol} 所有条件单: {cancelled}/{len(all_algos)}")
 
-            if total == 0 and all_items and _cancel(all_items):
-                total += len(all_items)
-
-            if total > 0:
-                logger.info(f"✅ 撤销 {symbol} 条件单数量: {total}")
-                time.sleep(0.3)
+            if total_cancelled > 0:
+                logger.info(f"✅ 成功撤销 {symbol} 条件单数量: {total_cancelled}")
+                # 给交易所一点时间处理撤销请求
+                time.sleep(0.2)
                 return True
-
-            logger.info(f"ℹ️ {symbol} 当前无可撤条件单")
-            return True
+            else:
+                logger.warning(f"⚠️ {symbol} 条件单撤销失败或无需撤销")
+                return False
 
         except Exception as e:
-            logger.warning(f"⚠️ 撤销 {symbol} 条件单失败: {e}")
+            logger.error(f"❌ 撤销 {symbol} 条件单异常: {e}")
             return False
     
     def sync_all_status(self):
@@ -1679,14 +1708,23 @@ class MACDStrategy:
             try:
                 lev = float(self.symbol_leverage.get(symbol, 20) or 20)
                 required_margin = target / max(1.0, lev)
-                # 预留 2% 安全系数
-                if balance < required_margin * 1.02:
-                    logger.warning(f"⚠️ 保证金不足，跳过 {symbol}: 余额={balance:.4f}U 需保证金≈{required_margin:.4f}U (lev={lev:.1f}x, 目标={target:.4f}U)")
+                # 使用占比上限对齐（默认最多使用 95% 的可用余额作为本笔保证金上限）
+                try:
+                    cap_ratio = float((os.environ.get('MARGIN_ALLOC_MAX') or '0.95').strip())
+                except Exception:
+                    cap_ratio = 0.95
+                cap = max(0.0, balance * cap_ratio)
+                if required_margin > cap > 0:
+                    scale = cap / required_margin
+                    target = target * scale
+                    required_margin = required_margin * scale
+                    logger.info(f"🔧 保证金对齐: cap={cap:.4f}U scale={scale:.3f} 目标名义→{target:.4f}U")
+                if target <= 0 or required_margin <= 0:
+                    logger.warning(f"⚠️ 名义或保证金无效，跳过 {symbol}")
                     return 0.0
             except Exception:
-                # 若估算失败，不强下单
-                logger.warning(f"⚠️ 保证金估算失败，谨慎起见跳过 {symbol}")
-                return 0.0
+                # 若估算失败，出于稳健可继续按当前 target 尝试（不强跳过）
+                logger.warning(f"⚠️ 保证金估算异常，继续尝试 {symbol}")
 
             # 并发控制：保证金分配模式已按active_count分摊，不再二次均分
             logger.info(f"💵 单币分配: 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
@@ -1699,6 +1737,11 @@ class MACDStrategy:
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
         try:
+            # 参数验证
+            if not symbol or not side or amount <= 0:
+                logger.error(f"❌ 无效参数: symbol={symbol}, side={side}, amount={amount}")
+                return False
+            
             # 下单冷却守卫（按币种）
             try:
                 last_ts = float(self.order_last_ts.get(symbol, 0.0) or 0.0)
@@ -1707,25 +1750,38 @@ class MACDStrategy:
                     left = cd - (time.time() - last_ts)
                     logger.info(f"⏳ 冷却中，跳过下单 {symbol}，剩余 {left:.1f}s")
                     return False
-            except Exception:
+            except Exception as e:
+                logger.warning(f"⚠️ 冷却检查异常 {symbol}: {e}")
                 pass
 
-            if self.has_open_orders(symbol):
-                logger.warning(f"⚠️ {symbol}存在未成交订单，先取消")
-                self.cancel_all_orders(symbol)
-                time.sleep(1)
-
-            if amount <= 0:
-                logger.warning(f"⚠️ {symbol}下单金额为0，跳过")
+            # 检查未成交订单
+            try:
+                if self.has_open_orders(symbol):
+                    logger.warning(f"⚠️ {symbol}存在未成交订单，先取消")
+                    if not self.cancel_all_orders(symbol):
+                        logger.error(f"❌ 取消订单失败 {symbol}")
+                        return False
+                    time.sleep(1)
+            except Exception as e:
+                logger.error(f"❌ 检查/取消订单异常 {symbol}: {e}")
                 return False
 
-            market_info = self.markets_info.get(symbol, {})
-            min_amount = float(market_info.get('min_amount', 0.001) or 0.001)
-            amount_precision = int(market_info.get('amount_precision', 8) or 8)
-            lot_sz = market_info.get('lot_size')
-
-            inst_id = self.symbol_to_inst_id(symbol)
+            # 获取市场信息
             try:
+                market_info = self.markets_info.get(symbol, {})
+                min_amount = float(market_info.get('min_amount', 0.001) or 0.001)
+                amount_precision = int(market_info.get('amount_precision', 8) or 8)
+                lot_sz = market_info.get('lot_size')
+                
+                if not market_info:
+                    logger.warning(f"⚠️ 未找到市场信息 {symbol}")
+            except Exception as e:
+                logger.error(f"❌ 获取市场信息失败 {symbol}: {e}")
+                return False
+
+            # 获取当前价格
+            try:
+                inst_id = self.symbol_to_inst_id(symbol)
                 tkr = self.exchange.publicGetMarketTicker({'instId': inst_id})
                 if isinstance(tkr, dict):
                     d = tkr.get('data') or []
@@ -1735,12 +1791,14 @@ class MACDStrategy:
                         current_price = 0.0
                 else:
                     current_price = 0.0
-            except Exception as _e:
-                logger.error(f"❌ 获取{symbol}最新价失败({inst_id}): {_e}")
-                current_price = 0.0
-
-            if not current_price or current_price <= 0:
-                logger.error(f"❌ 无法获取{symbol}有效价格，跳过下单")
+                    
+                if not current_price or current_price <= 0:
+                    logger.error(f"❌ 无法获取{symbol}有效价格，跳过下单")
+                    return False
+                    
+                logger.info(f"📊 获取价格成功 {symbol}: ${current_price:.6f}")
+            except Exception as e:
+                logger.error(f"❌ 获取{symbol}最新价失败({inst_id}): {e}")
                 return False
 
             contract_size = amount / current_price
@@ -1942,9 +2000,16 @@ class MACDStrategy:
                 # CCXT方式
                 try:
                     side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
-                    params = {'type': 'market', 'reduceOnly': False, 'posSide': pos_side}
+                    # 检查仓位模式，避免在net模式下传递posSide参数
+                    pos_mode = self.get_position_mode()
+                    if pos_mode == 'hedge':
+                        params = {'type': 'market', 'reduceOnly': False, 'posSide': pos_side}
+                    else:
+                        params = {'type': 'market', 'reduceOnly': False}
+                    
                     order = self.exchange.create_order(symbol, 'market', side_ccxt, contract_size, params=params)
                     order_id = order.get('id')
+                    logger.info(f"✅ CCXT下单成功 {symbol}: mode={pos_mode}")
                 except Exception as e:
                     last_err = e
                     logger.warning(f"⚠️ CCXT下单失败: {str(e)} - 尝试OKX原生API")
@@ -1953,12 +2018,16 @@ class MACDStrategy:
                 # OKX原生方式
                 try:
                     pos_mode = self.get_position_mode()
+                    
+                    # 根据仓位模式设置参数
                     if pos_mode == 'hedge':
                         td_mode = 'cross'
                         pos_side_okx = pos_side
+                        use_pos_side = True
                     else:
                         td_mode = 'cross'
-                        pos_side_okx = 'net'
+                        pos_side_okx = None
+                        use_pos_side = False
                     
                     side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
                     params_okx = {
@@ -1968,13 +2037,17 @@ class MACDStrategy:
                         'sz': str(contract_size),
                         'ordType': 'market'
                     }
-                    if pos_mode == 'hedge':
+                    
+                    # 只在hedge模式下添加posSide参数
+                    if use_pos_side and pos_side_okx:
                         params_okx['posSide'] = pos_side_okx
                     
+                    logger.info(f"📝 OKX原生下单参数 {symbol}: mode={pos_mode}, params={params_okx}")
                     resp = self.exchange.privatePostTradeOrder(params_okx)
                     data = resp.get('data') if isinstance(resp, dict) else resp
                     if data and isinstance(data, list) and data[0]:
                         order_id = data[0].get('ordId')
+                        logger.info(f"✅ OKX原生下单成功 {symbol}: ID={order_id}")
                 except Exception as e:
                     last_err = e
                     msg0 = str(e)
@@ -2068,6 +2141,9 @@ class MACDStrategy:
             return True
         except Exception as e:
             logger.error(f"❌ 创建订单失败 {symbol}: {str(e)}")
+            # 记录详细错误信息用于调试
+            import traceback
+            logger.error(f"❌ 详细错误堆栈 {symbol}: {traceback.format_exc()}")
             return False
     
     def _set_initial_sl_tp(self, symbol: str, entry: float, atr: float, side: str) -> bool:
@@ -2302,13 +2378,20 @@ class MACDStrategy:
             return 0.0, 0.0
 
     def place_okx_tp_sl(self, symbol: str, entry: float, side: str, atr: float = 0.0) -> bool:
-        """挂OKX侧TP/SL条件单（仅保持一个整仓OCO；方向校验；tick对齐；无持仓不挂单；缺失时自动生成SL/TP；自适应重试51088/51023）"""
+        """挂OKX侧TP/SL条件单（简化版本，减少复杂的价格校验逻辑）"""
         try:
             inst_id = self.symbol_to_inst_id(symbol)
             if not inst_id:
+                logger.warning(f"⚠️ 无效的instId: {symbol}")
                 return False
 
-            # 冷却短路：若已挂且未超过冷却时间，直接返回，避免重复挂单
+            # 检查是否有持仓
+            pos = self.get_position(symbol, force_refresh=True)
+            if not pos or float(pos.get('size', 0) or 0) <= 0:
+                logger.warning(f"⚠️ 无持仓，跳过交易所侧TP/SL {symbol}")
+                return False
+
+            # 冷却机制：避免频繁重复挂单
             try:
                 last_ts = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
                 refresh_sec = float(self.tp_sl_refresh_interval or 300)
@@ -2318,13 +2401,7 @@ class MACDStrategy:
             except Exception:
                 pass
 
-            # 必须有持仓才挂交易所侧TP/SL
-            pos = self.get_position(symbol, force_refresh=True)
-            if not pos or float(pos.get('size', 0) or 0) <= 0:
-                logger.warning(f"⚠️ 无持仓，跳过交易所侧TP/SL {symbol}")
-                return False
-
-            # 读取策略侧SL/TP；若缺失且提供entry/atr，则自动生成
+            # 获取或生成SL/TP价格
             st = self.sl_tp_state.get(symbol, {})
             sl = float(st.get('sl', 0.0) or 0.0)
             tp = float(st.get('tp', 0.0) or 0.0)
@@ -2553,7 +2630,7 @@ class MACDStrategy:
                 }
                 # 在 hedge 模式下必须传正确的 posSide；net/oneway 模式不传
                 try:
-                    if self.get_position_mode() == 'hedge':
+                    if use_posside and self.get_position_mode() == 'hedge':
                         ps = str(pos.get('side', 'long') or 'long')
                         params_oco['posSide'] = 'long' if ps == 'long' else 'short'
                 except Exception:
@@ -2575,8 +2652,13 @@ class MACDStrategy:
                     # 已有整仓TP/SL，视为成功（保守模式不重挂）
                     logger.debug(f"ℹ️ 已存在整仓TP/SL，视为成功 {symbol}: code={s_code} msg={s_msg}")
                 elif s_code == '51023':
-                    logger.warning(f"⚠️ 挂OCO失败(51023) {symbol}: {s_msg}")
-                    return False
+                    logger.warning(f"⚠️ 挂OCO(51023) 将去掉posSide重试 {symbol}: {s_msg}")
+                    s2_code, s2_msg = _submit_oco(use_posside=False)
+                    if s2_code == '0' or s2_code == '51088':
+                        logger.info(f"✅ 重试挂OCO成功/已存在 {symbol}: code={s2_code} msg={s2_msg}")
+                    else:
+                        logger.warning(f"⚠️ 重试挂OCO失败 {symbol}: code={s2_code} msg={s2_msg}")
+                        return False
                 else:
                     logger.warning(f"⚠️ 保守模式下挂OCO失败 {symbol}: code={s_code} msg={s_msg}")
                     return False
@@ -2586,8 +2668,17 @@ class MACDStrategy:
                 if '51088' in emsg:
                     logger.debug(f"ℹ️ 已存在整仓TP/SL（异常返回），视为成功 {symbol}: {emsg}")
                 elif '51023' in emsg:
-                    logger.warning(f"⚠️ 挂OCO失败(51023异常) {symbol}: {emsg}")
-                    return False
+                    logger.warning(f"⚠️ 挂OCO失败(51023异常) 将去掉posSide重试 {symbol}: {emsg}")
+                    try:
+                        s2_code, s2_msg = _submit_oco(use_posside=False)
+                        if s2_code == '0' or s2_code == '51088':
+                            logger.info(f"✅ 重试挂OCO成功/已存在 {symbol}: code={s2_code} msg={s2_msg}")
+                        else:
+                            logger.warning(f"⚠️ 重试挂OCO失败 {symbol}: code={s2_code} msg={s2_msg}")
+                            return False
+                    except Exception as e2:
+                        logger.warning(f"⚠️ 重试挂OCO异常 {symbol}: {e2}")
+                        return False
                 else:
                     logger.warning(f"⚠️ 挂OCO异常 {symbol}: {e}")
                     return False
@@ -2906,32 +2997,56 @@ class MACDStrategy:
     def open_position(self, symbol, side, df, reason, signal_strength):
         """开仓"""
         try:
+            # 参数验证
+            if not symbol or not side or df is None or df.empty:
+                logger.error(f"❌ 开仓参数无效: symbol={symbol}, side={side}, df_empty={df is None or df.empty}")
+                return
+            
+            if signal_strength < 0 or signal_strength > 100:
+                logger.warning(f"⚠️ 信号强度异常 {symbol}: {signal_strength}, 调整为50")
+                signal_strength = 50
+                
             latest = df.iloc[-1]
             entry_price = latest['close']
+            
+            if entry_price <= 0:
+                logger.error(f"❌ 入场价格无效 {symbol}: {entry_price}")
+                return
+                
             category = self.get_category(symbol)
             
             position_size, multiplier = self.calculate_position_size(symbol, entry_price, signal_strength)
             
             if position_size <= 0:
-                logger.warning(f"⚠️ 仓位计算错误，跳过 {symbol}")
+                logger.warning(f"⚠️ 仓位计算错误，跳过 {symbol}: size={position_size}")
                 return
             
             # 模拟下单（实盘时取消注释）
             # order = self.exchange.create_market_order(symbol, side, position_size)
             
             # 计算止损止盈
-            if side == 'buy':
-                stop_loss_price = entry_price * (1 - self.stop_loss[symbol] / 100)
-                take_profit_prices = [
-                    entry_price * (1 + tp / 100) 
-                    for tp in self.take_profit[symbol]
-                ]
-            else:
-                stop_loss_price = entry_price * (1 + self.stop_loss[symbol] / 100)
-                take_profit_prices = [
-                    entry_price * (1 - tp / 100) 
-                    for tp in self.take_profit[symbol]
-                ]
+            try:
+                if side == 'buy':
+                    stop_loss_price = entry_price * (1 - self.stop_loss[symbol] / 100)
+                    take_profit_prices = [
+                        entry_price * (1 + tp / 100) 
+                        for tp in self.take_profit[symbol]
+                    ]
+                else:
+                    stop_loss_price = entry_price * (1 + self.stop_loss[symbol] / 100)
+                    take_profit_prices = [
+                        entry_price * (1 - tp / 100) 
+                        for tp in self.take_profit[symbol]
+                    ]
+                
+                # 验证止损止盈价格
+                if stop_loss_price <= 0 or any(tp <= 0 for tp in take_profit_prices):
+                    logger.error(f"❌ 止损止盈价格计算错误 {symbol}: sl={stop_loss_price}, tp={take_profit_prices}")
+                    return
+                    
+            except Exception as e:
+                logger.error(f"❌ 计算止损止盈失败 {symbol}: {e}")
+                return
             
             # 记录持仓
             self.positions[symbol] = {
@@ -2969,6 +3084,9 @@ class MACDStrategy:
             
         except Exception as e:
             logger.error(f"❌ 开仓失败 {symbol}: {e}")
+            # 记录详细错误信息用于调试
+            import traceback
+            logger.error(f"❌ 开仓详细错误堆栈 {symbol}: {traceback.format_exc()}")
     
     def manage_positions(self):
         """持仓管理"""
@@ -3497,7 +3615,8 @@ class MACDStrategy:
                             'reduceOnly': True,
                         }
                         # hedge模式附带posSide
-                        if self.get_position_mode() == 'hedge':
+                        pos_mode = self.get_position_mode()
+                        if pos_mode == 'hedge':
                             params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
                         self.exchange.privatePostTradeOrder(params_okx)
                         logger.info(f"🎯 震荡分仓止盈60% {symbol}: side={side} size={part_sz}")
@@ -3541,7 +3660,8 @@ class MACDStrategy:
                                 'ordType': 'market',
                                 'reduceOnly': True,
                             }
-                            if self.get_position_mode() == 'hedge':
+                            pos_mode = self.get_position_mode()
+                            if pos_mode == 'hedge':
                                 params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
                             self.exchange.privatePostTradeOrder(params_okx)
                             logger.info(f"🛡️ 保本退出余仓 {symbol}: side={side} size={rem_sz}")
@@ -3583,7 +3703,8 @@ class MACDStrategy:
                                 'ordType': 'market',
                                 'reduceOnly': True,
                             }
-                            if self.get_position_mode() == 'hedge':
+                            pos_mode = self.get_position_mode()
+                            if pos_mode == 'hedge':
                                 params_okx['posSide'] = ('long' if side == 'short' else 'short') if sell_buy == 'buy' else side
                             self.exchange.privatePostTradeOrder(params_okx)
                             logger.info(f"📉 温和跟踪触发退出 {symbol}: side={side} size={rem_sz2}")
@@ -3829,7 +3950,8 @@ class MACDStrategy:
                                                         'ordType': 'market',
                                                         'reduceOnly': True,
                                                     }
-                                                    if self.get_position_mode() == 'hedge':
+                                                    pos_mode = self.get_position_mode()
+                                                    if pos_mode == 'hedge':
                                                         params_okx['posSide'] = 'long'
                                                     self.exchange.privatePostTradeOrder(params_okx)
                                                 else:
@@ -3912,7 +4034,8 @@ class MACDStrategy:
                                                         'ordType': 'market',
                                                         'reduceOnly': True,
                                                     }
-                                                    if self.get_position_mode() == 'hedge':
+                                                    pos_mode = self.get_position_mode()
+                                                    if pos_mode == 'hedge':
                                                         params_okx['posSide'] = 'short'
                                                     self.exchange.privatePostTradeOrder(params_okx)
                                                 else:
