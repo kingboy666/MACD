@@ -602,9 +602,14 @@ class MACDStrategy:
         self.tp_sl_min_delta_ticks = 2
         # OCO生效宽限（秒）：刚挂出的一段时间内由交易所OCO接管，不触发策略内兜底平仓
         try:
-            self.tpsl_activation_grace_sec = int((os.environ.get('TPSL_ACTIVATION_GRACE_SEC') or '15').strip())
+            self.tpsl_activation_grace_sec = int((os.environ.get('TPSL_ACTIVATION_GRACE_SEC') or '30').strip())
         except Exception:
-            self.tpsl_activation_grace_sec = 15
+            self.tpsl_activation_grace_sec = 30
+        # 仅交易所OCO执行平仓（禁用本地兜底），默认开启；可用 ONLY_OCO_CLOSE=0 关闭
+        try:
+            self.only_oco_close = (str(os.environ.get('ONLY_OCO_CLOSE') or '1').strip().lower() in ('1','true','yes'))
+        except Exception:
+            self.only_oco_close = True
         # 开仓冷却，避免刚被止损/止盈后立刻再开
         try:
             self.order_cooldown_sec = int((os.environ.get('ORDER_COOLDOWN_SEC') or '60').strip())
@@ -1888,6 +1893,49 @@ class MACDStrategy:
 
             contract_size = size_adj
 
+            # 下单前保证金预检 + 安全缓冲：不足则按比例缩减数量
+            try:
+                price_for_notional = float(current_price)
+                # 杠杆获取（若无专用函数则退化为全局）
+                try:
+                    leverage = float(self.get_symbol_leverage(symbol))
+                except Exception:
+                    leverage = float(getattr(self, 'leverage', 1.0) or 1.0)
+                # 手续费与安全缓冲
+                taker_fee = float((os.environ.get('TAKER_FEE_RATE') or '0.0005').strip())  # 默认0.05%
+                safety = float((os.environ.get('MARGIN_SAFETY_BUFFER') or '0.003').strip()) # 默认0.3%
+                # 计算某数量的名义与所需保证金
+                def _required_for(qty: float):
+                    notional = max(0.0, float(qty)) * price_for_notional
+                    required = (notional / max(1.0, leverage)) + (taker_fee + safety) * notional
+                    return notional, required
+                # 可用保证金（退化使用账户可用余额）
+                try:
+                    avail0 = float(self.get_account_balance() or 0.0)
+                except Exception:
+                    avail0 = 0.0
+                if avail0 <= 0:
+                    logger.warning(f"⚠️ 可用保证金为0，跳过 {symbol}")
+                    return False
+                # 先按当前对齐数量预检
+                notional0, required0 = _required_for(contract_size)
+                if avail0 < required0:
+                    scale = max(0.0, (avail0 / required0) * 0.98)
+                    new_qty = contract_size * scale
+                    # 重新对齐步进
+                    try:
+                        if lot_sz and lot_sz > 0:
+                            new_qty = float(int(new_qty / lot_sz) * lot_sz)
+                    except Exception:
+                        pass
+                    if new_qty <= 0 or (min_amount > 0 and new_qty < min_amount):
+                        logger.warning(f"⚠️ 预检后数量不足最小单位，跳过 {symbol}: avail={avail0:.4f}U need={required0:.4f}U")
+                        return False
+                    logger.info(f"🧮 预检缩减: 可用={avail0:.4f}U 需={required0:.4f}U -> 数量 {contract_size:.8f} → {new_qty:.8f}")
+                    contract_size = new_qty
+            except Exception as _e_pre:
+                logger.warning(f"⚠️ 保证金预检异常，继续尝试下单 {symbol}: {_e_pre}")
+
             native_only = (os.environ.get('USE_OKX_NATIVE_ONLY', '').strip().lower() in ('1', 'true', 'yes'))
 
             if not native_only:
@@ -1929,8 +1977,72 @@ class MACDStrategy:
                         order_id = data[0].get('ordId')
                 except Exception as e:
                     last_err = e
-                    logger.error(f"❌ OKX原生下单失败: {str(e)}")
-                    return False
+                    msg0 = str(e)
+                    # 若为51008保证金不足，则执行阶梯降尺重试
+                    if '51008' in msg0 or 'Insufficient USDT margin' in msg0:
+                        try:
+                            logger.warning(f"⚠️ 51008保证金不足，开始阶梯降尺重试 {symbol}")
+                            steps = [0.95, 0.90, 0.85, 0.80, 0.75]
+                            for stp in steps:
+                                qty_try = contract_size * stp
+                                # 对齐步进/最小
+                                try:
+                                    if lot_sz and lot_sz > 0:
+                                        qty_try = float(int(qty_try / lot_sz) * lot_sz)
+                                except Exception:
+                                    pass
+                                if qty_try <= 0 or (min_amount > 0 and qty_try < min_amount):
+                                    logger.warning(f"⚠️ 重试数量低于最小单位，中止 {symbol}")
+                                    break
+                                # 预检可用额度
+                                try:
+                                    price_for_notional = float(current_price)
+                                    try:
+                                        leverage = float(self.get_symbol_leverage(symbol))
+                                    except Exception:
+                                        leverage = float(getattr(self, 'leverage', 1.0) or 1.0)
+                                    taker_fee = float((os.environ.get('TAKER_FEE_RATE') or '0.0005').strip())
+                                    safety = float((os.environ.get('MARGIN_SAFETY_BUFFER') or '0.003').strip())
+                                    notionalX = qty_try * price_for_notional
+                                    requiredX = (notionalX / max(1.0, leverage)) + (taker_fee + safety) * notionalX
+                                    try:
+                                        availX = float(self.get_account_balance() or 0.0)
+                                    except Exception:
+                                        availX = 0.0
+                                except Exception:
+                                    availX = 0.0
+                                    requiredX = float('inf')
+                                if availX < requiredX:
+                                    logger.info(f"⏳ 重试预检不通过: 可用={availX:.4f}U 需={requiredX:.4f}U，继续降尺 {symbol}")
+                                    contract_size = qty_try
+                                    continue
+                                # 调整下单参数并尝试原生下单
+                                params_okx['sz'] = str(qty_try)
+                                try:
+                                    resp_try = self.exchange.privatePostTradeOrder(params_okx)
+                                    data_try = resp_try.get('data') if isinstance(resp_try, dict) else resp_try
+                                    ord_id_try = None
+                                    if data_try and isinstance(data_try, list) and data_try[0]:
+                                        ord_id_try = data_try[0].get('ordId')
+                                    if ord_id_try:
+                                        order_id = ord_id_try
+                                        contract_size = qty_try
+                                        logger.info(f"✅ 51008降尺成功: 数量→{qty_try:.8f}")
+                                        break
+                                except Exception as _e_try:
+                                    if '51008' in str(_e_try):
+                                        logger.info(f"↘️ 51008 继续降尺 {symbol}")
+                                        contract_size = qty_try
+                                        continue
+                                    else:
+                                        last_err = _e_try
+                                        break
+                        except Exception as _e_r:
+                            last_err = _e_r
+                    # 若最终未获得订单ID，则报错返回
+                    if order_id is None:
+                        logger.error(f"❌ OKX原生下单失败: {str(last_err)}")
+                        return False
             
             if order_id is None:
                 logger.error(f"❌ 下单失败 {symbol}: {last_err}")
@@ -3656,8 +3768,8 @@ class MACDStrategy:
                                             open_ts = float(getattr(self, 'position_open_ts', {}).get(symbol, 0.0) or 0.0)
                                         except Exception:
                                             open_ts = 0.0
-                                        if open_ts > 0 and (time.time() - open_ts) < 10:
-                                            logger.debug(f"⏳ 持仓存活<10s 跳过兜底 {symbol}")
+                                        if open_ts > 0 and (time.time() - open_ts) < 20:
+                                            logger.debug(f"⏳ 持仓存活<20s 跳过兜底 {symbol}")
                                             continue
                                         # 计算最小偏离
                                         mi = self.markets_info.get(symbol, {}) if hasattr(self, 'markets_info') else {}
@@ -3669,15 +3781,25 @@ class MACDStrategy:
                                             atr_safe = float(atr_val) if 'atr_val' in locals() and atr_val is not None else None
                                         except Exception:
                                             atr_safe = None
-                                        comp_tick = (3.0 * tick_sz) if tick_sz and tick_sz > 0 else (base * 0.001)
-                                        comp_pct = base * 0.002
-                                        comp_atr = atr_safe if (atr_safe is not None and atr_safe > 0) else 0.0
+                                        comp_tick = (5.0 * tick_sz) if tick_sz and tick_sz > 0 else (base * 0.0015)
+                                        comp_pct = base * 0.003
+                                        comp_atr = (1.5 * atr_safe) if (atr_safe is not None and atr_safe > 0) else 0.0
                                         min_dist = max(comp_tick, comp_pct, comp_atr)
                                         if base > 0 and abs(close_price - base) < min_dist:
-                                            logger.debug(f"⛳ 偏离不足(min_dist={min_dist:.6f}) 跳过兜底 {symbol}")
+                                            age = (time.time() - open_ts) if open_ts > 0 else -1
+                                            try:
+                                                last_ts_gr = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
+                                                grace_left = max(0.0, self.tpsl_activation_grace_sec - (time.time() - last_ts_gr))
+                                            except Exception:
+                                                grace_left = -1
+                                            logger.debug(f"⛳ 偏离不足 跳过兜底 {symbol}: entry={base:.6f} price={close_price:.6f} min_dist={min_dist:.6f} age={age:.1f}s grace_left={grace_left:.1f}s")
                                             continue
                                     except Exception:
                                         pass
+                                    # 全局禁用本地兜底时，直接跳过
+                                    if getattr(self, 'only_oco_close', False):
+                                        logger.debug(f"🛡️ ONLY_OCO_CLOSE=1 跳过本地兜底(多) {symbol}")
+                                        continue
                                     if close_price <= st['sl'] or close_price >= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP多头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
                                         # 先交给交易所侧OCO执行，短暂等待
@@ -3759,6 +3881,10 @@ class MACDStrategy:
                                             continue
                                     except Exception:
                                         pass
+                                    # 全局禁用本地兜底时，直接跳过
+                                    if getattr(self, 'only_oco_close', False):
+                                        logger.debug(f"🛡️ ONLY_OCO_CLOSE=1 跳过本地兜底(空) {symbol}")
+                                        continue
                                     if close_price >= st['sl'] or close_price <= st['tp']:
                                         logger.info(f"⛔ 触发SL/TP空头 {symbol}: 价={close_price:.6f} SL={st['sl']:.6f} TP={st['tp']:.6f}")
                                         time.sleep(2)
