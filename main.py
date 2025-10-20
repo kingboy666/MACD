@@ -221,6 +221,45 @@ class MACDStrategy:
             return self.PER_SYMBOL_OVERRIDES.get(symbol, {}).get(key, default)
         except Exception:
             return default
+    def is_max_drawdown_exceeded(self, threshold: float = None) -> bool:
+        """
+        回撤风控：超过最大回撤阈值返回 True
+        - 优先委托给 TradingStats.is_max_drawdown_exceeded
+        - 兜底：基于账户可用余额的峰值/当前值计算简单回撤
+        环境变量：
+          MAX_DRAWDOWN_PCT（默认 0.15，即 15%）
+        """
+        try:
+            if threshold is None:
+                threshold = float(os.environ.get('MAX_DRAWDOWN_PCT', '0.15'))
+        except Exception:
+            threshold = 0.15
+        # 优先使用统计对象
+        try:
+            if getattr(self, 'stats', None) and hasattr(self.stats, 'is_max_drawdown_exceeded'):
+                return bool(self.stats.is_max_drawdown_exceeded(threshold))
+        except Exception:
+            pass
+        # 兜底：基于账户余额计算
+        try:
+            cur = float(self.get_account_balance() or 0.0)
+        except Exception:
+            cur = 0.0
+        if not hasattr(self, '_equity_peak'):
+            self._equity_peak = cur
+        if cur > self._equity_peak:
+            self._equity_peak = cur
+            return False
+        if self._equity_peak > 0:
+            try:
+                dd = (self._equity_peak - cur) / self._equity_peak
+            except Exception:
+                dd = 0.0
+            if dd >= threshold:
+                logger.warning(f"⚠️ 触发最大回撤限制: dd={dd:.2%} 阈值={threshold:.2%}")
+                return True
+        return False
+
     def __init__(self, api_key: str, secret_key: str, passphrase: str):
         """初始化策略"""
         # SAR 结果缓存：key=(tag, len, last_ts, af_start, af_max) -> last_sar
@@ -228,6 +267,11 @@ class MACDStrategy:
         # K线缓存：per symbol, {timestamp: klines}
         self._klines_cache: Dict[str, Dict[float, List[Dict]]] = {}
         self._klines_ttl = 60  # 秒
+        # 交易统计与回撤风控
+        try:
+            self.stats = TradingStats()
+        except Exception:
+            self.stats = None
 
         # 交易所配置
         self.exchange = ccxt.okx({
@@ -270,9 +314,9 @@ class MACDStrategy:
             'ARB/USDT:USDT'     # Arbitrum
         ]
         
-        # 时间周期 - 15分钟
+        # 时间周期 - 统一使用15分钟
         self.timeframe = '15m'
-        # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
+        # 按币种指定周期：全部统一 15m
         self.timeframe_map = {
             # 15m：波动惯性强的主流币
             'BTC/USDT:USDT': '15m',
@@ -452,12 +496,12 @@ class MACDStrategy:
             'WLD/USDT:USDT': '15m',
             # 5m：高频波动，短周期更有效
             'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '5m',
+            'WIF/USDT:USDT': '15m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '15m',
+            'PEPE/USDT:USDT': '15m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '5m',
+            'DOGE/USDT:USDT': '15m',
             'XRP/USDT:USDT': '15m',
         }
         
