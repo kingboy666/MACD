@@ -25,7 +25,6 @@ import math
 import traceback
 import random
 import re
-import requests
 # 绘图支持（按需懒加载，避免环境缺库报错）
 
 # 配置日志 - 使用中国时区和UTF-8编码
@@ -83,10 +82,7 @@ class TradingStats:
             'total_pnl': 0.0,
             'total_win_pnl': 0.0,
             'total_loss_pnl': 0.0,
-            'trades_history': [],
-            'peak_balance': 0.0,
-            'max_drawdown': 0.0,
-            'current_drawdown': 0.0
+            'trades_history': []
         }
         self.load_stats()
     
@@ -97,23 +93,19 @@ class TradingStats:
                 with open(self.stats_file, 'r') as f:
                     self.stats = json.load(f)
                 logger.info(f"✅ 加载历史统计数据：总交易{self.stats['total_trades']}笔")
-        except (FileNotFoundError, json.JSONDecodeError) as e:
-            logger.warning(f"⚠️ 加载统计数据失败: {str(e)}，使用新数据")
         except Exception as e:
-            logger.error(f"❌ 加载统计数据异常: {str(e)} - {traceback.format_exc()}")
+            logger.warning(f"⚠️ 加载统计数据失败: {str(e)} - {traceback.format_exc()}，使用新数据")
     
     def save_stats(self):
         """保存统计数据"""
         try:
             with open(self.stats_file, 'w') as f:
                 json.dump(self.stats, f, indent=2)
-        except (IOError, OSError) as e:
-            logger.error(f"❌ 保存统计数据失败: {str(e)}")
         except Exception as e:
-            logger.error(f"❌ 保存统计数据异常: {str(e)} - {traceback.format_exc()}")
+            logger.error(f"❌ 保存统计数据失败: {str(e)} - {traceback.format_exc()}")
     
     def add_trade(self, symbol: str, side: str, pnl: float):
-        """添加交易记录并更新回撤统计"""
+        """添加交易记录"""
         self.stats['total_trades'] += 1
         self.stats['total_pnl'] += pnl
         
@@ -124,18 +116,13 @@ class TradingStats:
             self.stats['loss_trades'] += 1
             self.stats['total_loss_pnl'] += pnl
         
-        # 更新回撤统计
-        self._update_drawdown_stats()
-        
         # 添加交易历史 - 使用北京时间
         china_tz = pytz.timezone('Asia/Shanghai')
         trade_record = {
             'timestamp': datetime.datetime.now(china_tz).strftime('%Y-%m-%d %H:%M:%S'),
             'symbol': symbol,
             'side': side,
-            'pnl': round(pnl, 4),
-            'total_pnl': round(self.stats['total_pnl'], 4),
-            'current_drawdown': round(self.stats['current_drawdown'], 4)
+            'pnl': round(pnl, 4)
         }
         self.stats['trades_history'].append(trade_record)
         
@@ -144,36 +131,6 @@ class TradingStats:
             self.stats['trades_history'] = self.stats['trades_history'][-100:]
         
         self.save_stats()
-
-    def _update_drawdown_stats(self):
-        """更新回撤统计"""
-        try:
-            current_balance = self.get_account_balance()
-            
-            # 更新峰值余额
-            if current_balance > self.stats['peak_balance']:
-                self.stats['peak_balance'] = current_balance
-                self.stats['current_drawdown'] = 0.0
-            else:
-                # 计算当前回撤
-                if self.stats['peak_balance'] > 0:
-                    self.stats['current_drawdown'] = (self.stats['peak_balance'] - current_balance) / self.stats['peak_balance']
-                    
-                    # 更新最大回撤
-                    if self.stats['current_drawdown'] > self.stats['max_drawdown']:
-                        self.stats['max_drawdown'] = self.stats['current_drawdown']
-                        
-        except Exception as e:
-            logger.warning(f"⚠️ 更新回撤统计失败: {e}")
-
-    def is_max_drawdown_exceeded(self, threshold: float = 0.15) -> bool:
-        """检查是否超过最大回撤阈值"""
-        try:
-            # 从环境变量获取阈值，默认15%
-            max_dd_threshold = float(os.environ.get('MAX_DRAWDOWN_THRESHOLD', str(threshold)))
-            return self.stats['current_drawdown'] > max_dd_threshold
-        except Exception:
-            return False
     
     def get_win_rate(self) -> float:
         """计算胜率"""
@@ -769,7 +726,7 @@ class MACDStrategy:
             try:
                 self._sleep_with_throttle()
                 return func(*args, **kwargs)
-            except (requests.exceptions.RequestException, ConnectionError, TimeoutError) as e:
+            except Exception as e:
                 msg = str(e)
                 is_rate = ('50011' in msg) or ('Too Many Requests' in msg)
                 if not is_rate or i >= retries:
@@ -777,9 +734,6 @@ class MACDStrategy:
                 wait = min(max_wait, base * (2 ** i)) + float(np.random.uniform(0, 0.2))
                 logger.warning(f"⏳ 限频(50011) 第{i+1}次重试，等待 {wait:.2f}s")
                 time.sleep(wait)
-            except Exception as e:
-                logger.error(f"❌ API调用异常: {str(e)}")
-                raise
         return None
 
     def _setup_exchange(self):
@@ -861,9 +815,7 @@ class MACDStrategy:
                     'price_precision': px_prec,
                     'lot_size': lot_sz,
                 }
-                # 减少冗余日志：只在调试模式下输出详细信息
-                if os.environ.get('DEBUG_MODE', '').lower() == 'true':
-                    logger.info(f"📊 {symbol} - 最小数量:{min_sz:.8f} 步进:{(lot_sz or 0):.8f} Tick:{tick_sz:.8f}")
+                logger.info(f"📊 {symbol} - 最小数量:{min_sz:.8f} 步进:{(lot_sz or 0):.8f} Tick:{tick_sz:.8f}")
             logger.info("✅ 市场信息加载完成")
         except Exception as e:
             logger.error(f"❌ 加载市场信息失败: {e}")
@@ -1068,16 +1020,13 @@ class MACDStrategy:
                 self.open_orders_cache[symbol] = orders
                 
                 if position['size'] > 0:
-                    # 简化持仓日志，只显示关键信息
-                    logger.info(f"📊 {symbol}: {position['side']} {position['size']:.4f} @{position['entry_price']:.2f} PNL:{position['unrealized_pnl']:.2f}U")
+                    logger.info(f"📊 {symbol} 持仓: {position['side']} {position['size']:.6f} @{position['entry_price']:.2f} PNL:{position['unrealized_pnl']:.2f}U 杠杆:{position['leverage']}x")
                 
                 if orders:
                     has_orders = True
-                    logger.info(f"📋 {symbol} 挂单: {len(orders)}个")
-                    # 详细挂单信息只在调试模式下显示
-                    if os.environ.get('DEBUG_MODE', '').lower() == 'true':
-                        for order in orders:
-                            logger.info(f"   └─ {order['side']} {order['amount']:.6f} @{order.get('price', 'market')}")
+                    logger.info(f"📋 {symbol} 挂单数量: {len(orders)}")
+                    for order in orders:
+                        logger.info(f"   └─ {order['side']} {order['amount']:.6f} @{order.get('price', 'market')}")
             
             if not has_positions:
                 logger.info("ℹ️ 当前无持仓")
@@ -1686,116 +1635,104 @@ class MACDStrategy:
             return False
     
     def calculate_order_amount(self, symbol: str, active_count: Optional[int] = None) -> float:
-        """计算下单金额 - 优化版本，简化资金分配逻辑"""
+        """计算下单金额 - 按信号逐币分配，不做全体平均；余额/保证金不足则跳过"""
         try:
             balance = self.get_account_balance()
             if balance <= 0:
                 logger.warning(f"⚠️ 余额不足，无法为 {symbol} 分配资金 (余额:{balance:.4f}U)")
                 return 0.0
 
-            # 获取基础目标金额
-            target = self._get_base_target_amount(balance, active_count, symbol)
-            if target <= 0:
-                logger.warning(f"⚠️ {symbol} 目标金额为0，跳过")
-                return 0.0
+            # 1) 固定目标名义金额（最高优先）
+            target_str = os.environ.get('TARGET_NOTIONAL_USDT', '').strip()
+            if target_str:
+                try:
+                    target = max(0.0, float(target_str))
+                    logger.info(f"💵 使用固定目标名义金额: {target:.4f}U")
+                except Exception:
+                    logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
+                    target = 0.0
+            else:
+                # 2) 保证金驱动（当有活跃交易对时）：每币保证金预算=余额/active_count×MARGIN_BUDGET_FACTOR，目标名义=预算×杠杆
+                if isinstance(active_count, int) and active_count and active_count > 0:
+                    try:
+                        lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+                    except Exception:
+                        lev = 20.0
+                    try:
+                        mbf = float((os.environ.get('MARGIN_BUDGET_FACTOR') or '1.0').strip())
+                    except Exception:
+                        mbf = 1.0
+                    margin_budget = (balance / float(active_count)) * mbf
+                    target = max(0.0, margin_budget * max(1.0, lev))
+                    logger.info(f"💵 模式=保证金分配: 余额={balance:.4f}U, 活跃={active_count}, 预算≈{margin_budget:.4f}U, lev={lev:.1f}x, 名义≈{target:.4f}U")
+                else:
+                    try:
+                        target = max(0.0, float((os.environ.get('DEFAULT_ORDER_USDT') or '1.0').strip()))
+                    except Exception:
+                        target = 1.0
 
-            # 应用调整因子
-            target = self._apply_adjustment_factors(target, symbol)
-
-            # 应用金额限制
-            target = self._apply_amount_limits(target)
-
-            # 保证金充足性检查
-            target = self._validate_margin_sufficiency(target, balance, symbol)
-            if target <= 0:
-                return 0.0
-
-            # 简化资金分配日志
-                logger.info(f"💵 {symbol}: 余额={balance:.2f}U → 目标={target:.2f}U")
-            return target
-
-        except Exception as e:
-            logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
-            return 0.0
-
-    def _get_base_target_amount(self, balance: float, active_count: Optional[int], symbol: str) -> float:
-        """获取基础目标金额"""
-        # 1) 固定目标名义金额（最高优先）
-        target_str = os.environ.get('TARGET_NOTIONAL_USDT', '').strip()
-        if target_str:
+            # 3) 放大因子
             try:
-                target = max(0.0, float(target_str))
-                logger.info(f"💵 使用固定目标名义金额: {target:.4f}U")
-                return target
+                factor = max(1.0, float((os.environ.get('ORDER_NOTIONAL_FACTOR') or '1').strip()))
             except Exception:
-                logger.warning(f"⚠️ TARGET_NOTIONAL_USDT 无效: {target_str}")
-
-        # 2) 保证金驱动分配
-        if isinstance(active_count, int) and active_count > 0:
-            try:
-                lev = float(self.symbol_leverage.get(symbol, 20) or 20)
-                mbf = float(os.environ.get('MARGIN_BUDGET_FACTOR', '1.0').strip())
-                margin_budget = (balance / float(active_count)) * mbf
-                target = max(0.0, margin_budget * max(1.0, lev))
-                logger.info(f"💵 保证金分配: 余额={balance:.4f}U, 活跃={active_count}, 名义≈{target:.4f}U")
-                return target
-            except Exception:
-                pass
-
-        # 3) 默认金额
-        try:
-            return max(0.0, float(os.environ.get('DEFAULT_ORDER_USDT', '1.0').strip()))
-        except Exception:
-            return 1.0
-
-    def _apply_adjustment_factors(self, target: float, symbol: str) -> float:
-        """应用调整因子"""
-        try:
-            # 放大因子
-            factor = max(1.0, float(os.environ.get('ORDER_NOTIONAL_FACTOR', '1').strip()))
-            
+                factor = 1.0
             # 在线学习风险乘数
-            adj = self.get_learning_adjustments(symbol)
-            risk_mul = float(adj.get('risk_multiplier', 1.0) or 1.0)
-            
-            return target * factor * risk_mul
-        except Exception:
-            return target
+            try:
+                adj = self.get_learning_adjustments(symbol)
+                risk_mul = float(adj.get('risk_multiplier', 1.0) or 1.0)
+            except Exception:
+                risk_mul = 1.0
+            target *= factor * risk_mul
 
-    def _apply_amount_limits(self, target: float) -> float:
-        """应用金额限制"""
-        try:
-            min_floor = max(0.0, float(os.environ.get('MIN_PER_SYMBOL_USDT', '1.0').strip()))
-            max_cap = max(0.0, float(os.environ.get('MAX_PER_SYMBOL_USDT', '0.0').strip()))
+            # 4) 下限/上限
+            def _to_float(env_name: str, default: float) -> float:
+                try:
+                    s = os.environ.get(env_name, '').strip()
+                    return float(s) if s else default
+                except Exception:
+                    return default
+
+            min_floor = max(0.0, _to_float('MIN_PER_SYMBOL_USDT', 1.0))
+            max_cap = max(0.0, _to_float('MAX_PER_SYMBOL_USDT', 0.0))
 
             if min_floor > 0 and target < min_floor:
                 target = min_floor
             if max_cap > 0 and target > max_cap:
                 target = max_cap
 
-            return target
-        except Exception:
+            if target <= 0:
+                logger.warning(f"⚠️ {symbol} 目标金额为0，跳过")
+                return 0.0
+
+            # 5) 保证金充足性检查（不足则跳过，避免 51008/下单失败）
+            try:
+                lev = float(self.symbol_leverage.get(symbol, 20) or 20)
+                required_margin = target / max(1.0, lev)
+                # 使用占比上限对齐（默认最多使用 95% 的可用余额作为本笔保证金上限）
+                try:
+                    cap_ratio = float((os.environ.get('MARGIN_ALLOC_MAX') or '0.95').strip())
+                except Exception:
+                    cap_ratio = 0.95
+                cap = max(0.0, balance * cap_ratio)
+                if required_margin > cap > 0:
+                    scale = cap / required_margin
+                    target = target * scale
+                    required_margin = required_margin * scale
+                    logger.info(f"🔧 保证金对齐: cap={cap:.4f}U scale={scale:.3f} 目标名义→{target:.4f}U")
+                if target <= 0 or required_margin <= 0:
+                    logger.warning(f"⚠️ 名义或保证金无效，跳过 {symbol}")
+                    return 0.0
+            except Exception:
+                # 若估算失败，出于稳健可继续按当前 target 尝试（不强跳过）
+                logger.warning(f"⚠️ 保证金估算异常，继续尝试 {symbol}")
+
+            # 并发控制：保证金分配模式已按active_count分摊，不再二次均分
+            logger.info(f"💵 单币分配: 余额={balance:.4f}U, 因子={factor:.2f}, 本币目标={target:.4f}U")
             return target
 
-    def _validate_margin_sufficiency(self, target: float, balance: float, symbol: str) -> float:
-        """验证保证金充足性"""
-        try:
-            lev = float(self.symbol_leverage.get(symbol, 20) or 20)
-            required_margin = target / max(1.0, lev)
-            
-            # 保证金占比上限
-            cap_ratio = float(os.environ.get('MARGIN_ALLOC_MAX', '0.95').strip())
-            cap = max(0.0, balance * cap_ratio)
-            
-            if required_margin > cap > 0:
-                scale = cap / required_margin
-                target = target * scale
-                logger.info(f"🔧 保证金对齐: cap={cap:.4f}U scale={scale:.3f} 目标名义→{target:.4f}U")
-            
-            return target if target > 0 else 0.0
-        except Exception:
-            logger.warning(f"⚠️ 保证金估算异常，继续尝试 {symbol}")
-            return target
+        except Exception as e:
+            logger.error(f"❌ 计算{symbol}下单金额失败: {e}")
+            return 0.0
     
     def create_order(self, symbol: str, side: str, amount: float) -> bool:
         """创建订单"""
@@ -1813,10 +1750,9 @@ class MACDStrategy:
                     left = cd - (time.time() - last_ts)
                     logger.info(f"⏳ 冷却中，跳过下单 {symbol}，剩余 {left:.1f}s")
                     return False
-            except (KeyError, ValueError, TypeError) as e:
-                logger.warning(f"⚠️ 冷却检查数据异常 {symbol}: {e}")
             except Exception as e:
-                logger.error(f"❌ 冷却检查异常 {symbol}: {e}")
+                logger.warning(f"⚠️ 冷却检查异常 {symbol}: {e}")
+                pass
 
             # 检查未成交订单
             try:
@@ -1860,9 +1796,7 @@ class MACDStrategy:
                     logger.error(f"❌ 无法获取{symbol}有效价格，跳过下单")
                     return False
                     
-                # 减少价格获取成功的日志输出
-                if os.environ.get('DEBUG_MODE', '').lower() == 'true':
-                    logger.info(f"📊 获取价格成功 {symbol}: ${current_price:.6f}")
+                logger.info(f"📊 获取价格成功 {symbol}: ${current_price:.6f}")
             except Exception as e:
                 logger.error(f"❌ 获取{symbol}最新价失败({inst_id}): {e}")
                 return False
@@ -4191,13 +4125,6 @@ class MACDStrategy:
         while True:
             try:
                 start_ts = time.time()
-
-                # 检查最大回撤保护
-                if self.is_max_drawdown_exceeded():
-                    logger.warning(f"🛑 触发最大回撤保护！当前回撤: {self.stats['current_drawdown']:.2%}, 暂停交易")
-                    logger.info("⏳ 等待60秒后重新检查...")
-                    time.sleep(60)
-                    continue
 
                 self.check_sync_needed()
 
