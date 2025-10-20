@@ -343,19 +343,19 @@ class MACDStrategy:
             'meme': ['DOGE/USDT:USDT', 'WIF/USDT:USDT', 'PEPE/USDT:USDT']
         }
         
-        # === 优化后的MACD参数 ===
+        # === 统一的 MACD 参数（全币种 6/16/9） ===
         self.macd_params = {
-            'BTC/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
-            'ETH/USDT:USDT': {'fast': 8, 'slow': 17, 'signal': 9},
+            'BTC/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'ETH/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'XRP/USDT:USDT': {'fast': 7, 'slow': 17, 'signal': 9},
-            'ARB/USDT:USDT': {'fast': 6, 'slow': 15, 'signal': 9},
+            'XRP/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'ARB/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'WLD/USDT:USDT': {'fast': 5, 'slow': 13, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 5, 'slow': 12, 'signal': 8},
+            'WLD/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 4, 'slow': 11, 'signal': 8}
+            'PEPE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9}
         }
         
         # === 优化后的RSI参数 ===
