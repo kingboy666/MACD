@@ -469,20 +469,20 @@ class MACDStrategy:
         # ===== 杠杆配置 - 根据币种风险分级 =====
         self.symbol_leverage: Dict[str, int] = {
             # 原有小币种
-            'FIL/USDT:USDT': 25,   # 降低(原30)
-            'WIF/USDT:USDT': 20,   # 降低(原25)
-            'WLD/USDT:USDT': 25,   # 降低(原30)
+            'FIL/USDT:USDT': 50,   # 降低(原30)
+            'WIF/USDT:USDT': 50,   # 降低(原25)
+            'WLD/USDT:USDT': 50,   # 降低(原30)
             'ZRO/USDT:USDT': 20,
             # 主流币 - 较高杠杆
-            'BTC/USDT:USDT': 30,
-            'ETH/USDT:USDT': 30,
-            'SOL/USDT:USDT': 25,
-            'XRP/USDT:USDT': 25,
+            'BTC/USDT:USDT': 100,
+            'ETH/USDT:USDT': 100,
+            'SOL/USDT:USDT': 50,
+            'XRP/USDT:USDT': 50,
             # Meme币 - 低杠杆
-            'DOGE/USDT:USDT': 20,
-            'PEPE/USDT:USDT': 15,
+            'DOGE/USDT:USDT': 50,
+            'PEPE/USDT:USDT': 50,
             # L2币
-            'ARB/USDT:USDT': 25,
+            'ARB/USDT:USDT': 50,
         }
         
         # ===== 分币种参数 - 精细调优 =====
