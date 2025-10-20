@@ -1911,7 +1911,12 @@ class MACDStrategy:
                 logger.error(f"❌ 获取{symbol}最新价失败({inst_id}): {e}")
                 return False
 
-            contract_size = amount / current_price
+            # 将 amount 视为“保证金预算(USDT)”，按杠杆计算名义与数量
+            try:
+                lev_calc = float(self.get_symbol_leverage(symbol))
+            except Exception:
+                lev_calc = float(getattr(self, 'leverage', 1.0) or 1.0)
+            contract_size = (amount * max(1.0, lev_calc)) / current_price
 
             if contract_size < min_amount:
                 contract_size = min_amount
@@ -1992,10 +1997,10 @@ class MACDStrategy:
             except Exception:
                 pass
 
-            logger.info(f"📝 准备下单: {symbol} {side} 金额:{amount:.4f}U 价格:{current_price:.4f} 数量:{contract_size:.8f}")
+            logger.info(f"📝 准备下单: {symbol} {side} 保证金预算:{amount:.4f}U 价格:{current_price:.4f} 数量:{contract_size:.8f}")
             try:
-                est_cost = contract_size * current_price
-                logger.info(f"🧮 下单成本对齐: 分配金额={amount:.4f}U | 预计成本={est_cost:.4f}U | 数量={contract_size:.8f} | minSz={min_amount} | lotSz={lot_sz}")
+                est_notional = contract_size * current_price
+                logger.info(f"🧮 下单成本对齐: 预计名义={est_notional:.4f}U | 数量={contract_size:.8f} | minSz={min_amount} | lotSz={lot_sz}")
             except Exception:
                 pass
 
