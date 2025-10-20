@@ -25,6 +25,7 @@ import math
 import traceback
 import random
 import re
+import requests
 # 绘图支持（按需懒加载，避免环境缺库报错）
 
 # 配置日志 - 使用中国时区和UTF-8编码
