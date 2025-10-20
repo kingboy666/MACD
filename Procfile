@@ -1,1 +1,1 @@
-worker: sh -c 'printf "ok\n" >/1.txt 2>/dev/null || true; python main.py'
+worker: python -u main.py
