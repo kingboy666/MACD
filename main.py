@@ -595,6 +595,17 @@ class MACDStrategy:
             'XRP/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ARB/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'WLD/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'PEPE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+        }
+            'ETH/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'XRP/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'ARB/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
+            'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WLD/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
@@ -1442,6 +1453,10 @@ class MACDStrategy:
     def get_account_balance(self) -> float:
         """获取账户余额"""
         try:
+            # 防御：交易所未初始化时避免崩溃
+            if not hasattr(self, 'exchange') or self.exchange is None:
+                logger.error("❌ 交易所未初始化，暂无法获取余额")
+                return 0.0
             resp = self.exchange.privateGetAccountBalance({})
             data = resp.get('data') if isinstance(resp, dict) else resp
             avail = 0.0
@@ -4423,7 +4438,7 @@ class MACDStrategy:
         logger.info("=" * 70)
         logger.info("🚀 MACD+RSI策略启动 - RAILWAY平台版 (11个币种)")
         logger.info("=" * 70)
-        logger.info(f"📈 MACD参数: 快线={self.fast_period}, 慢线={self.slow_period}, 信号线={self.signal_period}")
+        logger.info("📈 MACD参数：采用每币种配置（macd_params），已取消全局三元参数")
         logger.info(f"📊 全局默认周期: {self.timeframe}")
         tf_desc = ', '.join([f"{s.split('/')[0]}={self.timeframe_map.get(s, self.timeframe)}" for s in self.symbols])
         logger.info(f"🗺️ 分币种周期: {tf_desc}")
