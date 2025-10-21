@@ -749,6 +749,25 @@ class MACDStrategy:
             # L2币
             'ARB/USDT:USDT': 50,
         }
+
+        # 预设交易所侧杠杆（hedge 双侧 long/short），确保按映射生效
+        try:
+            pos_mode_init = self.get_position_mode()
+            for sym, lev in self.symbol_leverage.items():
+                try:
+                    inst_id_lev = self.symbol_to_inst_id(sym)
+                    if pos_mode_init == 'hedge':
+                        # 分别设置 long/short
+                        self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev)), 'posSide': 'long'})
+                        self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev)), 'posSide': 'short'})
+                    else:
+                        # 非hedge模式设置单侧
+                        self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev))})
+                    logger.info(f"✅ 已预设交易所杠杆 {sym}: {lev}×")
+                except Exception as e_set_each:
+                    logger.warning(f"⚠️ 预设杠杆失败 {sym}: {e_set_each}")
+        except Exception as e_set_all:
+            logger.warning(f"⚠️ 预设杠杆批量设置异常: {e_set_all}")
         
         # ===== 分币种参数 - 精细调优 =====
         # 分组精细化策略参数（运行时与 per_symbol_params 合并覆盖）
@@ -2346,6 +2365,18 @@ class MACDStrategy:
                         params = {'type': 'market', 'reduceOnly': False, 'posSide': pos_side}
                     else:
                         params = {'type': 'market', 'reduceOnly': False}
+
+                    # 下单前确保交易所侧杠杆设置（hedge 双侧）
+                    try:
+                        inst_id_lev = self.symbol_to_inst_id(symbol)
+                        lev_cfg = float(self.symbol_leverage.get(symbol, 50))
+                        if pos_mode == 'hedge':
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev_cfg)), 'posSide': 'long'})
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev_cfg)), 'posSide': 'short'})
+                        else:
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev, 'mgnMode': 'cross', 'lever': str(int(lev_cfg))})
+                    except Exception as e_lev_ccxt:
+                        logger.warning(f"⚠️ 杠杆设置失败(预下单 CCXT) {symbol}: {e_lev_ccxt}")
                     
                     # 提交前强制对齐与上限裁剪
                     try:
@@ -2402,6 +2433,19 @@ class MACDStrategy:
                         use_pos_side = False
                     
                     side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
+
+                    # 下单前确保交易所侧杠杆设置（hedge 双侧）
+                    try:
+                        inst_id_lev2 = self.symbol_to_inst_id(symbol)
+                        lev_cfg2 = float(self.symbol_leverage.get(symbol, 50))
+                        if pos_mode == 'hedge':
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev2, 'mgnMode': 'cross', 'lever': str(int(lev_cfg2)), 'posSide': 'long'})
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev2, 'mgnMode': 'cross', 'lever': str(int(lev_cfg2)), 'posSide': 'short'})
+                        else:
+                            self.exchange.privatePostAccountSetLeverage({'instId': inst_id_lev2, 'mgnMode': 'cross', 'lever': str(int(lev_cfg2))})
+                    except Exception as e_lev_okx:
+                        logger.warning(f"⚠️ 杠杆设置失败(预下单 原生) {symbol}: {e_lev_okx}")
+
                     # 提交前强制对齐与上限裁剪
                     # 刷新价格保护
                     try:
@@ -2458,8 +2502,43 @@ class MACDStrategy:
                 except Exception as e:
                     last_err = e
                     msg0 = str(e)
+                    # 优先处理 51004（最大持仓上限），再处理 51008
+                    if '51004' in msg0:
+                        try:
+                            import re
+                            m = re.search(r"more than\s*([0-9,]+)\(contracts\)", msg0) or re.search(r"can’t be more than\s*([0-9,]+)\(contracts\)", msg0)
+                            if m:
+                                max_ct = float(m.group(1).replace(',', ''))
+                                qty_try = max_ct
+                                # 按步进/最小对齐
+                                try:
+                                    if lot_sz and lot_sz > 0:
+                                        qty_try = float(int(qty_try / lot_sz) * lot_sz)
+                                except Exception:
+                                    pass
+                                if min_amount and qty_try < min_amount:
+                                    logger.warning(f"⚠️ 51004上限裁剪后低于最小单位，中止 {symbol}")
+                                else:
+                                    params_okx['sz'] = str(qty_try)
+                                    try:
+                                        resp2 = self.exchange.privatePostTradeOrder(params_okx)
+                                        data2 = resp2.get('data') if isinstance(resp2, dict) else resp2
+                                        if data2 and isinstance(data2, list) and data2[0]:
+                                            ord_id_try = data2[0].get('ordId')
+                                            if ord_id_try:
+                                                order_id = ord_id_try
+                                                contract_size = qty_try
+                                                logger.info(f"✅ 51004裁剪成功: 数量→{qty_try:.8f}")
+                                                # 成功后直接结束异常处理
+                                                raise StopIteration
+                                    except Exception as e51004_try:
+                                        logger.warning(f"⚠️ 51004裁剪重试失败 {symbol}: {e51004_try}")
+                        except StopIteration:
+                            pass
+                        except Exception as e51004:
+                            logger.warning(f"⚠️ 51004解析失败 {symbol}: {e51004}")
                     # 若为51008保证金不足，则执行阶梯降尺重试
-                    if '51008' in msg0 or 'Insufficient USDT margin' in msg0:
+                    elif '51008' in msg0 or 'Insufficient USDT margin' in msg0:
                         try:
                             logger.warning(f"⚠️ 51008保证金不足，开始阶梯降尺重试 {symbol}")
                             steps = [0.95, 0.90, 0.85, 0.80, 0.75]
