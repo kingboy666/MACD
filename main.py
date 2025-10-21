@@ -552,9 +552,9 @@ class MACDStrategy:
             'BTC/USDT:USDT',    # 比特币
             'ETH/USDT:USDT',    # 以太坊
             'SOL/USDT:USDT',    # Solana
-            'DOGE/USDT:USDT',   # 狗狗币
+
             'XRP/USDT:USDT',    # 瑞波币
-            'PEPE/USDT:USDT',   # 佩佩蛙
+
             'ARB/USDT:USDT'     # Arbitrum
         ]
         
@@ -572,9 +572,9 @@ class MACDStrategy:
             'WIF/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '15m',
             'ARB/USDT:USDT': '15m',
-            'PEPE/USDT:USDT': '15m',
+
             # 10m：中等波动
-            'DOGE/USDT:USDT': '15m',
+
             'XRP/USDT:USDT': '15m',
         }
         
@@ -584,7 +584,7 @@ class MACDStrategy:
             'mainnet': ['SOL/USDT:USDT', 'XRP/USDT:USDT', 'ARB/USDT:USDT'],
             'infrastructure': ['FIL/USDT:USDT'],
             'emerging': ['ZRO/USDT:USDT', 'WLD/USDT:USDT'],
-            'meme': ['DOGE/USDT:USDT', 'WIF/USDT:USDT', 'PEPE/USDT:USDT']
+            'meme': ['WIF/USDT:USDT']
         }
         
         # === 统一的 MACD 参数（全币种 6/16/9） ===
@@ -598,8 +598,8 @@ class MACDStrategy:
             'WLD/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9}
+
+
         }
         
         # === 优化后的RSI参数 ===
@@ -612,9 +612,9 @@ class MACDStrategy:
             'FIL/USDT:USDT': 9,
             'ZRO/USDT:USDT': 14,
             'WLD/USDT:USDT': 9,
-            'DOGE/USDT:USDT': 7,
+
             'WIF/USDT:USDT': 7,
-            'PEPE/USDT:USDT': 6
+
         }
         
         # === 动态超买超卖阈值 ===
@@ -627,9 +627,8 @@ class MACDStrategy:
             'FIL/USDT:USDT': {'overbought': 73, 'oversold': 27},
             'ZRO/USDT:USDT': {'overbought': 75, 'oversold': 25},
             'WLD/USDT:USDT': {'overbought': 75, 'oversold': 25},
-            'DOGE/USDT:USDT': {'overbought': 78, 'oversold': 22},
+
             'WIF/USDT:USDT': {'overbought': 78, 'oversold': 22},
-            'PEPE/USDT:USDT': {'overbought': 80, 'oversold': 20}
         }
         
         # === 每币种严格策略模式（来自 rsi.txt） ===
@@ -643,9 +642,9 @@ class MACDStrategy:
             'BTC/USDT:USDT': 'combo',
             'ETH/USDT:USDT': 'combo',
             'SOL/USDT:USDT': 'combo',
-            'DOGE/USDT:USDT': 'combo',
+
             'XRP/USDT:USDT': 'combo',
-            'PEPE/USDT:USDT': 'combo',
+
             'ARB/USDT:USDT': 'combo',
         }
         
@@ -659,9 +658,8 @@ class MACDStrategy:
             'FIL/USDT:USDT': 2.8,
             'ZRO/USDT:USDT': 3.0,
             'WLD/USDT:USDT': 3.5,
-            'DOGE/USDT:USDT': 3.5,
+
             'WIF/USDT:USDT': 4.0,
-            'PEPE/USDT:USDT': 4.5
         }
         
         self.take_profit = {
@@ -673,9 +671,8 @@ class MACDStrategy:
             'FIL/USDT:USDT': [1.5, 3.5, 5.5],
             'ZRO/USDT:USDT': [2.0, 4.0, 6.5],
             'WLD/USDT:USDT': [2.0, 4.5, 7.0],
-            'DOGE/USDT:USDT': [2.5, 5.0, 8.0],
+
             'WIF/USDT:USDT': [2.5, 5.5, 9.0],
-            'PEPE/USDT:USDT': [3.0, 6.0, 10.0]
         }
         
         # === 仓位权重（根据币种稳定性）===
@@ -688,9 +685,8 @@ class MACDStrategy:
             'FIL/USDT:USDT': 0.9,
             'ZRO/USDT:USDT': 0.8,
             'WLD/USDT:USDT': 0.7,
-            'DOGE/USDT:USDT': 0.6,  # MEME币减仓
+
             'WIF/USDT:USDT': 0.5,
-            'PEPE/USDT:USDT': 0.4
         }
         
         self.positions = {}
@@ -744,8 +740,8 @@ class MACDStrategy:
             'SOL/USDT:USDT': 50,
             'XRP/USDT:USDT': 50,
             # Meme币 - 低杠杆
-            'DOGE/USDT:USDT': 50,
-            'PEPE/USDT:USDT': 50,
+
+
             # L2币
             'ARB/USDT:USDT': 50,
         }
@@ -776,8 +772,8 @@ class MACDStrategy:
             'ETH/USDT:USDT': {'strategy': 'macd_sar', 'bb_period': 20, 'bb_k': 2.0, 'sar_af_start': 0.02, 'sar_af_max': 0.20},
             'SOL/USDT:USDT': {'strategy': 'macd_sar', 'bb_period': 20, 'bb_k': 2.0, 'sar_af_start': 0.02, 'sar_af_max': 0.20},
             'WIF/USDT:USDT': {'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
-            'PEPE/USDT:USDT':{'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
-            'DOGE/USDT:USDT':{'strategy': 'bb_sar',  'bb_period': 20, 'bb_k': 2.5, 'sar_af_start': 0.01, 'sar_af_max': 0.10},
+
+
             'ZRO/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
             'WLD/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
             'FIL/USDT:USDT': {'strategy': 'hybrid',  'bb_period': 20, 'bb_k': 2.2, 'sar_af_start': 0.03, 'sar_af_max': 0.25},
@@ -822,14 +818,8 @@ class MACDStrategy:
             },
             
             # 新增Meme币
-            'DOGE/USDT:USDT': {
-                'macd': (5, 13, 9), 'atr_period': 18, 'adx_period': 12,
-                'adx_min_trend': 24, 'sl_n': 2.7, 'tp_m': 5.5, 'allow_reverse': True
-            },
-            'PEPE/USDT:USDT': {
-                'macd': (5, 13, 9), 'atr_period': 18, 'adx_period': 10,
-                'adx_min_trend': 24, 'sl_n': 3.2, 'tp_m': 6.5, 'allow_reverse': True
-            },
+
+
             
             # 新增L2币
             'ARB/USDT:USDT': {
@@ -879,8 +869,8 @@ class MACDStrategy:
             'SOL/USDT:USDT': 'macd_sar',
             # 高波动：bb_sar
             'WIF/USDT:USDT': 'bb_sar',
-            'PEPE/USDT:USDT': 'bb_sar',
-            'DOGE/USDT:USDT': 'bb_sar',
+
+
             # 中波动：hybrid
             'ZRO/USDT:USDT': 'hybrid',
             'WLD/USDT:USDT': 'hybrid',
@@ -961,8 +951,8 @@ class MACDStrategy:
             "XRP/USDT:USDT": {"period": 16, "n": 1.8, "m": 3.5, "trigger_pct": 0.010, "trail_pct": 0.006, "update_basis": "close"},
             
             # 新增Meme币
-            "DOGE/USDT:USDT": {"period": 16, "n": 2.5, "m": 5.0, "trigger_pct": 0.017, "trail_pct": 0.008, "update_basis": "high"},
-            "PEPE/USDT:USDT": {"period": 14, "n": 3.0, "m": 6.0, "trigger_pct": 0.022, "trail_pct": 0.010, "update_basis": "high"},
+
+
             
             # 新增L2币
             "ARB/USDT:USDT": {"period": 15, "n": 2.2, "m": 3.8, "trigger_pct": 0.014, "trail_pct": 0.006, "update_basis": "high"}
