@@ -2327,9 +2327,41 @@ class MACDStrategy:
                     else:
                         params = {'type': 'market', 'reduceOnly': False}
                     
-                    order = self.exchange.create_order(symbol, 'market', side_ccxt, contract_size, params=params)
-                    order_id = order.get('id')
-                    logger.info(f"✅ CCXT下单成功 {symbol}: mode={pos_mode}")
+                    # 提交前强制对齐与上限裁剪
+                    try:
+                        # 刷新价格保护
+                        inst_id_chk = self.symbol_to_inst_id(symbol)
+                        tkr_chk = self.exchange.publicGetMarketTicker({'instId': inst_id_chk})
+                        d_chk = tkr_chk.get('data') if isinstance(tkr_chk, dict) else tkr_chk
+                        if d_chk and isinstance(d_chk, list) and d_chk[0]:
+                            px_chk = float(d_chk[0].get('last', 0) or 0) or float(d_chk[0].get('lastPx', 0) or 0)
+                            if px_chk and px_chk > 0:
+                                current_price = px_chk
+                        # 对齐步进/最小
+                        if lot_sz and lot_sz > 0:
+                            contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                        if min_amount and contract_size < min_amount:
+                            raise ValueError(f"数量低于最小单位 {min_amount}")
+                        # 市价上限裁剪（如可用）
+                        max_mkt_sz = float(spec.get('maxMktSz', 0) or 0) if isinstance(spec, dict) else 0.0
+                        max_mkt_amt = float(spec.get('maxMktAmt', 0) or 0) if isinstance(spec, dict) else 0.0
+                        if max_mkt_sz > 0 and contract_size > max_mkt_sz:
+                            contract_size = max_mkt_sz
+                            if lot_sz and lot_sz > 0:
+                                contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                        if max_mkt_amt > 0 and current_price > 0:
+                            qty_cap = max_mkt_amt / current_price
+                            if contract_size > qty_cap:
+                                contract_size = qty_cap
+                                if lot_sz and lot_sz > 0:
+                                    contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                        # 重新提交
+                        order = self.exchange.create_order(symbol, 'market', side_ccxt, contract_size, params=params)
+                        order_id = order.get('id')
+                        logger.info(f"✅ CCXT下单成功 {symbol}: mode={pos_mode}")
+                    except Exception as e_adj:
+                        last_err = e_adj
+                        logger.warning(f"⚠️ CCXT提交前对齐/上限裁剪失败 {symbol}: {e_adj}")
                 except Exception as e:
                     last_err = e
                     logger.warning(f"⚠️ CCXT下单失败: {str(e)} - 尝试OKX原生API")
@@ -2350,6 +2382,42 @@ class MACDStrategy:
                         use_pos_side = False
                     
                     side_ccxt = ('buy' if str(side).lower() in ('buy','long') else 'sell')
+                    # 提交前强制对齐与上限裁剪
+                    # 刷新价格保护
+                    try:
+                        tkr_chk = self.exchange.publicGetMarketTicker({'instId': inst_id})
+                        d_chk = tkr_chk.get('data') if isinstance(tkr_chk, dict) else tkr_chk
+                        if d_chk and isinstance(d_chk, list) and d_chk[0]:
+                            px_chk = float(d_chk[0].get('last', 0) or 0) or float(d_chk[0].get('lastPx', 0) or 0)
+                            if px_chk and px_chk > 0:
+                                current_price = px_chk
+                    except Exception:
+                        pass
+                    # 对齐步进/最小
+                    try:
+                        if lot_sz and lot_sz > 0:
+                            contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                    except Exception:
+                        pass
+                    if min_amount and contract_size < min_amount:
+                        raise ValueError(f"数量低于最小单位 {min_amount}")
+                    # 市价上限裁剪（如可用）
+                    try:
+                        max_mkt_sz = float(spec.get('maxMktSz', 0) or 0) if isinstance(spec, dict) else 0.0
+                        max_mkt_amt = float(spec.get('maxMktAmt', 0) or 0) if isinstance(spec, dict) else 0.0
+                    except Exception:
+                        max_mkt_sz = 0.0; max_mkt_amt = 0.0
+                    if max_mkt_sz > 0 and contract_size > max_mkt_sz:
+                        contract_size = max_mkt_sz
+                        if lot_sz and lot_sz > 0:
+                            contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                    if max_mkt_amt > 0 and current_price > 0:
+                        qty_cap = max_mkt_amt / current_price
+                        if contract_size > qty_cap:
+                            contract_size = qty_cap
+                            if lot_sz and lot_sz > 0:
+                                contract_size = float(int(contract_size / lot_sz) * lot_sz)
+                    
                     params_okx = {
                         'instId': inst_id,
                         'tdMode': td_mode,
@@ -2357,7 +2425,6 @@ class MACDStrategy:
                         'sz': str(contract_size),
                         'ordType': 'market'
                     }
-                    
                     # 只在hedge模式下添加posSide参数
                     if use_pos_side and pos_side_okx:
                         params_okx['posSide'] = pos_side_okx
@@ -2378,14 +2445,32 @@ class MACDStrategy:
                             steps = [0.95, 0.90, 0.85, 0.80, 0.75]
                             for stp in steps:
                                 qty_try = contract_size * stp
-                                # 对齐步进/最小
+                                # 对齐步进/最小 + 市价上限裁剪
                                 try:
                                     if lot_sz and lot_sz > 0:
                                         qty_try = float(int(qty_try / lot_sz) * lot_sz)
                                 except Exception:
                                     pass
-                                if qty_try <= 0 or (min_amount > 0 and qty_try < min_amount):
+                                if min_amount and qty_try < min_amount:
                                     logger.warning(f"⚠️ 重试数量低于最小单位，中止 {symbol}")
+                                    break
+                                try:
+                                    max_mkt_sz = float(spec.get('maxMktSz', 0) or 0) if isinstance(spec, dict) else 0.0
+                                    max_mkt_amt = float(spec.get('maxMktAmt', 0) or 0) if isinstance(spec, dict) else 0.0
+                                except Exception:
+                                    max_mkt_sz = 0.0; max_mkt_amt = 0.0
+                                if max_mkt_sz > 0 and qty_try > max_mkt_sz:
+                                    qty_try = max_mkt_sz
+                                    if lot_sz and lot_sz > 0:
+                                        qty_try = float(int(qty_try / lot_sz) * lot_sz)
+                                if max_mkt_amt > 0 and current_price > 0:
+                                    qty_cap = max_mkt_amt / current_price
+                                    if qty_try > qty_cap:
+                                        qty_try = qty_cap
+                                        if lot_sz and lot_sz > 0:
+                                            qty_try = float(int(qty_try / lot_sz) * lot_sz)
+                                if qty_try <= 0:
+                                    logger.warning(f"⚠️ 重试裁剪后数量无效，中止 {symbol}")
                                     break
                                 # 预检可用额度
                                 try:
