@@ -517,6 +517,17 @@ class MACDStrategy:
         except Exception:
             self._equity_peak = 0.0
 
+        # 下单节流与只平不开
+        self.order_last_ts: Dict[str, float] = {}
+        try:
+            self.order_cooldown_sec = int((os.environ.get('ORDER_COOLDOWN_SEC') or '300').strip())
+        except Exception:
+            self.order_cooldown_sec = 300
+        try:
+            self.close_only = str(os.environ.get('CLOSE_ONLY', '0')).strip().lower() in ('1','true','yes')
+        except Exception:
+            self.close_only = False
+
         # 交易所配置
         self.exchange = ccxt.okx({
             'apiKey': api_key,
@@ -2075,6 +2086,50 @@ class MACDStrategy:
             if not symbol or not side or amount <= 0:
                 logger.error(f"❌ 无效参数: symbol={symbol}, side={side}, amount={amount}")
                 return False
+
+            # 只平不开守卫
+            if getattr(self, 'close_only', False):
+                logger.warning(f"⛔ Close-only 模式，禁止新开仓 {symbol}({side})")
+                return False
+
+            # 仅在K线收盘时允许开仓（避免同根K线内反复开单）
+            try:
+                # 获取该币种周期（默认 self.timeframe 或映射）
+                tf = str(self.timeframe_map.get(symbol, getattr(self, 'timeframe', '15m')))
+                tf_sec_map = {
+                    '1m': 60, '3m': 180, '5m': 300, '15m': 900, '30m': 1800,
+                    '1H': 3600, '2H': 7200, '4H': 14400, '6H': 21600, '12H': 43200,
+                    '1D': 86400
+                }
+                tf_sec = int(tf_sec_map.get(tf, 900))
+                df_last = self.get_klines(symbol, 2)
+                last_ts = None
+                if isinstance(df_last, pd.DataFrame) and not df_last.empty:
+                    # 兼容不同列名：ts/timestamp/index
+                    for col in ('ts', 'timestamp', 'time'):
+                        if col in df_last.columns:
+                            try:
+                                last_ts = float(df_last[col].values[-1])
+                                break
+                            except Exception:
+                                pass
+                    if last_ts is None:
+                        try:
+                            # 如果index是时间戳或可转换
+                            idx_val = df_last.index.values[-1]
+                            last_ts = float(idx_val) if isinstance(idx_val, (int, float)) else None
+                        except Exception:
+                            last_ts = None
+                if last_ts:
+                    now_ts = time.time()
+                    # 允许少量容差（3秒），未到收盘则跳过
+                    if now_ts < (last_ts + tf_sec - 3):
+                        left = (last_ts + tf_sec - now_ts)
+                        logger.info(f"⏳ 当前K线未收盘，观望 {symbol}，剩余 {left:.1f}s")
+                        return False
+            except Exception as e_close:
+                # 守卫异常不阻断交易，仅记录
+                logger.debug(f"🔎 收盘守卫异常 {symbol}: {e_close}")
             
             # 下单冷却守卫（按币种）
             try:
