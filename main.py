@@ -2316,6 +2316,26 @@ class MACDStrategy:
 
             native_only = (os.environ.get('USE_OKX_NATIVE_ONLY', '').strip().lower() in ('1', 'true', 'yes'))
 
+            # 统一获取市场规格（供CCXT/原生/51008重试使用）
+            spec = {}
+            try:
+                inst_id_spec = self.symbol_to_inst_id(symbol)
+                resp_spec = self.exchange.publicGetPublicInstruments({'instType': 'SWAP', 'instId': inst_id_spec})
+                spec_data = resp_spec.get('data') if isinstance(resp_spec, dict) else resp_spec
+                spec = spec_data[0] if (isinstance(spec_data, list) and spec_data) else {}
+            except Exception:
+                spec = {}
+
+            # 从规格尽量更新步进与最小单位（保留原有值作为兜底）
+            try:
+                lot_sz = float(spec.get('lotSz') or 0) or lot_sz
+            except Exception:
+                pass
+            try:
+                min_amount = float(spec.get('minSz') or 0) or min_amount
+            except Exception:
+                pass
+
             if not native_only:
                 # CCXT方式
                 try:
