@@ -2874,7 +2874,7 @@ class MACDStrategy:
                         has_algo = True
                         break
                 if has_algo:
-                    allow_update = (os.environ.get('ALLOW_OCO_UPDATE', 'false').strip().lower() in ('1','true','yes'))
+                    allow_update = (os.environ.get('ALLOW_OCO_UPDATE', 'true').strip().lower() in ('1','true','yes'))
                     # 冷却期：默认禁用更新，或在冷却窗口内不刷新
                     now_ts = time.time()
                     last_ts = float(self.tp_sl_last_placed.get(symbol, 0) or 0.0)
