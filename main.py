@@ -599,17 +599,6 @@ class MACDStrategy:
             'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'PEPE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-        }
-            'ETH/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'SOL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'XRP/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'ARB/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'FIL/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'ZRO/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'WLD/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'DOGE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
-            'WIF/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9},
             'PEPE/USDT:USDT': {'fast': 6, 'slow': 16, 'signal': 9}
         }
         
