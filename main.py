@@ -1814,6 +1814,17 @@ class MACDStrategy:
             ranging_min = int(70 + adj.get('range_threshold_delta', 0.0))
             trending_min = int(75 + adj.get('trend_threshold_delta', 0.0))
 
+            # MA硬过滤开关与慢线计算
+            use_ma_filter = str(os.environ.get('USE_MA_FILTER', '1')).strip().lower() in ('1', 'true', 'yes')
+            ma_slow = None
+            try:
+                ma_slow_period = int(os.environ.get('MA_SLOW', '20'))
+                if len(df) >= ma_slow_period:
+                    ma_slow = pd.Series(df['close']).rolling(ma_slow_period).mean().iloc[-1]
+            except Exception:
+                ma_slow = None
+            last_close = float(latest['close'] or 0)
+
             # 关键位缓存（每小时更新）
             now_ts = time.time()
             cache = self.key_levels_cache.get(symbol, {})
@@ -1845,8 +1856,12 @@ class MACDStrategy:
                 short_eval = self.score_ranging_short(latest['close'], levels['resistances'], latest['rsi'], rsi_th['overbought'])
                 # 达到≥70分开单
                 if long_eval['score'] >= ranging_min:
+                    if use_ma_filter and ma_slow and last_close < ma_slow:
+                        return {'signal': 'hold', 'reason': 'MA_FILTER:价格低于慢线，禁多'}
                     return {'signal': 'buy', 'reason': f"震荡市支撑反弹，总分{long_eval['score']}（支撑{long_eval['near_level']['price']:.4f} 测试{long_eval['near_level']['tests']}次）"}
                 if short_eval['score'] >= ranging_min:
+                    if use_ma_filter and ma_slow and last_close > ma_slow:
+                        return {'signal': 'hold', 'reason': 'MA_FILTER:价格高于慢线，禁空'}
                     return {'signal': 'sell', 'reason': f"震荡市压力回落，总分{short_eval['score']}（压力{short_eval['near_level']['price']:.4f} 测试{short_eval['near_level']['tests']}次）"}
                 return {'signal': 'hold', 'reason': '震荡市未达阈值'}
 
@@ -1856,9 +1871,13 @@ class MACDStrategy:
                 short_eval = self.score_trending_short(df, levels['supports'], ms['adx'])
                 if long_eval['score'] >= trending_min:
                     desc = f"趋势市金叉突破，总分{long_eval['score']}" + (f"（突破{long_eval['level']['price']:.4f}）" if long_eval['level'] else "")
+                    if use_ma_filter and ma_slow and last_close < ma_slow:
+                        return {'signal': 'hold', 'reason': 'MA_FILTER:价格低于慢线，禁多'}
                     return {'signal': 'buy', 'reason': desc}
                 if short_eval['score'] >= trending_min:
                     desc = f"趋势市死叉下破，总分{short_eval['score']}" + (f"（跌破{short_eval['level']['price']:.4f}）" if short_eval['level'] else "")
+                    if use_ma_filter and ma_slow and last_close > ma_slow:
+                        return {'signal': 'hold', 'reason': 'MA_FILTER:价格高于慢线，禁空'}
                     return {'signal': 'sell', 'reason': desc}
                 return {'signal': 'hold', 'reason': '趋势市未达阈值'}
 
@@ -1868,8 +1887,12 @@ class MACDStrategy:
             macd_gc = (prev['macd_diff'] <= prev['macd_dea'] and latest['macd_diff'] > latest['macd_dea'])
             macd_dc = (prev['macd_diff'] >= prev['macd_dea'] and latest['macd_diff'] < latest['macd_dea'])
             if macd_gc and latest['rsi'] < rsi_th['overbought']:
+                if use_ma_filter and ma_slow and last_close < ma_slow:
+                    return {'signal': 'hold', 'reason': 'MA_FILTER:价格低于慢线，禁多'}
                 return {'signal': 'buy', 'reason': '保守策略：金叉+RSI不过热（降低仓位）'}
             if macd_dc and latest['rsi'] > rsi_th['oversold']:
+                if use_ma_filter and ma_slow and last_close > ma_slow:
+                    return {'signal': 'hold', 'reason': 'MA_FILTER:价格高于慢线，禁空'}
                 return {'signal': 'sell', 'reason': '保守策略：死叉+RSI不过冷（降低仓位）'}
 
             return {'signal': 'hold', 'reason': '市场不明确/无信号'}
