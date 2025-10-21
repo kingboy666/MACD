@@ -190,6 +190,145 @@ class TradingStats:
                 f"总盈亏{self.stats['total_pnl']:.2f}U | "
                 f"盈利{self.stats['total_win_pnl']:.2f}U 亏损{self.stats['total_loss_pnl']:.2f}U")
 
+class SmartController:
+    """智能主控：不依赖预设指标，自动识别市况与方向，并给出预算建议"""
+    def __init__(self, strategy: 'MACDStrategy'):
+        self.strategy = strategy
+        try:
+            self.max_drawdown_pct = float(os.environ.get('MAX_DRAWDOWN_PCT', '0.15'))
+        except Exception:
+            self.max_drawdown_pct = 0.15
+
+    def _ensure_features(self, df: pd.DataFrame) -> pd.DataFrame:
+        try:
+            if isinstance(df, pd.DataFrame) and not df.empty:
+                if 'atr' not in df.columns:
+                    df = calculate_atr(df.copy(), 14)
+        except Exception:
+            pass
+        return df
+
+    def classify_market(self, df: pd.DataFrame) -> tuple:
+        """返回 (state, width)，state: trending_up|trending_down|ranging|unclear"""
+        if not isinstance(df, pd.DataFrame) or df.empty:
+            return 'unclear', 0.0
+        df = self._ensure_features(df)
+        closes = pd.Series(df['close'].values)
+        try:
+            ma = closes.rolling(20).mean()
+            slope = (float(ma.iloc[-1]) - float(ma.iloc[-5])) / 5.0
+        except Exception:
+            slope = 0.0
+        # 简化的布林开口近似（标准差相对比例）
+        try:
+            std = closes.rolling(20).std()
+            width = float(4.0 * float(std.iloc[-1]) / max(1e-9, float(closes.iloc[-1])))
+        except Exception:
+            width = 0.0
+        if slope > 0 and width > 0.02:
+            return 'trending_up', width
+        if slope < 0 and width > 0.02:
+            return 'trending_down', width
+        if width < 0.01:
+            return 'ranging', width
+        return 'unclear', width
+
+    def decide(self, symbol: str, df: pd.DataFrame) -> Dict[str, Any]:
+        """
+        返回智能决策：
+          {'action': buy/sell/hold, 'budget_factor': float, 'reason': str, 'sl_pct': float, 'tp_pct': float, 'mode': add/reduce/none}
+        - 顶尖操盘手流程：先判市况→估算R:R→不对称赔率才入场；趋势允许健康回踩加仓；震荡靠边反向、靠中线减仓
+        """
+        state, width = self.classify_market(df)
+        # 预算基线
+        base_bf = 0.1 if state.startswith('trending') else (0.06 if state == 'ranging' else 0.04)
+        # 回撤门控：触发则降预算
+        try:
+            dd_exceeded = self.strategy.is_max_drawdown_exceeded()
+        except Exception:
+            dd_exceeded = False
+        if dd_exceeded:
+            base_bf *= 0.5
+
+        # 价格与ATR
+        try:
+            series_close = pd.Series(df['close']) if 'close' in df else pd.Series([])
+            last = float(series_close.values[-1]) if len(series_close) else 0.0
+        except Exception:
+            last = 0.0
+        try:
+            series_atr = pd.Series(df['atr']) if 'atr' in df else pd.Series([])
+            atr = float(series_atr.values[-1]) if len(series_atr) else 0.0
+        except Exception:
+            atr = 0.0
+        # 止损/止盈距离（百分比）
+        # 最小触发距：max(10ticks, 0.3%, 1.5*ATR/price)
+        try:
+            px_prec = int(((getattr(self.strategy, 'markets_info', {}) or {}).get(symbol, {}).get('price_precision', 4)) or 4)
+            tick_sz = 10 ** (-px_prec)
+        except Exception:
+            tick_sz = 0.0001
+        min_pct = max(0.003, 1.5 * (atr / max(1e-9, last)))
+        sl_pct = max(min_pct, 0.004)   # 保守SL
+        tp_pct = max(2.0 * sl_pct, 0.01)  # 至少R:R>=2的TP
+
+        # 趋势/震荡方向与模式
+        mode = 'none'
+        if state == 'trending_up':
+            action = 'buy'
+            # 回踩到近MA20附近（粗略用 rolling mean）视为健康回踩，加仓模式
+            try:
+                s_close = pd.Series(df['close']) if 'close' in df else pd.Series([])
+                ma20_series = s_close.rolling(20).mean()
+                ma20 = float(ma20_series.values[-1]) if len(ma20_series) else last
+                if last <= ma20 * 1.002:
+                    mode = 'add'
+            except Exception:
+                pass
+            reason = f'trend_up width={width:.3f} rr~{tp_pct/sl_pct:.2f}'
+        elif state == 'trending_down':
+            action = 'sell'
+            try:
+                s_close = pd.Series(df['close']) if 'close' in df else pd.Series([])
+                ma20_series = s_close.rolling(20).mean()
+                ma20 = float(ma20_series.values[-1]) if len(ma20_series) else last
+                if last >= ma20 * 0.998:
+                    mode = 'add'
+            except Exception:
+                pass
+            reason = f'trend_down width={width:.3f} rr~{tp_pct/sl_pct:.2f}'
+        elif state == 'ranging':
+            try:
+                s_close = pd.Series(df['close']) if 'close' in df else pd.Series([])
+                mid_series = s_close.rolling(20).mean()
+                mid = float(mid_series.values[-1]) if len(mid_series) else last
+                action = 'buy' if last < mid else 'sell'
+                # 接近中线则考虑减仓
+                if abs(last - mid) / max(1e-9, mid) < 0.002:
+                    mode = 'reduce'
+                reason = f'ranging width={width:.3f} mid={mid:.4f}'
+            except Exception:
+                action, reason = 'hold', 'ranging-no-mid'
+        else:
+            return {'action': 'hold', 'budget_factor': 0.0, 'reason': 'unclear', 'sl_pct': sl_pct, 'tp_pct': tp_pct, 'mode': mode}
+
+        # 赔率过滤：R:R < 2 则观望
+        try:
+            rr = tp_pct / max(1e-9, sl_pct)
+            if rr < 2.0:
+                return {'action': 'hold', 'budget_factor': 0.0, 'reason': f'rr<{rr:.2f}', 'sl_pct': sl_pct, 'tp_pct': tp_pct, 'mode': 'none'}
+        except Exception:
+            pass
+
+        return {
+            'action': action,
+            'budget_factor': base_bf,
+            'reason': reason,
+            'sl_pct': sl_pct,
+            'tp_pct': tp_pct,
+            'mode': mode
+        }
+
 class MACDStrategy:
     """MACD+RSI策略类 - 扩展到11个币种"""
     # 仅对特定交易对的出场行为做覆盖（不依赖环境变量）
@@ -260,6 +399,101 @@ class MACDStrategy:
                 return True
         return False
 
+    def run_smart_cycle(self) -> bool:
+        """
+        智能主控循环：遍历币种 → 智能决策 → 按预算下单 → 挂/守护 OCO
+        受控开关：SMART_CONTROLLER=1 默认开启；非开启则直接返回 False
+        """
+        try:
+            if str(os.environ.get('SMART_CONTROLLER', '1')).strip().lower() not in ('1', 'true', 'yes'):
+                return False
+            syms = list(getattr(self, 'symbols', []) or [])
+            if not syms:
+                return False
+            for symbol in syms:
+                # 拉取K线（策略周期），失败则观望
+                try:
+                    df = self.get_klines(symbol, 200)
+                except Exception:
+                    df = None
+                decision = None
+                try:
+                    if getattr(self, 'controller', None) and df is not None:
+                        decision = self.controller.decide(symbol, df)
+                except Exception as e_dec:
+                    logger.warning(f"⚠️ 主控决策异常 {symbol}: {e_dec}")
+                    decision = {'action': 'hold', 'budget_factor': 0.0, 'reason': 'error'}
+                act = str((decision or {}).get('action') or 'hold').lower()
+                bf = float((decision or {}).get('budget_factor') or 0.0)
+                reason = str((decision or {}).get('reason') or '')
+                if act in ('buy', 'sell') and bf > 0:
+                    try:
+                        avail = float(self.get_account_balance() or 0.0)
+                    except Exception:
+                        avail = 0.0
+                    min_avail = float((os.environ.get('MIN_AVAILABLE_FLOOR') or '0.02').strip())
+                    if avail < min_avail:
+                        logger.info(f"⌛ 余额不足，主控跳过 {symbol}: available={avail:.4f}U")
+                        continue
+                    # 风险限额预算：单笔风险≤MAX_RISK_PCT（默认1%），按SL距离反推名义与保证金预算
+                    try:
+                        max_risk_pct = float((os.environ.get('MAX_RISK_PCT') or '0.01').strip())
+                    except Exception:
+                        max_risk_pct = 0.01
+                    # 读取杠杆与费用参数
+                    try:
+                        L = float(self.get_symbol_leverage(symbol))
+                    except Exception:
+                        L = 20.0
+                    taker_fee = float((os.environ.get('TAKER_FEE_RATE') or '0.0005').strip())
+                    safety = float((os.environ.get('MARGIN_SAFETY_BUFFER') or '0.003').strip())
+                    # 以 sl_pct 作为预期亏损比例（不含滑点），名义上限 = equity * max_risk_pct / sl_pct
+                    equity = float(avail)  # 近似用可用余额
+                    sl_pct = float((decision or {}).get('sl_pct') or 0.01)
+                    notional_cap = equity * max_risk_pct / max(1e-9, sl_pct)
+                    # 保证金预算（含费用缓冲）：notional/(L) + (fee+safety)*notional
+                    denom = (1.0 / max(1.0, L)) + taker_fee + safety
+                    risk_budget = notional_cap * denom
+                    # 余额基因预算
+                    bf_budget = avail * min(bf, 0.25)
+                    # 最终预算：取两者较小，并不低于最小可用
+                    budget = max(min_avail, min(risk_budget, bf_budget))
+                    logger.info(f"🎯 风险预算: equity={equity:.4f}U L={L:.1f} sl%={sl_pct:.3%} => notional_cap={notional_cap:.4f}U risk_budget={risk_budget:.4f}U bf_budget={bf_budget:.4f}U final={budget:.4f}U")
+                    ok = False
+                    try:
+                        ok = bool(self.create_order(symbol, act, budget))
+                    except Exception as e_ord:
+                        logger.warning(f"⚠️ 主控下单异常 {symbol}: {e_ord}")
+                        ok = False
+                    if ok:
+                        try:
+                            self.ensure_tpsl_guard(symbol)
+                        except Exception:
+                            pass
+                        logger.info(f"🤖 主控执行 {symbol}: {act} budget={budget:.4f}U reason={reason}")
+                    else:
+                        logger.info(f"🤖 主控决策未成交 {symbol}: {act} budget={budget:.4f}U reason={reason}")
+                else:
+                    logger.debug(f"🤖 主控观望 {symbol}: {reason}")
+            return True
+        except Exception as e:
+            logger.warning(f"⚠️ 主控循环异常: {e}")
+            return False
+
+    def get_symbol_leverage(self, symbol: str) -> float:
+        """
+        返回该交易对的杠杆（用于数量计算与余额倒推预检）
+        优先取每币自定义杠杆，其次退回全局 self.leverage，最后默认 20x
+        """
+        try:
+            lev_map = getattr(self, 'symbol_leverage', {}) or {}
+            if symbol in lev_map:
+                return float(lev_map.get(symbol) or 20.0)
+            gl = float(getattr(self, 'leverage', 20.0) or 20.0)
+            return gl if gl > 0 else 20.0
+        except Exception:
+            return 20.0
+
     def __init__(self, api_key: str, secret_key: str, passphrase: str):
         """初始化策略"""
         # SAR 结果缓存：key=(tag, len, last_ts, af_start, af_max) -> last_sar
@@ -272,6 +506,16 @@ class MACDStrategy:
             self.stats = TradingStats()
         except Exception:
             self.stats = None
+        # 智能主控
+        try:
+            self.controller = SmartController(self)
+        except Exception:
+            self.controller = None
+        # 初始化权益峰值（用于回撤风控兜底）
+        try:
+            self._equity_peak = float(self.get_account_balance() or 0.0)
+        except Exception:
+            self._equity_peak = 0.0
 
         # 交易所配置
         self.exchange = ccxt.okx({
@@ -327,10 +571,10 @@ class MACDStrategy:
             'SOL/USDT:USDT': '15m',
             'WIF/USDT:USDT': '5m',
             'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '5m',
-            'PEPE/USDT:USDT': '5m',
+            'ARB/USDT:USDT': '15m',
+            'PEPE/USDT:USDT': '15m',
             # 10m：中等波动
-            'DOGE/USDT:USDT': '5m',
+            'DOGE/USDT:USDT': '15m',
             'XRP/USDT:USDT': '15m',
         }
         
@@ -469,12 +713,10 @@ class MACDStrategy:
             } for s in self.symbols
         }
         
-        self._sar_cache: Dict[tuple, float] = {}
-        self._klines_cache: Dict[str, Dict[float, List[Dict]]] = {}
-        self._klines_ttl = 60  # 秒
+
         
         # OKX统一参数
-        self.okx_params = {'instType': 'SWAP'}
+
 
         # 将统一交易对转为OKX instId
         def _symbol_to_inst_id(sym: str) -> str:
@@ -485,30 +727,9 @@ class MACDStrategy:
                 return ''
         self.symbol_to_inst_id = _symbol_to_inst_id
         
-        # 时间周期 - 15分钟
-        self.timeframe = '15m'
-        # 按币种指定周期：BTC/ETH/FIL/WLD 用 15m，其余使用全局 timeframe（可扩展 DOGE/XRP 为 10m）
-        self.timeframe_map = {
-            # 15m：波动惯性强的主流币
-            'BTC/USDT:USDT': '15m',
-            'ETH/USDT:USDT': '15m',
-            'FIL/USDT:USDT': '15m',
-            'WLD/USDT:USDT': '15m',
-            # 5m：高频波动，短周期更有效
-            'SOL/USDT:USDT': '15m',
-            'WIF/USDT:USDT': '15m',
-            'ZRO/USDT:USDT': '15m',
-            'ARB/USDT:USDT': '15m',
-            'PEPE/USDT:USDT': '15m',
-            # 10m：中等波动
-            'DOGE/USDT:USDT': '15m',
-            'XRP/USDT:USDT': '15m',
-        }
+
         
-        # MACD参数
-        self.fast_period = 10
-        self.slow_period = 40
-        self.signal_period = 15
+
         
         # ===== 杠杆配置 - 根据币种风险分级 =====
         self.symbol_leverage: Dict[str, int] = {
@@ -782,12 +1003,19 @@ class MACDStrategy:
             time.sleep(float(self._min_api_interval or 0.2))
 
     def get_position_mode(self) -> str:
-        """返回持仓模式，默认 hedge（双向）以避免API差异导致错误"""
+        """返回持仓模式：hedge(双向)/net(净持)/oneway(单向)；默认 hedge"""
         try:
-            # 可根据交易所选项判断，若不可用则回退
             opts = self.exchange.options or {}
-            mode = str(opts.get('positionMode', 'hedge')).lower()
-            return 'hedge' if mode not in ('net', 'oneway') else 'net'
+            raw = str(opts.get('positionMode', '') or '').lower()
+            # 常见别名映射
+            if raw in ('hedge', 'dual', 'two-way', 'long_short', 'longshort'):
+                return 'hedge'
+            if raw in ('net', 'net_mode'):
+                return 'net'
+            if raw in ('oneway', 'one-way', 'single', 'single_side'):
+                return 'oneway'
+            # 无法识别时，默认使用 hedge 以避免 posSide 缺失造成方向冲突
+            return 'hedge'
         except Exception:
             return 'hedge'
 
@@ -1479,42 +1707,7 @@ class MACDStrategy:
             'atr_n_delta': float(st.get('atr_n_delta', 0.0) or 0.0),
             'atr_m_delta': float(st.get('atr_m_delta', 0.0) or 0.0),
         }
-        rows = sub.reset_index(drop=True)
 
-        for i in range(window, len(rows) - window):
-            slice_ = rows.iloc[i-window:i+window+1]
-            vol_ok = float(rows.iloc[i]['volume']) >= 0.8 * float(rows.iloc[i]['vol_ma'] or 1.0)
-            # 支撑：当前低点为前后window的最低
-            if rows.iloc[i]['low'] == slice_['low'].min() and vol_ok:
-                supports.append({'price': float(rows.iloc[i]['low']), 'idx': i, 'tests': 1, 'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))})
-            # 压力：当前高点为前后window的最高
-            if rows.iloc[i]['high'] == slice_['high'].max() and vol_ok:
-                resistances.append({'price': float(rows.iloc[i]['high']), 'idx': i, 'tests': 1, 'vol_mult': float(rows.iloc[i]['volume']) / max(1e-9, float(rows.iloc[i]['vol_ma'] or 1.0))})
-
-        def cluster_levels(levels: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
-            if not levels:
-                return []
-            levels_sorted = sorted(levels, key=lambda x: x['price'])
-            clustered: List[Dict[str, Any]] = []
-            cur = levels_sorted[0].copy()
-            for lv in levels_sorted[1:]:
-                if abs(lv['price'] - cur['price']) / cur['price'] <= tolerance:
-                    # 合并
-                    cur['price'] = (cur['price'] * cur['tests'] + lv['price']) / (cur['tests'] + 1)
-                    cur['tests'] += 1
-                    cur['vol_mult'] = (cur['vol_mult'] + lv['vol_mult']) / 2.0
-                else:
-                    clustered.append(cur)
-                    cur = lv.copy()
-            clustered.append(cur)
-            # 计算强度 = 成交量放大倍数 × 测试次数
-            for it in clustered:
-                it['strength'] = float(it['vol_mult']) * int(it['tests'])
-            # 取强度Top5
-            clustered.sort(key=lambda x: x.get('strength', 0), reverse=True)
-            return clustered[:5]
-
-        return {'supports': cluster_levels(supports), 'resistances': cluster_levels(resistances)}
 
     def score_ranging_long(self, price: float, supports: List[Dict[str, Any]], rsi: float, rsi_threshold: float) -> Dict[str, Any]:
         """震荡市做多评分"""
@@ -1807,16 +2000,14 @@ class MACDStrategy:
             return target
 
     def _apply_amount_limits(self, target: float) -> float:
-        """应用金额限制"""
+        """应用金额限制（统一下限使用 MIN_NOTIONAL_FLOOR；保留 MAX_PER_SYMBOL_USDT 上限）"""
         try:
-            min_floor = max(0.0, float(os.environ.get('MIN_PER_SYMBOL_USDT', '1.0').strip()))
+            min_floor = max(0.0, float(os.environ.get('MIN_NOTIONAL_FLOOR', '1.0').strip()))
             max_cap = max(0.0, float(os.environ.get('MAX_PER_SYMBOL_USDT', '0.0').strip()))
-
             if min_floor > 0 and target < min_floor:
                 target = min_floor
             if max_cap > 0 and target > max_cap:
                 target = max_cap
-
             return target
         except Exception:
             return target
@@ -4253,7 +4444,7 @@ class MACDStrategy:
 
                 # 检查最大回撤保护
                 if self.is_max_drawdown_exceeded():
-                    logger.warning(f"🛑 触发最大回撤保护！当前回撤: {self.stats['current_drawdown']:.2%}, 暂停交易")
+                    logger.warning(f"🛑 触发最大回撤保护！当前回撤: {self.stats.stats.get('current_drawdown', 0.0):.2%}, 暂停交易")
                     logger.info("⏳ 等待60秒后重新检查...")
                     time.sleep(60)
                     continue
