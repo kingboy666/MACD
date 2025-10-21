@@ -1812,6 +1812,23 @@ class MACDStrategy:
                 return {'signal': 'hold', 'reason': '数据不足'}
             df = self.calculate_indicators(df, symbol)
 
+            # 简化策略：仅使用MACD与MA20
+            try:
+                ma20 = pd.Series(df['close']).rolling(20).mean()
+                prev = df.iloc[-2]
+                latest = df.iloc[-1]
+                macd_gc = (prev['macd_diff'] <= prev['macd_dea'] and latest['macd_diff'] > latest['macd_dea'])
+                macd_dc = (prev['macd_diff'] >= prev['macd_dea'] and latest['macd_diff'] < latest['macd_dea'])
+                ma20_last = float(ma20.iloc[-1]) if pd.notna(ma20.iloc[-1]) else None
+                price = float(latest['close'])
+                if ma20_last is not None:
+                    if macd_gc and price > ma20_last:
+                        return {'signal': 'buy', 'reason': 'MACD金叉且价格在MA20之上'}
+                    if macd_dc and price < ma20_last:
+                        return {'signal': 'sell', 'reason': 'MACD死叉且价格在MA20之下'}
+            except Exception:
+                pass
+
             # 市场状态评估
             ms = self.assess_market_state(df)
             latest = df.iloc[-1]
