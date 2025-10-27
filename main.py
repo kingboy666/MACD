@@ -22,6 +22,8 @@ import time
 import math
 import logging
 from typing import Dict, Any
+import json
+import urllib.request
 
 import ccxt
 import pandas as pd
@@ -29,6 +31,84 @@ import pandas as pd
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').strip().upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('simple-macd-30m')
+
+# 通知配置：可配置一个 HTTP Webhook 用于短信/机器人转发
+NOTIFY_WEBHOOK = os.environ.get('NOTIFY_WEBHOOK', '').strip()
+NOTIFY_TYPE = os.environ.get('NOTIFY_TYPE', '').strip().lower()  # 可选：wecom(企业微信), feishu, ding, generic
+NOTIFY_MENTION_MOBILES = [m.strip() for m in os.environ.get('NOTIFY_MENTION_MOBILES', '').split(',') if m.strip()]
+PUSHPLUS_TOKEN = os.environ.get('PUSHPLUS_TOKEN', '').strip()  # 个人微信通过关注公众号接收，免企业号
+WXPUSHER_APP_TOKEN = os.environ.get('WXPUSHER_APP_TOKEN', '').strip()  # WxPusher 应用Token
+WXPUSHER_UID = os.environ.get('WXPUSHER_UID', '').strip()  # 你的微信UID
+
+def _post_json(url: str, payload: dict):
+    req = urllib.request.Request(
+        url,
+        data=json.dumps(payload).encode('utf-8'),
+        headers={'Content-Type': 'application/json'},
+        method='POST'
+    )
+    urllib.request.urlopen(req, timeout=5).read()
+
+def notify_event(title: str, message: str, level: str = 'info'):
+    # 仅当使用 webhook 类型时才要求 NOTIFY_WEBHOOK 存在
+    if NOTIFY_TYPE in ('wecom', 'feishu', 'ding', 'generic') and not NOTIFY_WEBHOOK:
+        return
+    try:
+        if NOTIFY_TYPE == 'wecom':
+            # 企业微信群机器人文本消息格式，支持@手机号
+            content = f"【{title}】\n{message}"
+            payload = {
+                'msgtype': 'text',
+                'text': {
+                    'content': content,
+                    'mentioned_mobile_list': NOTIFY_MENTION_MOBILES or []
+                }
+            }
+            _post_json(NOTIFY_WEBHOOK, payload)
+        elif NOTIFY_TYPE == 'feishu':
+            payload = {
+                'msg_type': 'text',
+                'content': { 'text': f"【{title}】\n{message}" }
+            }
+            _post_json(NOTIFY_WEBHOOK, payload)
+        elif NOTIFY_TYPE == 'ding':
+            payload = {
+                'msgtype': 'text',
+                'text': { 'content': f"【{title}】\n{message}" }
+            }
+            _post_json(NOTIFY_WEBHOOK, payload)
+        elif NOTIFY_TYPE == 'pushplus':
+            # https://www.pushplus.plus/doc/guide/api.html 关注 pushplus 公众号后获取 token
+            if PUSHPLUS_TOKEN:
+                payload = {
+                    'token': PUSHPLUS_TOKEN,
+                    'title': title,
+                    'content': message,
+                    'template': 'txt'
+                }
+                _post_json('https://www.pushplus.plus/send', payload)
+        elif NOTIFY_TYPE == 'wxpusher':
+            # https://wxpusher.zjiecode.com/docs/#/?id=消息发送
+            if WXPUSHER_APP_TOKEN and WXPUSHER_UID:
+                payload = {
+                    'appToken': WXPUSHER_APP_TOKEN,
+                    'content': f"【{title}】\n{message}",
+                    'summary': title,
+                    'contentType': 1,
+                    'uids': [WXPUSHER_UID]
+                }
+                _post_json('https://wxpusher.zjiecode.com/api/send/message', payload)
+        else:
+            # 通用：回传原始结构，供自建转发服务使用
+            payload = {
+                'title': title,
+                'message': message,
+                'level': level,
+                'ts': int(time.time())
+            }
+            _post_json(NOTIFY_WEBHOOK, payload)
+    except Exception:
+        pass
 
 API_KEY = os.environ.get('OKX_API_KEY', '').strip()
 API_SECRET = os.environ.get('OKX_SECRET_KEY', '').strip()
@@ -204,6 +284,7 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
     try:
         exchange.privatePostTradeOrder(params)
         log.info(f'已市价平仓 {symbol} 方向={side_to_close} 数量={sz}')
+        notify_event('已市价平仓', f'{symbol} 方向={side_to_close} 数量={sz}')
         return True
     except Exception as e:
         log.warning(f'平仓失败 {symbol}: {e}')
@@ -319,6 +400,7 @@ while True:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
                             log.info(f'触发止盈已平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('触发止盈已平仓', f'{symbol} 已实现盈亏={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
 
@@ -355,6 +437,7 @@ while True:
                             stats['losses'] += 1
                         stats['realized_pnl'] += realized
                         log.info(f'死叉信号平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                        notify_event('死叉信号平仓', f'{symbol} 已实现盈亏={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                         last_bar_ts[symbol] = cur_bar_ts
                         continue
 
