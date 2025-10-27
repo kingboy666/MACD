@@ -26,7 +26,8 @@ from typing import Dict, Any
 import ccxt
 import pandas as pd
 
-logging.basicConfig(level=logging.INFO, format='%(asctime)s [%(levelname)s] %(message)s')
+LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').strip().upper()
+logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s [%(levelname)s] %(message)s')
 log = logging.getLogger('simple-macd-30m')
 
 API_KEY = os.environ.get('OKX_API_KEY', '').strip()
@@ -228,17 +229,34 @@ log.info('=' * 70)
 for sym in SYMBOLS:
     ensure_leverage(sym)
 
+# Runtime stats
+stats = {'trades': 0, 'wins': 0, 'losses': 0, 'realized_pnl': 0.0}
+cycle_count = 0
+
 def get_last_closed_bar_ts(ohlcv_row):
     # ccxt returns [timestamp, open, high, low, close, volume]
     return int(ohlcv_row[0])
 
 while True:
     try:
+        cycle_count += 1
+        # Account summary
+        try:
+            balance = exchange.fetch_balance()
+            usdt = balance.get('USDT', {})
+            free = float(usdt.get('free') or usdt.get('available') or 0)
+            used = float(usdt.get('used') or 0)
+            total = float(usdt.get('total') or (free + used))
+        except Exception:
+            free, total = 0.0, 0.0
+        winrate = (stats['wins'] / stats['trades'] * 100) if stats['trades'] > 0 else 0.0
+        log.info(f'Cycle {cycle_count}: scanning {len(SYMBOLS)} symbols, interval={SCAN_INTERVAL}s | USDT free={free:.2f} total={total:.2f} | realizedPnL={stats["realized_pnl"]:.2f} | winrate={winrate:.1f}% ({stats["wins"]}/{stats["trades"]})')
         for symbol in SYMBOLS:
             try:
                 # Fetch 30m OHLCV
                 ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=60)
                 if not ohlcv or len(ohlcv) < 35:
+                    log.debug(f'{symbol} insufficient OHLCV: {0 if not ohlcv else len(ohlcv)}')
                     continue
                 closes = pd.Series([c[4] for c in ohlcv])
                 diff, dea, _ = macd_6_16_9(closes)
@@ -267,18 +285,46 @@ while True:
                     price = 0.0
                 if size > 0 and side == 'long' and entry > 0 and price > 0:
                     pnl_pct = (price - entry) / entry
+                    # Snapshot position with unrealized PnL
+                    try:
+                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
+                    except Exception:
+                        ct_val = 0.0
+                    unreal = size * ct_val * (price - entry)
+                    log.info(f'Pos {symbol} long size={size} entry={entry:.6f} px={price:.6f} uPnL={unreal:.2f} ({pnl_pct*100:.2f}%)')
                     if pnl_pct <= -SL_PCT:
-                        close_position_market(symbol, 'long', size)
-                        # Avoid duplicate actions within same bar
-                        last_bar_ts[symbol] = cur_bar_ts
-                        continue
+                        close_price = price
+                        realized = size * ct_val * (close_price - entry)
+                        ok = close_position_market(symbol, 'long', size)
+                        if ok:
+                            stats['trades'] += 1
+                            if realized > 0:
+                                stats['wins'] += 1
+                            else:
+                                stats['losses'] += 1
+                            stats['realized_pnl'] += realized
+                            log.info(f'Closed by SL {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
+                            # Avoid duplicate actions within same bar
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
                     if pnl_pct >= TP_PCT:
-                        close_position_market(symbol, 'long', size)
-                        last_bar_ts[symbol] = cur_bar_ts
-                        continue
+                        close_price = price
+                        realized = size * ct_val * (close_price - entry)
+                        ok = close_position_market(symbol, 'long', size)
+                        if ok:
+                            stats['trades'] += 1
+                            if realized > 0:
+                                stats['wins'] += 1
+                            else:
+                                stats['losses'] += 1
+                            stats['realized_pnl'] += realized
+                            log.info(f'Closed by TP {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
 
                 # Act only once per closed bar
                 if acted_key == cur_bar_ts:
+                    log.debug(f'{symbol} already acted on bar {cur_bar_ts}, skipping')
                     continue
 
                 # Golden cross -> open long if no long position
@@ -290,8 +336,25 @@ while True:
                             continue
                 # Death cross -> close existing long
                 if death_cross and size > 0 and side == 'long':
+                    # compute realized PnL on cross close
+                    try:
+                        close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
+                    except Exception:
+                        close_price = 0.0
+                    try:
+                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
+                    except Exception:
+                        ct_val = 0.0
+                    realized = size * ct_val * (close_price - entry)
                     ok = close_position_market(symbol, 'long', size)
                     if ok:
+                        stats['trades'] += 1
+                        if realized > 0:
+                            stats['wins'] += 1
+                        else:
+                            stats['losses'] += 1
+                        stats['realized_pnl'] += realized
+                        log.info(f'Closed by DC {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
                         last_bar_ts[symbol] = cur_bar_ts
                         continue
 
