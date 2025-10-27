@@ -110,7 +110,9 @@ def ensure_leverage(symbol: str):
         exchange.privatePostAccountSetLeverage({'instId': inst_id, 'mgnMode': 'cross', 'lever': str(lev)})
         log.info(f'已设置杠杆 {symbol} -> {lev}倍')
     except Exception as e:
-        log.warning(f'设置杠杆失败 {symbol}: {e}')
+        log.warning(f'巡检循环错误: {e}')
+        time.sleep(SCAN_INTERVAL)
+log.warning(f'设置杠杆失败 {symbol}: {e}')
 
 # Positions
 
@@ -176,7 +178,9 @@ def place_market_order(symbol: str, side: str, budget_usdt: float) -> bool:
         log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}, 预算={budget_usdt}USDT')
         return True
     except Exception as e:
-        log.warning(f'下单失败 {symbol}: {e}')
+        log.warning(f'巡检循环错误: {e}')
+        time.sleep(SCAN_INTERVAL)
+log.warning(f'下单失败 {symbol}: {e}')
         return False
 
 
@@ -206,7 +210,9 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
         log.info(f'Closed {symbol} {side_to_close} qty={sz}')
         return True
     except Exception as e:
-        log.warning(f'平仓失败 {symbol}: {e}')
+        log.warning(f'巡检循环错误: {e}')
+        time.sleep(SCAN_INTERVAL)
+log.warning(f'平仓失败 {symbol}: {e}')
         return False
 
 # MACD
@@ -362,4 +368,5 @@ while True:
                 log.warning(f'{symbol} 循环错误: {e_sym}')
         time.sleep(SCAN_INTERVAL)
     except Exception as e:
-        
+        log.warning(f'巡检循环错误: {e}')
+        time.sleep(SCAN_INTERVAL)
