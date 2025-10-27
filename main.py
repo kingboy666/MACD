@@ -108,9 +108,9 @@ def ensure_leverage(symbol: str):
     try:
         # Cross margin by default; for hedge posSide must be specified, assume one-way here
         exchange.privatePostAccountSetLeverage({'instId': inst_id, 'mgnMode': 'cross', 'lever': str(lev)})
-        log.info(f'Leverage set {symbol} -> {lev}x')
+        log.info(f'已设置杠杆 {symbol} -> {lev}倍')
     except Exception as e:
-        log.warning(f'Failed set leverage {symbol}: {e}')
+        log.warning(f'设置杠杆失败 {symbol}: {e}')
 
 # Positions
 
@@ -161,7 +161,7 @@ def place_market_order(symbol: str, side: str, budget_usdt: float) -> bool:
     if lot > 0:
         contracts = math.floor(contracts / lot) * lot
     if contracts <= 0 or (minsz > 0 and contracts < minsz):
-        log.warning(f'Computed contracts too small: {contracts}, minSz={minsz}, lotSz={lot}')
+        log.warning(f'计算得到的合约张数过小: {contracts}, 最小下单={minsz}, 步长={lot}')
         return False
     side_okx = 'buy' if side == 'buy' else 'sell'
     params = {
@@ -173,10 +173,10 @@ def place_market_order(symbol: str, side: str, budget_usdt: float) -> bool:
     }
     try:
         exchange.privatePostTradeOrder(params)
-        log.info(f'Order success {symbol}: {side} sz={contracts}, budget={budget_usdt}USDT')
+        log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}, 预算={budget_usdt}USDT')
         return True
     except Exception as e:
-        log.warning(f'Order failed {symbol}: {e}')
+        log.warning(f'下单失败 {symbol}: {e}')
         return False
 
 
@@ -191,7 +191,7 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
         sz = math.floor(sz / lot) * lot
     sz = min(sz, qty)
     if sz <= 0 or (minsz > 0 and sz < minsz):
-        log.warning(f'Close qty too small: {sz}')
+        log.warning(f'平仓数量过小: {sz}')
         return False
     params = {
         'instId': inst_id,
@@ -206,7 +206,7 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
         log.info(f'Closed {symbol} {side_to_close} qty={sz}')
         return True
     except Exception as e:
-        log.warning(f'Close failed {symbol}: {e}')
+        log.warning(f'平仓失败 {symbol}: {e}')
         return False
 
 # MACD
@@ -250,7 +250,7 @@ while True:
         except Exception:
             free, total = 0.0, 0.0
         winrate = (stats['wins'] / stats['trades'] * 100) if stats['trades'] > 0 else 0.0
-        log.info(f'Cycle {cycle_count}: scanning {len(SYMBOLS)} symbols, interval={SCAN_INTERVAL}s | USDT free={free:.2f} total={total:.2f} | realizedPnL={stats["realized_pnl"]:.2f} | winrate={winrate:.1f}% ({stats["wins"]}/{stats["trades"]})')
+        log.info(f'周期 {cycle_count}: 扫描 {len(SYMBOLS)} 个交易对, 间隔={SCAN_INTERVAL}s | USDT 可用={free:.2f} 总额={total:.2f} | 累计已实现盈亏={stats["realized_pnl"]:.2f} | 胜率={winrate:.1f}% ({stats["wins"]}/{stats["trades"]})')
         for symbol in SYMBOLS:
             try:
                 # Fetch 30m OHLCV
@@ -291,7 +291,7 @@ while True:
                     except Exception:
                         ct_val = 0.0
                     unreal = size * ct_val * (price - entry)
-                    log.info(f'Pos {symbol} long size={size} entry={entry:.6f} px={price:.6f} uPnL={unreal:.2f} ({pnl_pct*100:.2f}%)')
+                    log.info(f'持仓 {symbol} 多头 数量={size} 开仓价={entry:.6f} 现价={price:.6f} 浮动盈亏={unreal:.2f} ({pnl_pct*100:.2f}%)')
                     if pnl_pct <= -SL_PCT:
                         close_price = price
                         realized = size * ct_val * (close_price - entry)
@@ -303,7 +303,7 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'Closed by SL {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
+                            log.info(f'触发止损已平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             # Avoid duplicate actions within same bar
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
@@ -318,13 +318,13 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'Closed by TP {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
+                            log.info(f'触发止盈已平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
 
                 # Act only once per closed bar
                 if acted_key == cur_bar_ts:
-                    log.debug(f'{symbol} already acted on bar {cur_bar_ts}, skipping')
+                    log.debug(f'{symbol} 该K线已处理过 {cur_bar_ts}，跳过')
                     continue
 
                 # Golden cross -> open long if no long position
@@ -354,13 +354,12 @@ while True:
                         else:
                             stats['losses'] += 1
                         stats['realized_pnl'] += realized
-                        log.info(f'Closed by DC {symbol}: realizedPnL={realized:.2f} | total={stats["realized_pnl"]:.2f}')
+                        log.info(f'死叉信号平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                         last_bar_ts[symbol] = cur_bar_ts
                         continue
 
             except Exception as e_sym:
-                log.warning(f'{symbol} loop error: {e_sym}')
+                log.warning(f'{symbol} 循环错误: {e_sym}')
         time.sleep(SCAN_INTERVAL)
     except Exception as e:
-        log.warning(f'Cycle error: {e}')
-        time.sleep(SCAN_INTERVAL)
+        
