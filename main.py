@@ -153,6 +153,17 @@ exchange = ccxt.okx({
     }
 })
 
+# Position mode: 'net' 或 'hedge'，默认 net（单向持仓）
+POS_MODE = os.environ.get('POS_MODE', 'net').strip().lower()
+
+def ensure_position_mode():
+    try:
+        mode = 'long_short_mode' if POS_MODE == 'hedge' else 'net_mode'
+        exchange.privatePostAccountSetPositionMode({'posMode': mode})
+        log.info(f'已设置持仓模式 -> {"双向对冲" if POS_MODE == "hedge" else "单向净持仓"}')
+    except Exception as e:
+        log.warning(f'设置持仓模式失败: {e}')
+
 # Helpers for OKX
 
 def symbol_to_inst_id(sym: str) -> str:
@@ -251,6 +262,11 @@ def place_market_order(symbol: str, side: str, budget_usdt: float) -> bool:
         'ordType': 'market',
         'sz': str(contracts),
     }
+    # Hedge 模式必须带 posSide；Net 模式不能带 posSide
+    if POS_MODE == 'hedge':
+        params['posSide'] = 'long' if side_okx == 'buy' else 'short'
+    if POS_MODE == 'hedge':
+        params['posSide'] = 'long' if side_to_close == 'long' else 'short'
     try:
         exchange.privatePostTradeOrder(params)
         log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}, 预算={budget_usdt}USDT')
@@ -281,6 +297,11 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
         'sz': str(sz),
         'reduceOnly': True,
     }
+    # Hedge 模式必须带 posSide；Net 模式不能带 posSide
+    if POS_MODE == 'hedge':
+        params['posSide'] = 'long' if side_okx == 'buy' else 'short'
+    if POS_MODE == 'hedge':
+        params['posSide'] = 'long' if side_to_close == 'long' else 'short'
     try:
         exchange.privatePostTradeOrder(params)
         log.info(f'已市价平仓 {symbol} 方向={side_to_close} 数量={sz}')
@@ -306,7 +327,8 @@ log.info('=' * 70)
 log.info('Start Standalone Simple MACD(6,16,9) Strategy - 30m timeframe')
 log.info('=' * 70)
 
-# Prepare leverage once
+# Prepare pos mode and leverage once
+ensure_position_mode()
 for sym in SYMBOLS:
     ensure_leverage(sym)
 
