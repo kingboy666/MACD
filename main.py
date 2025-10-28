@@ -228,24 +228,29 @@ def place_market_order(symbol: str, side: str, budget_usdt: float) -> bool:
         avail = float(balance.get('USDT', {}).get('free') or balance.get('USDT', {}).get('available') or 0)
     except Exception:
         avail = 0.0
-    budget_usdt = max(0.0, avail)
-    if budget_usdt <= 0:
+    equity_usdt = max(0.0, avail)
+    if equity_usdt <= 0:
         log.warning('No available USDT balance to open position')
         return False
 
     info = load_market_info(symbol)
-    inst_id = info['instId']
+    inst_id = info['InstId' if 'InstId' in info else 'instId']
     # Get last price
     ticker = exchange.fetch_ticker(symbol)
-    price = float(ticker['last'] or ticker['close'] or 0)
+    price = float(ticker.get('last') or ticker.get('close') or 0)
     if price <= 0:
         raise Exception('invalid price')
     ct_val = float(info.get('ctVal') or 0)
     if ct_val <= 0:
         # Fallback: assume linear swap 0.01 coin per contract
         ct_val = 0.01
-    # contracts = (notional in base coin) / ctVal = (budget/price)/ctVal
-    contracts = (budget_usdt / price) / ct_val
+    # contracts: 当 USE_BALANCE_AS_MARGIN 为真，按“把余额作为初始保证金”来放大名义=余额*杠杆*利用率
+    if USE_BALANCE_AS_MARGIN:
+        target_notional = equity_usdt * max(1, DEFAULT_LEVERAGE) * MARGIN_UTILIZATION
+        contracts = (target_notional / price) / ct_val
+    else:
+        # 默认按余额等额名义下单（较保守）
+        contracts = (equity_usdt / price) / ct_val
     # align to lotSz
     lot = float(info.get('lotSz') or 0)
     minsz = float(info.get('minSz') or 0)
