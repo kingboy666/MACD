@@ -121,6 +121,9 @@ DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '20').strip() or
 TP_PCT = float(os.environ.get('TP_PCT', '0.01').strip() or 0.01)
 SL_PCT = float(os.environ.get('SL_PCT', '0.006').strip() or 0.006)
 SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '10').strip() or 10))
+# 下单资金控制：默认使用余额作为保证金放大名义，保留5%缓冲
+USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
+MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.95').strip() or 0.95)
 
 TIMEFRAME = '30m'
 SYMBOLS = [
