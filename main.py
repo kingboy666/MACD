@@ -529,7 +529,6 @@ while True:
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                             stats['trades'] += 1
                             if realized > 0:
                                 stats['wins'] += 1
@@ -539,10 +538,8 @@ while True:
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                             notify_event('触发止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                     
                     # 动态止盈：
                     # - 若价格连续在上轨附近运行>=3根K，则采用中轨追踪止盈：跌破中轨即平仓；
@@ -698,7 +695,6 @@ while True:
                         if ok:
                             log.info(f'{symbol} 上升趋势回踩中轨开多')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                     
                     # 开口向上 + 已有多头 -> 加仓（谨慎）
                     if bandwidth_status == 'expanding' and long_size > 0:
@@ -707,7 +703,6 @@ while True:
                             log.info(f'{symbol} 开口向上加仓多头30%')
                             notify_event('开口向上加仓(多)', f'{symbol} 追加30%仓位')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                     
                     # 开口向上 + 持有空头 -> 紧急平空（对称）
                     if bandwidth_status == 'expanding' and short_size > 0:
@@ -725,7 +720,6 @@ while True:
                             log.info(f'开口向上紧急平空 {symbol}: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('开口向上紧急平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                 
                 # ========== 三线向下策略 ==========
                 elif trend == 'down':
@@ -748,7 +742,6 @@ while True:
                             log.info(f'{symbol} 下降趋势反弹中轨平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('下降趋势平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                     
                     # 抢反弹（高风险，默认禁用）
                     if ENABLE_DOWNTREND_BOUNCE and price <= curr_lower * (1 + PRICE_TOLERANCE) and not (size > 0):
@@ -757,7 +750,6 @@ while True:
                             log.info(f'{symbol} 下降趋势下轨抢反弹（{DOWNTREND_POSITION_RATIO*100:.0f}%仓位）')
                             notify_event('抢反弹开仓', f'{symbol} 下轨抢反弹 {DOWNTREND_POSITION_RATIO*100:.0f}%仓')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                 
                 # ========== 三线走平（震荡市）策略 ==========
                 elif trend == 'flat':
@@ -767,7 +759,6 @@ while True:
                         if ok:
                             log.info(f'{symbol} 震荡市下轨买入')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
                     
                     # 上轨卖出（多头平仓）
                     if long_size > 0 and price >= curr_upper * (1 - PRICE_TOLERANCE):
@@ -788,4 +779,3 @@ while True:
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue
