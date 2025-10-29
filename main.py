@@ -776,3 +776,11 @@ while True:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                        
+                    # 震荡市上轨开空（对称）
+                    if price >= curr_upper * (1 - PRICE_TOLERANCE) and not (short_size > 0):
+                        ok = place_market_order(symbol, 'sell', BUDGET_USDT)
+                        if ok:
+                            log.info(f'{symbol} 震荡市上轨开空')
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
