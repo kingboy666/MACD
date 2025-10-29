@@ -239,6 +239,28 @@ def get_position(symbol: str) -> Dict[str, Any]:
         log.warning(f'notify_event failed: {e}')
     return {'size': 0.0, 'side': None, 'entry': 0.0}
 
+def get_positions_both(symbol: str) -> Dict[str, Dict[str, float]]:
+    """返回该合约的多空独立持仓信息（对冲模式下生效，净持仓模式尽力兼容）"""
+    res = {'long': {'size': 0.0, 'entry': 0.0}, 'short': {'size': 0.0, 'entry': 0.0}}
+    inst_id = symbol_to_inst_id(symbol)
+    try:
+        resp = exchange.privateGetAccountPositions({'instType': 'SWAP', 'instId': inst_id})
+        for p in resp.get('data', []):
+            if p.get('instId') != inst_id:
+                continue
+            pos = float(p.get('pos', 0) or 0)
+            if pos == 0:
+                continue
+            pos_side = p.get('posSide', 'net')
+            entry = float(p.get('avgPx') or p.get('lastAvgPrice') or p.get('avgPrice') or 0)
+            if pos_side == 'long' or (pos_side == 'net' and pos > 0):
+                res['long'] = {'size': abs(pos), 'entry': entry}
+            elif pos_side == 'short' or (pos_side == 'net' and pos < 0):
+                res['short'] = {'size': abs(pos), 'entry': entry}
+    except Exception as e:
+        log.debug(f'get_positions_both failed {symbol}: {e}')
+    return res
+
 def place_market_order(symbol: str, side: str, budget_usdt: float, position_ratio: float = 1.0) -> bool:
     """
     position_ratio: 仓位比例，默认1.0=全仓，0.3=30%仓位（用于下降趋势抢反弹）
@@ -492,11 +514,16 @@ while True:
                 if prev_state['trend'] != trend or prev_state['bandwidth_status'] != bandwidth_status:
                     log.info(f'{symbol} 状态变化: 趋势={trend}, 带宽={bandwidth_status}, 价格={price:.6f}, 上轨={curr_upper:.6f}, 中轨={curr_middle:.6f}, 下轨={curr_lower:.6f}')
                 
-                # 获取当前持仓
+                # 获取当前持仓（多空）
                 pos = get_position(symbol)
                 size = float(pos['size'] or 0.0)
                 side = pos['side']
                 entry = float(pos['entry'] or 0.0)
+                both = get_positions_both(symbol)
+                long_size = float(both['long']['size'])
+                long_entry = float(both['long']['entry'])
+                short_size = float(both['short']['size'])
+                short_entry = float(both['short']['entry'])
                 
                 # 确保只在K线收盘后操作一次
                 cur_bar_ts = get_last_closed_bar_ts(ohlcv[-1])
