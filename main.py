@@ -784,3 +784,11 @@ while True:
                             log.info(f'{symbol} 震荡市上轨开空')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
+            except Exception as e:
+                log.warning(f'{symbol} 处理异常: {e}')
+                continue
+        
+        time.sleep(SCAN_INTERVAL)
+    except Exception as e:
+        log.warning(f'主循环异常: {e}')
+        time.sleep(SCAN_INTERVAL)
