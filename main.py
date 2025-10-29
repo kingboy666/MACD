@@ -529,19 +529,7 @@ while True:
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'触发止损已平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('触发止损', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
                             continue
-                    
-                    # 止盈
-                    if pnl_pct >= TP_PCT:
-                        close_price = price
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
                             stats['trades'] += 1
                             if realized > 0:
                                 stats['wins'] += 1
