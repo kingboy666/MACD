@@ -539,9 +539,7 @@ while True:
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                             notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
-                            continue'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'触发止盈已平仓 {symbol}: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            continue
                             notify_event('触发止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
