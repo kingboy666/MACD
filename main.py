@@ -1,26 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bollinger Bands Strategy (OKX USDT-SWAP, 30m)
-- Indicator: Bollinger Bands(20,2) only
-- Signal: 
-  * Uptrend: Buy at middle band, sell at upper band
-  * Downtrend: Avoid or minimal position
-  * Sideways: Buy at lower band, sell at upper band
-  * Expanding bands + uptrend: Add position
-  * Expanding bands + downtrend: Close all
-  * Squeezing bands: Wait for direction
-- Leverage: per-symbol configurable
-- TP/SL: continuous monitoring
-
-Required env:
-  OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE
-Optional env:
-  BUDGET_USDT (default 5)
-  DEFAULT_LEVERAGE (default 20)
-  TP_PCT (default 0.015 = 1.5%)
-  SL_PCT (default 0.008 = 0.8%)
-  SCAN_INTERVAL (seconds, default 10)
+Bollinger Bands Strategy (OKX USDT-SWAP, 15m) - Enhanced Version
+- Indicator: Bollinger Bands(18,2) + ADX + ATR
+- Multi-layer risk management with dynamic stop loss
+- Enhanced range-bound trading with multiple confirmations
 """
 import os
 import time
@@ -35,7 +19,7 @@ import pandas as pd
 
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').strip().upper()
 logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s [%(levelname)s] %(message)s')
-log = logging.getLogger('bollinger-30m')
+log = logging.getLogger('bollinger-enhanced')
 
 # 通知配置
 NOTIFY_WEBHOOK = os.environ.get('NOTIFY_WEBHOOK', '').strip()
@@ -122,9 +106,9 @@ if not API_KEY or not API_SECRET or not API_PASS:
 
 BUDGET_USDT = float(os.environ.get('BUDGET_USDT', '5').strip() or 5)
 DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '20').strip() or 20))
-# 推荐：布林带为主、固定TP/SL为兜底（趋势放宽，震荡略收紧）
-TP_PCT = float(os.environ.get('TP_PCT', '0.035').strip() or 0.035)  # 3.5% 兜底止盈，不轻易触发
-SL_PCT = float(os.environ.get('SL_PCT', '0.02').strip() or 0.02)    # 2% 兜底止损，防极端行情
+# 动态止损使用ATR倍数，固定止盈作为兜底
+TP_PCT = float(os.environ.get('TP_PCT', '0.035').strip() or 0.035)  # 3.5% 兜底止盈
+SL_ATR_MULTIPLIER = float(os.environ.get('SL_ATR_MULTIPLIER', '2.0').strip() or 2.0)  # ATR止损倍数
 SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '10').strip() or 10))
 USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
 MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.95').strip() or 0.95)
@@ -136,6 +120,8 @@ BB_SLOPE_PERIOD = int(os.environ.get('BB_SLOPE_PERIOD', '5').strip() or 5)
 # ADX 过滤参数
 ADX_PERIOD = int(os.environ.get('ADX_PERIOD', '14').strip() or 14)
 ADX_MIN_TREND = float(os.environ.get('ADX_MIN_TREND', '20').strip() or 20)
+# ATR 参数
+ATR_PERIOD = int(os.environ.get('ATR_PERIOD', '14').strip() or 14)
 
 # 趋势判断阈值
 SLOPE_UP_THRESH = float(os.environ.get('SLOPE_UP_THRESH', '0.0015').strip() or 0.0015)
@@ -146,10 +132,14 @@ SLOPE_FLAT_RANGE = float(os.environ.get('SLOPE_FLAT_RANGE', '0.0008').strip() or
 BANDWIDTH_EXPAND_THRESH = float(os.environ.get('BANDWIDTH_EXPAND_THRESH', '0.12').strip() or 0.12)
 BANDWIDTH_SQUEEZE_THRESH = float(os.environ.get('BANDWIDTH_SQUEEZE_THRESH', '-0.12').strip() or -0.12)
 
-# 价格位置容差（判断是否在轨道上）
+# 价格位置容差
 PRICE_TOLERANCE = float(os.environ.get('PRICE_TOLERANCE', '0.002').strip() or 0.002)
 
-# 下降趋势抢反弹开关（默认关闭，太危险）
+# 震荡市增强确认参数
+MIN_RISK_REWARD = float(os.environ.get('MIN_RISK_REWARD', '2.0').strip() or 2.0)  # 最小盈亏比
+HAMMER_SHADOW_RATIO = float(os.environ.get('HAMMER_SHADOW_RATIO', '2.0').strip() or 2.0)  # 锤子线影线/实体比
+
+# 下降趋势抢反弹开关
 ENABLE_DOWNTREND_BOUNCE = os.environ.get('ENABLE_DOWNTREND_BOUNCE', 'false').strip().lower() in ('1', 'true', 'yes')
 DOWNTREND_POSITION_RATIO = float(os.environ.get('DOWNTREND_POSITION_RATIO', '0.3').strip() or 0.3)
 
@@ -241,7 +231,7 @@ def get_position(symbol: str) -> Dict[str, Any]:
     return {'size': 0.0, 'side': None, 'entry': 0.0}
 
 def get_positions_both(symbol: str) -> Dict[str, Dict[str, float]]:
-    """返回该合约的多空独立持仓信息（对冲模式下生效，净持仓模式尽力兼容）"""
+    """返回该合约的多空独立持仓信息"""
     res = {'long': {'size': 0.0, 'entry': 0.0}, 'short': {'size': 0.0, 'entry': 0.0}}
     inst_id = symbol_to_inst_id(symbol)
     try:
@@ -263,9 +253,7 @@ def get_positions_both(symbol: str) -> Dict[str, Dict[str, float]]:
     return res
 
 def place_market_order(symbol: str, side: str, budget_usdt: float, position_ratio: float = 1.0) -> bool:
-    """
-    position_ratio: 仓位比例，默认1.0=全仓，0.3=30%仓位（用于下降趋势抢反弹）
-    """
+    """市价下单"""
     if DRY_RUN:
         log.info(f'[DRY_RUN] 模拟开仓 {symbol} {side} 仓位比例={position_ratio*100:.0f}%')
         return True
@@ -315,9 +303,6 @@ def place_market_order(symbol: str, side: str, budget_usdt: float, position_rati
     if POS_MODE == 'hedge':
         params['posSide'] = 'long' if side_okx == 'buy' else 'short'
     
-    if DRY_RUN:
-        log.info(f'[DRY_RUN] 模拟开仓 {symbol} {side} 数量={contracts}')
-        return True
     try:
         exchange.privatePostTradeOrder(params)
         log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}, 预算={equity_usdt:.2f}USDT (仓位比例={position_ratio*100:.0f}%)')
@@ -328,6 +313,7 @@ def place_market_order(symbol: str, side: str, budget_usdt: float, position_rati
         return False
 
 def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
+    """市价平仓"""
     info = load_market_info(symbol)
     inst_id = info['instId']
     side_okx = 'sell' if side_to_close == 'long' else 'buy'
@@ -364,7 +350,7 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
         log.warning(f'平仓失败 {symbol}: {e}')
         return False
 
-# ========== 布林带计算 ==========
+# ========== 技术指标计算 ==========
 
 def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_multiplier: float = 2.0):
     """计算布林带"""
@@ -375,7 +361,19 @@ def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_multiplie
     bandwidth = (upper - lower) / middle
     return upper, middle, lower, bandwidth
 
+def calc_atr(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
+    """计算ATR（平均真实波幅）"""
+    tr_components = pd.concat([
+        (highs - lows).abs(),
+        (highs - closes.shift()).abs(),
+        (lows - closes.shift()).abs()
+    ], axis=1)
+    tr = tr_components.max(axis=1)
+    atr = tr.rolling(period).mean()
+    return atr
+
 def calc_adx(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
+    """计算ADX（平均趋向指标）"""
     up_move = highs.diff()
     down_move = lows.diff().abs()
     plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move.fillna(0)
@@ -387,7 +385,6 @@ def calc_adx(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int =
     ], axis=1)
     tr = tr_components.max(axis=1)
     atr = tr.rolling(period).mean()
-    # 避免除以0
     atr_safe = atr.replace(0, pd.NA)
     plus_di = 100 * (plus_dm.rolling(period).mean() / atr_safe)
     minus_di = 100 * (minus_dm.rolling(period).mean() / atr_safe)
@@ -422,17 +419,71 @@ def detect_bandwidth_change(bandwidth: pd.Series, lookback: int = 5):
     else:
         return 'stable'
 
+def check_hammer_pattern(ohlcv_data, index: int = -1) -> bool:
+    """检查是否有锤子线形态（看涨反转）"""
+    if len(ohlcv_data) < abs(index) + 1:
+        return False
+    bar = ohlcv_data[index]
+    open_price = bar[1]
+    high = bar[2]
+    low = bar[3]
+    close = bar[4]
+    
+    # 实体大小
+    body = abs(close - open_price)
+    if body == 0:
+        return False
+    
+    # 下影线
+    lower_shadow = min(open_price, close) - low
+    # 上影线
+    upper_shadow = high - max(open_price, close)
+    
+    # 锤子线特征：下影线 >= 实体的N倍，且上影线很小
+    is_hammer = (lower_shadow >= body * HAMMER_SHADOW_RATIO and upper_shadow < body * 0.5)
+    return is_hammer
+
+def check_shooting_star_pattern(ohlcv_data, index: int = -1) -> bool:
+    """检查是否有流星线形态（看跌反转）"""
+    if len(ohlcv_data) < abs(index) + 1:
+        return False
+    bar = ohlcv_data[index]
+    open_price = bar[1]
+    high = bar[2]
+    low = bar[3]
+    close = bar[4]
+    
+    body = abs(close - open_price)
+    if body == 0:
+        return False
+    
+    lower_shadow = min(open_price, close) - low
+    upper_shadow = high - max(open_price, close)
+    
+    # 流星线特征：上影线 >= 实体的N倍，且下影线很小
+    is_star = (upper_shadow >= body * HAMMER_SHADOW_RATIO and lower_shadow < body * 0.5)
+    return is_star
+
+def calculate_risk_reward(entry_price: float, target_price: float, stop_price: float) -> float:
+    """计算盈亏比"""
+    if entry_price == 0 or stop_price == 0:
+        return 0.0
+    potential_profit = abs(target_price - entry_price)
+    potential_loss = abs(entry_price - stop_price)
+    if potential_loss == 0:
+        return 0.0
+    return potential_profit / potential_loss
+
 # ========== 主策略逻辑 ==========
 
 last_bar_ts: Dict[str, int] = {}
-symbol_state: Dict[str, Dict[str, Any]] = {}  # 记录每个交易对的状态
+symbol_state: Dict[str, Dict[str, Any]] = {}
 
 log.info('=' * 70)
-log.info(f'Start Bollinger Bands Strategy - {TIMEFRAME} timeframe')
+log.info(f'Start Enhanced Bollinger Bands Strategy - {TIMEFRAME} timeframe')
 log.info(f'布林带参数: 周期={BB_PERIOD}, 标准差={BB_STD}倍')
-log.info(f'趋势阈值: 上升>{SLOPE_UP_THRESH*100:.2f}%, 下降<{SLOPE_DOWN_THRESH*100:.2f}%')
-log.info(f'带宽阈值: 开口>{BANDWIDTH_EXPAND_THRESH*100:.0f}%, 收口<{BANDWIDTH_SQUEEZE_THRESH*100:.0f}%')
-log.info(f'下降趋势抢反弹: {"启用" if ENABLE_DOWNTREND_BOUNCE else "禁用"}')
+log.info(f'动态止损: ATR倍数={SL_ATR_MULTIPLIER}')
+log.info(f'震荡市确认: 盈亏比>={MIN_RISK_REWARD}, K线形态验证')
 log.info('=' * 70)
 
 if not DRY_RUN:
@@ -441,6 +492,7 @@ if not DRY_RUN:
         ensure_leverage(sym)
 else:
     log.warning('DRY_RUN 开启：跳过设置持仓模式与杠杆')
+
 for sym in SYMBOLS:
     symbol_state[sym] = {'trend': 'unknown', 'bandwidth_status': 'unknown'}
 
@@ -467,8 +519,6 @@ while True:
         
         winrate = (stats['wins'] / stats['trades'] * 100) if stats['trades'] > 0 else 0.0
         log.info(f'周期 {cycle_count}: 扫描 {len(SYMBOLS)} 个交易对, 间隔={SCAN_INTERVAL}s | USDT 可用={free:.2f} 总额={total:.2f} | 累计已实现盈亏={stats["realized_pnl"]:.2f} | 胜率={winrate:.1f}% ({stats["wins"]}/{stats["trades"]})')
-        if cycle_count % 10 == 0:
-            log.info(f"累计交易={stats['trades']} 胜率={stats['wins']/max(1,stats['trades'])*100:.1f}% 实现盈亏={stats['realized_pnl']:.2f}")
         
         for symbol in SYMBOLS:
             try:
@@ -481,20 +531,22 @@ while True:
                 highs = pd.Series([c[2] for c in ohlcv])
                 lows = pd.Series([c[3] for c in ohlcv])
                 
-                # 计算布林带
+                # 计算技术指标
                 upper, middle, lower, bandwidth = calculate_bollinger_bands(closes, BB_PERIOD, BB_STD)
+                atr = calc_atr(highs, lows, closes, ATR_PERIOD)
+                adx = calc_adx(highs, lows, closes, ADX_PERIOD)
                 
                 # 判断趋势和带宽状态
                 trend = detect_bb_trend(middle, BB_SLOPE_PERIOD)
                 bandwidth_status = detect_bandwidth_change(bandwidth, BB_SLOPE_PERIOD)
-                adx = calc_adx(highs, lows, closes, ADX_PERIOD)
                 
-                # 获取当前价格和布林带值
+                # 获取当前价格和指标值
                 price = float(closes.iloc[-1])
                 curr_upper = float(upper.iloc[-1])
                 curr_middle = float(middle.iloc[-1])
                 curr_lower = float(lower.iloc[-1])
                 curr_bandwidth = float(bandwidth.iloc[-1])
+                curr_atr = float(atr.iloc[-1])
                 prev_close = float(closes.iloc[-2]) if len(closes) >= 2 else price
                 adx_last = float(adx.iloc[-1])
                 
@@ -508,20 +560,17 @@ while True:
                     'middle': curr_middle,
                     'lower': curr_lower,
                     'bandwidth': curr_bandwidth,
+                    'atr': curr_atr,
                     'upper_run': upper_run,
                     'lower_run': (prev_state.get('lower_run', 0) + 1) if price <= curr_lower * (1 + PRICE_TOLERANCE) else 0,
-                    'adx': float(adx.iloc[-1])
+                    'adx': adx_last
                 }
                 
                 # 状态变化通知
-                if prev_state['trend'] != trend or prev_state['bandwidth_status'] != bandwidth_status:
-                    log.info(f'{symbol} 状态变化: 趋势={trend}, 带宽={bandwidth_status}, 价格={price:.6f}, 上轨={curr_upper:.6f}, 中轨={curr_middle:.6f}, 下轨={curr_lower:.6f}')
+                if prev_state.get('trend') != trend or prev_state.get('bandwidth_status') != bandwidth_status:
+                    log.info(f'{symbol} 状态变化: 趋势={trend}, 带宽={bandwidth_status}, 价格={price:.6f}, ATR={curr_atr:.6f}')
                 
-                # 获取当前持仓（多空）
-                pos = get_position(symbol)
-                size = float(pos['size'] or 0.0)
-                side = pos['side']
-                entry = float(pos['entry'] or 0.0)
+                # 获取当前持仓
                 both = get_positions_both(symbol)
                 long_size = float(both['long']['size'])
                 long_entry = float(both['long']['entry'])
@@ -532,7 +581,7 @@ while True:
                 cur_bar_ts = get_last_closed_bar_ts(ohlcv[-1])
                 acted_key = last_bar_ts.get(symbol)
                 
-                # ========== 止盈止损监控（多头） ==========
+                # ========== 动态止盈止损监控（多头） ==========
                 if long_size > 0 and long_entry > 0 and price > 0:
                     pnl_pct = (price - long_entry) / long_entry
                     try:
@@ -541,10 +590,13 @@ while True:
                         ct_val = 0.0
                     unreal = long_size * ct_val * (price - long_entry)
                     
-                    log.debug(f'持仓 {symbol} 多头 数量={long_size} 开仓价={long_entry:.6f} 现价={price:.6f} 浮动盈亏={unreal:.2f} ({pnl_pct*100:.2f}%)')
+                    # 动态止损价 = 开仓价 - ATR倍数
+                    dynamic_sl_price = long_entry - (SL_ATR_MULTIPLIER * curr_atr)
                     
-                    # 1. 止损检查（优先级最高）
-                    if pnl_pct <= -SL_PCT:
+                    log.debug(f'持仓 {symbol} 多头: 数量={long_size} 开仓={long_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct*100:.2f}%) 动态止损={dynamic_sl_price:.6f}')
+                    
+                    # 1. 动态止损检查（优先级最高）
+                    if price <= dynamic_sl_price:
                         close_price = price
                         realized = long_size * ct_val * (close_price - long_entry)
                         ok = close_position_market(symbol, 'long', long_size)
@@ -555,12 +607,12 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 多头触发止损已平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('多头触发止损', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            log.info(f'{symbol} 多头动态止损: ATR={curr_atr:.6f} 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('多头动态止损', f'{symbol} ATR止损 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
                     
-                    # 2. 固定止盈检查
+                    # 2. 固定止盈检查（兜底）
                     if pnl_pct >= TP_PCT:
                         close_price = price
                         realized = long_size * ct_val * (close_price - long_entry)
@@ -572,12 +624,12 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 多头触发止盈已平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('多头触发止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            log.info(f'{symbol} 多头固定止盈: {pnl_pct*100:.1f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('多头固定止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
                     
-                    # 3. 动态止盈：上轨追踪
+                    # 3. 动态止盈：布林带追踪
                     upper_run = symbol_state.get(symbol, {}).get('upper_run', 0)
                     if upper_run >= 3:
                         # 价格连续在上轨运行>=3根K，跌破中轨止盈
@@ -592,12 +644,12 @@ while True:
                                 else:
                                     stats['losses'] += 1
                                 stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 中轨追踪止盈: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                log.info(f'{symbol} 中轨追踪止盈: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                                 notify_event('中轨追踪止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                                 last_bar_ts[symbol] = cur_bar_ts
                                 continue
                     else:
-                        # 常规情况：触及上轨直接平仓
+                        # 常规情况：触及上轨平仓
                         if price >= curr_upper * (1 - PRICE_TOLERANCE):
                             close_price = price
                             realized = long_size * ct_val * (close_price - long_entry)
@@ -609,12 +661,12 @@ while True:
                                 else:
                                     stats['losses'] += 1
                                 stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 触及上轨平仓: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                log.info(f'{symbol} 触及上轨平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                                 notify_event('触及上轨平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                                 last_bar_ts[symbol] = cur_bar_ts
                                 continue
                 
-                # ========== 止盈止损监控（空头） ==========
+                # ========== 动态止盈止损监控（空头） ==========
                 if short_size > 0 and short_entry > 0 and price > 0:
                     pnl_pct_s = (short_entry - price) / short_entry
                     try:
@@ -622,10 +674,14 @@ while True:
                     except Exception:
                         ct_val = 0.0
                     unreal = short_size * ct_val * (short_entry - price)
-                    log.debug(f'持仓 {symbol} 空头 数量={short_size} 开仓价={short_entry:.6f} 现价={price:.6f} 浮动盈亏={unreal:.2f} ({pnl_pct_s*100:.2f}%)')
                     
-                    # 1. 止损（对空头：价格上行）
-                    if pnl_pct_s <= -SL_PCT:
+                    # 动态止损价 = 开仓价 + ATR倍数
+                    dynamic_sl_price = short_entry + (SL_ATR_MULTIPLIER * curr_atr)
+                    
+                    log.debug(f'持仓 {symbol} 空头: 数量={short_size} 开仓={short_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct_s*100:.2f}%) 动态止损={dynamic_sl_price:.6f}')
+                    
+                    # 1. 动态止损
+                    if price >= dynamic_sl_price:
                         close_price = price
                         realized = short_size * ct_val * (short_entry - close_price)
                         ok = close_position_market(symbol, 'short', short_size)
@@ -636,12 +692,12 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 空头触发止损已平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('空头触发止损', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            log.info(f'{symbol} 空头动态止损: ATR={curr_atr:.6f} 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('空头动态止损', f'{symbol} ATR止损 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
                     
-                    # 2. 止盈（对空头：价格下行）
+                    # 2. 固定止盈
                     if pnl_pct_s >= TP_PCT:
                         close_price = price
                         realized = short_size * ct_val * (short_entry - close_price)
@@ -653,15 +709,14 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 空头触发止盈已平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('空头触发止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            log.info(f'{symbol} 空头固定止盈: {pnl_pct_s*100:.1f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('空头固定止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
                     
-                    # 3. 动态止盈（空头对称逻辑）
+                    # 3. 动态止盈：布林带追踪
                     lower_run = symbol_state.get(symbol, {}).get('lower_run', 0)
                     if lower_run >= 3:
-                        # 上穿中轨则平空
                         if price >= curr_middle * (1 + PRICE_TOLERANCE):
                             close_price = price
                             realized = short_size * ct_val * (short_entry - close_price)
@@ -673,12 +728,11 @@ while True:
                                 else:
                                     stats['losses'] += 1
                                 stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 中轨追踪止盈(空): 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                log.info(f'{symbol} 中轨追踪止盈(空): 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                                 notify_event('中轨追踪止盈(空)', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                                 last_bar_ts[symbol] = cur_bar_ts
                                 continue
                     else:
-                        # 常规情况：触及下轨平空
                         if price <= curr_lower * (1 + PRICE_TOLERANCE):
                             close_price = price
                             realized = short_size * ct_val * (short_entry - close_price)
@@ -690,7 +744,7 @@ while True:
                                 else:
                                     stats['losses'] += 1
                                 stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 触及下轨平空: 已实现盈亏={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                log.info(f'{symbol} 触及下轨平空: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
                                 notify_event('触及下轨平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                                 last_bar_ts[symbol] = cur_bar_ts
                                 continue
@@ -700,7 +754,7 @@ while True:
                     log.debug(f'{symbol} 收口阶段，观望等方向')
                     continue
                 
-                # ========== 开口向下 + 持仓 -> 立即平仓 ==========
+                # ========== 开口向下 + 持多仓 -> 紧急平仓 ==========
                 if bandwidth_status == 'expanding' and trend == 'down' and long_size > 0:
                     try:
                         close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
@@ -716,39 +770,38 @@ while True:
                         else:
                             stats['losses'] += 1
                         stats['realized_pnl'] += realized
-                        log.info(f'{symbol} 开口向下紧急平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                        notify_event('开口向下紧急平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                        log.info(f'{symbol} 开口向下紧急平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                        notify_event('开口向下紧急平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                         last_bar_ts[symbol] = cur_bar_ts
                         continue
                 
                 # 避免同一K线重复操作
                 if acted_key == cur_bar_ts:
-                    log.debug(f'{symbol} 该K线已处理过 {cur_bar_ts}，跳过')
+                    log.debug(f'{symbol} 该K线已处理过，跳过')
                     continue
                 
-                # ADX 震荡过滤：仅影响开仓，不影响平仓
-                if trend == 'flat' and float(symbol_state[symbol].get('adx', 0)) < ADX_MIN_TREND:
-                    log.debug(f"{symbol} ADX过低({symbol_state[symbol].get('adx', 0):.1f})，过滤震荡期开仓")
-                    continue
+                # ADX 震荡过滤
+                if trend == 'flat' and adx_last < ADX_MIN_TREND:
+                    log.debug(f"{symbol} ADX过低({adx_last:.1f})，震荡期需额外确认")
                 
                 # ========== 中线向上策略 ==========
                 if trend == 'up':
-                    # 买入条件：价格回踩到中轨附近（多）
+                    # 回踩中轨开多
                     if price <= curr_middle * (1 + PRICE_TOLERANCE) and not (long_size > 0):
                         ok = place_market_order(symbol, 'buy', BUDGET_USDT)
                         if ok:
                             log.info(f'{symbol} 上升趋势回踩中轨开多')
                             last_bar_ts[symbol] = cur_bar_ts
                     
-                    # 开口向上 + 已有多头 -> 加仓（谨慎）
+                    # 开口向上 + 已有多头 -> 加仓
                     if bandwidth_status == 'expanding' and long_size > 0:
                         ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=0.3)
                         if ok:
                             log.info(f'{symbol} 开口向上加仓多头30%')
-                            notify_event('开口向上加仓(多)', f'{symbol} 追加30%仓位')
+                            notify_event('开口向上加仓', f'{symbol} 追加30%')
                             last_bar_ts[symbol] = cur_bar_ts
                     
-                    # 开口向上 + 持有空头 -> 紧急平空（对称）
+                    # 开口向上 + 持空仓 -> 紧急平空
                     if bandwidth_status == 'expanding' and short_size > 0:
                         close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
                         ct_val = float(load_market_info(symbol).get('ctVal') or 0)
@@ -767,7 +820,7 @@ while True:
                 
                 # ========== 中线向下策略 ==========
                 elif trend == 'down':
-                    # 如果有多头，中轨反弹即平多
+                    # 有多头，中轨反弹即平
                     if long_size > 0 and price >= curr_middle * (1 - PRICE_TOLERANCE):
                         try:
                             close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
@@ -783,59 +836,107 @@ while True:
                             else:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 下降趋势反弹中轨平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('下降趋势平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            log.info(f'{symbol} 下降趋势反弹中轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('下降趋势平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                     
                     # 抢反弹（高风险，默认禁用）
                     if ENABLE_DOWNTREND_BOUNCE and price <= curr_lower * (1 + PRICE_TOLERANCE) and not (long_size > 0):
                         ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=DOWNTREND_POSITION_RATIO)
                         if ok:
-                            log.info(f'{symbol} 下降趋势下轨抢反弹（{DOWNTREND_POSITION_RATIO*100:.0f}%仓位）')
-                            notify_event('抢反弹开仓', f'{symbol} 下轨抢反弹 {DOWNTREND_POSITION_RATIO*100:.0f}%仓')
+                            log.info(f'{symbol} 下降趋势下轨抢反弹（{DOWNTREND_POSITION_RATIO*100:.0f}%）')
+                            notify_event('抢反弹开仓', f'{symbol} 下轨 {DOWNTREND_POSITION_RATIO*100:.0f}%仓')
                             last_bar_ts[symbol] = cur_bar_ts
                 
-                # ========== 中线走平（震荡市）策略 ==========
+                # ========== 震荡市策略（多重确认） ==========
                 elif trend == 'flat':
-                    # 下轨买入（多）- 仅震荡市，确认从下轨上穿，减仓进场，避免逆势抄底失败
-                    is_flat_env = (trend == 'flat' and adx_last < ADX_MIN_TREND and bandwidth_status in ('stable', 'squeezing'))
-                    lower_touch_prev = (prev_close <= curr_lower * (1 + PRICE_TOLERANCE))
-                    lower_reject_now = (price > curr_lower * (1 + PRICE_TOLERANCE))
-                    if is_flat_env and lower_touch_prev and lower_reject_now and not (long_size > 0):
-                        ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=0.5)
-                        if ok:
-                            log.info(f'{symbol} 震荡市下轨确认回升开多(50%)')
-                            last_bar_ts[symbol] = cur_bar_ts
+                    is_flat_env = (adx_last < ADX_MIN_TREND and bandwidth_status in ('stable', 'squeezing'))
                     
-                    # 上轨卖出（多头平仓）
-                    if long_size > 0 and price >= curr_upper * (1 - PRICE_TOLERANCE):
-                        try:
-                            close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                            ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                        except Exception:
-                            close_price, ct_val = 0.0, 0.0
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                    
-                    # 震荡市上轨开空（对称）- 仅震荡市，确认从上轨跌回，减仓进场，避免逆势做空失败
-                    upper_touch_prev = (prev_close >= curr_upper * (1 - PRICE_TOLERANCE))
-                    upper_reject_now = (price < curr_upper * (1 - PRICE_TOLERANCE))
-                    if is_flat_env and upper_touch_prev and upper_reject_now and not (short_size > 0):
-                        ok = place_market_order(symbol, 'sell', BUDGET_USDT, position_ratio=0.5)
-                        if ok:
-                            log.info(f'{symbol} 震荡市上轨确认回落开空(50%)')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            
+                    if is_flat_env:
+                        # === 下轨开多：3重确认 ===
+                        lower_touch_prev = (prev_close <= curr_lower * (1 + PRICE_TOLERANCE))
+                        lower_reject_now = (price > curr_lower * (1 + PRICE_TOLERANCE))
+                        
+                        # K线形态确认：锤子线
+                        has_hammer = check_hammer_pattern(ohlcv, -1) or check_hammer_pattern(ohlcv, -2)
+                        
+                        # 盈亏比确认
+                        entry_est = price
+                        target_est = curr_upper
+                        stop_est = curr_lower - (SL_ATR_MULTIPLIER * curr_atr)
+                        risk_reward = calculate_risk_reward(entry_est, target_est, stop_est)
+                        
+                        if lower_touch_prev and lower_reject_now and has_hammer and risk_reward >= MIN_RISK_REWARD and not (long_size > 0):
+                            ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=0.5)
+                            if ok:
+                                log.info(f'{symbol} 震荡市下轨多重确认开多(50%) RR={risk_reward:.2f}:1')
+                                notify_event('震荡市确认开多', f'{symbol} 盈亏比={risk_reward:.2f}:1')
+                                last_bar_ts[symbol] = cur_bar_ts
+                        elif lower_touch_prev and lower_reject_now and not (long_size > 0):
+                            log.debug(f'{symbol} 下轨信号但未通过确认: hammer={has_hammer} RR={risk_reward:.2f}')
+                        
+                        # === 上轨平多 ===
+                        if long_size > 0 and price >= curr_upper * (1 - PRICE_TOLERANCE):
+                            try:
+                                close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
+                                ct_val = float(load_market_info(symbol).get('ctVal') or 0)
+                            except Exception:
+                                close_price, ct_val = 0.0, 0.0
+                            realized = long_size * ct_val * (close_price - long_entry)
+                            ok = close_position_market(symbol, 'long', long_size)
+                            if ok:
+                                stats['trades'] += 1
+                                if realized > 0:
+                                    stats['wins'] += 1
+                                else:
+                                    stats['losses'] += 1
+                                stats['realized_pnl'] += realized
+                                log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                                last_bar_ts[symbol] = cur_bar_ts
+                        
+                        # === 上轨开空：3重确认 ===
+                        upper_touch_prev = (prev_close >= curr_upper * (1 - PRICE_TOLERANCE))
+                        upper_reject_now = (price < curr_upper * (1 - PRICE_TOLERANCE))
+                        
+                        # K线形态：流星线
+                        has_star = check_shooting_star_pattern(ohlcv, -1) or check_shooting_star_pattern(ohlcv, -2)
+                        
+                        # 盈亏比确认（空头）
+                        entry_est_s = price
+                        target_est_s = curr_lower
+                        stop_est_s = curr_upper + (SL_ATR_MULTIPLIER * curr_atr)
+                        risk_reward_s = calculate_risk_reward(entry_est_s, target_est_s, stop_est_s)
+                        
+                        if upper_touch_prev and upper_reject_now and has_star and risk_reward_s >= MIN_RISK_REWARD and not (short_size > 0):
+                            ok = place_market_order(symbol, 'sell', BUDGET_USDT, position_ratio=0.5)
+                            if ok:
+                                log.info(f'{symbol} 震荡市上轨多重确认开空(50%) RR={risk_reward_s:.2f}:1')
+                                notify_event('震荡市确认开空', f'{symbol} 盈亏比={risk_reward_s:.2f}:1')
+                                last_bar_ts[symbol] = cur_bar_ts
+                        elif upper_touch_prev and upper_reject_now and not (short_size > 0):
+                            log.debug(f'{symbol} 上轨信号但未通过确认: star={has_star} RR={risk_reward_s:.2f}')
+                        
+                        # === 下轨平空 ===
+                        if short_size > 0 and price <= curr_lower * (1 + PRICE_TOLERANCE):
+                            try:
+                                close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
+                                ct_val = float(load_market_info(symbol).get('ctVal') or 0)
+                            except Exception:
+                                close_price, ct_val = 0.0, 0.0
+                            realized = short_size * ct_val * (short_entry - close_price)
+                            ok = close_position_market(symbol, 'short', short_size)
+                            if ok:
+                                stats['trades'] += 1
+                                if realized > 0:
+                                    stats['wins'] += 1
+                                else:
+                                    stats['losses'] += 1
+                                stats['realized_pnl'] += realized
+                                log.info(f'{symbol} 震荡市下轨平空: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                                notify_event('震荡市平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                                last_bar_ts[symbol] = cur_bar_ts
+                
             except Exception as e:
                 log.warning(f'{symbol} 处理异常: {e}')
                 continue
