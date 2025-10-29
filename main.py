@@ -352,6 +352,27 @@ def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_multiplie
     bandwidth = (upper - lower) / middle
     return upper, middle, lower, bandwidth
 
+def calc_adx(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
+    up_move = highs.diff()
+    down_move = lows.diff().abs()
+    plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move.fillna(0)
+    minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move.fillna(0)
+    tr_components = pd.concat([
+        (highs - lows).abs(),
+        (highs - closes.shift()).abs(),
+        (lows - closes.shift()).abs()
+    ], axis=1)
+    tr = tr_components.max(axis=1)
+    atr = tr.rolling(period).mean()
+    # 避免除以0
+    atr_safe = atr.replace(0, pd.NA)
+    plus_di = 100 * (plus_dm.rolling(period).mean() / atr_safe)
+    minus_di = 100 * (minus_dm.rolling(period).mean() / atr_safe)
+    denom = (plus_di + minus_di).replace(0, pd.NA)
+    dx = (abs(plus_di - minus_di) / denom) * 100
+    adx = dx.rolling(period).mean().fillna(0)
+    return adx
+
 def detect_bb_trend(middle: pd.Series, lookback: int = 5):
     """判断三线方向：up/down/flat"""
     if len(middle) < lookback + 1:
