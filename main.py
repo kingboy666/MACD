@@ -112,6 +112,10 @@ SL_ATR_MULTIPLIER = float(os.environ.get('SL_ATR_MULTIPLIER', '2.0').strip() or 
 SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '10').strip() or 10))
 USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
 MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.95').strip() or 0.95)
+# 峰值追踪止盈配置
+TRAIL_ENABLE = os.environ.get('TRAIL_ENABLE', 'true').strip().lower() in ('1', 'true', 'yes')
+TRAIL_DD_PCT = float(os.environ.get('TRAIL_DD_PCT', '0.05').strip() or 0.05)  # 从峰值回撤阈值（5%）
+TRAIL_REQUIRE_PROFIT = os.environ.get('TRAIL_REQUIRE_PROFIT', 'true').strip().lower() in ('1', 'true', 'yes')  # 仅在持仓为正收益时触发
 
 # 布林带参数
 BB_PERIOD = int(os.environ.get('BB_PERIOD', '18').strip() or 18)
@@ -494,7 +498,7 @@ else:
     log.warning('DRY_RUN 开启：跳过设置持仓模式与杠杆')
 
 for sym in SYMBOLS:
-    symbol_state[sym] = {'trend': 'unknown', 'bandwidth_status': 'unknown'}
+    symbol_state[sym] = {'trend': 'unknown', 'bandwidth_status': 'unknown', 'peak_long': None, 'peak_short': None}
 
 stats = {'trades': 0, 'wins': 0, 'losses': 0, 'realized_pnl': 0.0}
 cycle_count = 0
@@ -577,6 +581,13 @@ while True:
                 short_size = float(both['short']['size'])
                 short_entry = float(both['short']['entry'])
                 
+                # 峰值追踪：若无持仓则重置峰值/谷值
+                if TRAIL_ENABLE:
+                    if long_size <= 0:
+                        symbol_state[symbol]['peak_long'] = None
+                    if short_size <= 0:
+                        symbol_state[symbol]['peak_short'] = None
+                
                 # 确保只在K线收盘后操作一次
                 cur_bar_ts = get_last_closed_bar_ts(ohlcv[-1])
                 acted_key = last_bar_ts.get(symbol)
@@ -593,9 +604,35 @@ while True:
                     # 动态止损价 = 开仓价 - ATR倍数
                     dynamic_sl_price = long_entry - (SL_ATR_MULTIPLIER * curr_atr)
                     
-                    log.debug(f'持仓 {symbol} 多头: 数量={long_size} 开仓={long_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct*100:.2f}%) 动态止损={dynamic_sl_price:.6f}')
+                    # 峰值追踪：更新峰值并计算从峰值的回撤
+                    if TRAIL_ENABLE:
+                        prev_peak = symbol_state.get(symbol, {}).get('peak_long')
+                        new_peak = max(prev_peak or price, price)
+                        symbol_state[symbol]['peak_long'] = new_peak
+                        drawdown_from_peak = (new_peak - price) / new_peak if new_peak > 0 else 0.0
+                    else:
+                        drawdown_from_peak = 0.0
                     
-                    # 1. 动态止损检查（优先级最高）
+                    log.debug(f'持仓 {symbol} 多头: 数量={long_size} 开仓={long_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct*100:.2f}%) 动态止损={dynamic_sl_price:.6f} 峰值={symbol_state.get(symbol, {}).get("peak_long")} 回撤={drawdown_from_peak*100:.2f}%')
+                    
+                    # 1. 峰值追踪止盈（优先级最高，先于 ATR 动态止损）
+                    if TRAIL_ENABLE and pnl_pct > 0 and drawdown_from_peak >= TRAIL_DD_PCT if TRAIL_REQUIRE_PROFIT else TRAIL_ENABLE and drawdown_from_peak >= TRAIL_DD_PCT:
+                        close_price = price
+                        realized = long_size * ct_val * (close_price - long_entry)
+                        ok = close_position_market(symbol, 'long', long_size)
+                        if ok:
+                            stats['trades'] += 1
+                            if realized > 0:
+                                stats['wins'] += 1
+                            else:
+                                stats['losses'] += 1
+                            stats['realized_pnl'] += realized
+                            log.info(f'{symbol} 多头峰值回撤止盈: 回撤={drawdown_from_peak*100:.2f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('多头峰值回撤止盈', f'{symbol} 回撤={drawdown_from_peak*100:.2f}% 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
+                    
+                    # 2. 动态止损检查
                     if price <= dynamic_sl_price:
                         close_price = price
                         realized = long_size * ct_val * (close_price - long_entry)
@@ -678,9 +715,35 @@ while True:
                     # 动态止损价 = 开仓价 + ATR倍数
                     dynamic_sl_price = short_entry + (SL_ATR_MULTIPLIER * curr_atr)
                     
-                    log.debug(f'持仓 {symbol} 空头: 数量={short_size} 开仓={short_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct_s*100:.2f}%) 动态止损={dynamic_sl_price:.6f}')
+                    # 峰值追踪（空头用“谷值”）：更新空头的最佳价（最低价）并计算从谷值的回撤（反向上涨幅）
+                    if TRAIL_ENABLE:
+                        prev_peak_s = symbol_state.get(symbol, {}).get('peak_short')
+                        new_peak_s = min(prev_peak_s or price, price)
+                        symbol_state[symbol]['peak_short'] = new_peak_s
+                        drawup_from_valley = (price - new_peak_s) / new_peak_s if new_peak_s > 0 else 0.0
+                    else:
+                        drawup_from_valley = 0.0
                     
-                    # 1. 动态止损
+                    log.debug(f'持仓 {symbol} 空头: 数量={short_size} 开仓={short_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct_s*100:.2f}%) 动态止损={dynamic_sl_price:.6f} 谷值={symbol_state.get(symbol, {}).get("peak_short")} 回升={drawup_from_valley*100:.2f}%')
+                    
+                    # 1. 峰值追踪止盈（优先级最高，先于 ATR 动态止损；空头为谷值反弹）
+                    if TRAIL_ENABLE and pnl_pct_s > 0 and drawup_from_valley >= TRAIL_DD_PCT if TRAIL_REQUIRE_PROFIT else TRAIL_ENABLE and drawup_from_valley >= TRAIL_DD_PCT:
+                        close_price = price
+                        realized = short_size * ct_val * (short_entry - close_price)
+                        ok = close_position_market(symbol, 'short', short_size)
+                        if ok:
+                            stats['trades'] += 1
+                            if realized > 0:
+                                stats['wins'] += 1
+                            else:
+                                stats['losses'] += 1
+                            stats['realized_pnl'] += realized
+                            log.info(f'{symbol} 空头谷值回升止盈: 回升={drawup_from_valley*100:.2f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('空头谷值回升止盈', f'{symbol} 回升={drawup_from_valley*100:.2f}% 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
+                    
+                    # 2. 动态止损
                     if price >= dynamic_sl_price:
                         close_price = price
                         realized = short_size * ct_val * (short_entry - close_price)
