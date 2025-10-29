@@ -527,7 +527,6 @@ while True:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
                             last_bar_ts[symbol] = cur_bar_ts
                             stats['trades'] += 1
                             if realized > 0:
@@ -777,4 +776,3 @@ while True:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
