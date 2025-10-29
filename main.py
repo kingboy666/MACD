@@ -776,5 +776,3 @@ while True:
                                 stats['losses'] += 1
                             stats['realized_pnl'] += realized
                             log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
