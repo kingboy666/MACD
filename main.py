@@ -660,5 +660,32 @@ while True:
                             last_bar_ts[symbol] = cur_bar_ts
                             continue
                     
-                    # 上轨卖出
-                    
+                    # 上轨卖出（有持仓时触及上轨平仓）
+                    if size > 0 and side == 'long' and price >= curr_upper * (1 - PRICE_TOLERANCE):
+                        try:
+                            close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
+                            ct_val = float(load_market_info(symbol).get('ctVal') or 0)
+                        except Exception:
+                            close_price, ct_val = 0.0, 0.0
+                        realized = size * ct_val * (close_price - entry)
+                        ok = close_position_market(symbol, 'long', size)
+                        if ok:
+                            stats['trades'] += 1
+                            if realized > 0:
+                                stats['wins'] += 1
+                            else:
+                                stats['losses'] += 1
+                            stats['realized_pnl'] += realized
+                            log.info(f'{symbol} 震荡市上轨平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
+                            notify_event('震荡市平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
+                            last_bar_ts[symbol] = cur_bar_ts
+                            continue
+                
+            except Exception as e:
+                log.warning(f'{symbol} 处理异常: {e}')
+                continue
+        
+        time.sleep(SCAN_INTERVAL)
+    except Exception as e:
+        log.warning(f'主循环异常: {e}')
+        time.sleep(SCAN_INTERVAL)
