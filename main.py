@@ -595,7 +595,7 @@ while True:
                 
                 # ADX 震荡过滤：仅影响开仓，不影响平仓
                 if trend == 'flat' and float(symbol_state[symbol].get('adx', 0)) < ADX_MIN_TREND:
-                    log.debug(f'{symbol} ADX过低({symbol_state[symbol].get(''adx''):.1f})，过滤震荡期开仓')
+                    log.debug(f"{symbol} ADX过低({symbol_state[symbol].get('adx', 0):.1f})，过滤震荡期开仓")
                     continue
                 
                 # ========== 三线向上策略 ==========
