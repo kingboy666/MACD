@@ -1,27 +1,33 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Bollinger Bands Strategy (OKX USDT-SWAP, 15m) - Enhanced Version
-- Indicator: Bollinger Bands(18,2) + ADX + ATR
-- Multi-layer risk management with dynamic stop loss
-- Enhanced range-bound trading with multiple confirmations
+OKX Trading Bot - SuperTrend + QQE MOD + A-V2 Strategy
+三指标共振策略：SuperTrend(趋势) + QQE MOD(过滤) + A-V2(止损)
 """
 import os
 import time
 import math
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 import json
 import urllib.request
+from datetime import datetime
+from threading import Thread
 
 import ccxt
 import pandas as pd
+import numpy as np
+from flask import Flask, render_template_string, jsonify
 
+# ==================== 日志配置 ====================
 LOG_LEVEL = os.environ.get('LOG_LEVEL', 'INFO').strip().upper()
-logging.basicConfig(level=getattr(logging, LOG_LEVEL, logging.INFO), format='%(asctime)s [%(levelname)s] %(message)s')
-log = logging.getLogger('bollinger-enhanced')
+logging.basicConfig(
+    level=getattr(logging, LOG_LEVEL, logging.INFO),
+    format='%(asctime)s [%(levelname)s] %(message)s'
+)
+log = logging.getLogger('okx-three-indicators')
 
-# 通知配置
+# ==================== 通知配置 ====================
 NOTIFY_WEBHOOK = os.environ.get('NOTIFY_WEBHOOK', '').strip()
 NOTIFY_TYPE = os.environ.get('NOTIFY_TYPE', '').strip().lower()
 NOTIFY_MENTION_MOBILES = [m.strip() for m in os.environ.get('NOTIFY_MENTION_MOBILES', '').split(',') if m.strip()]
@@ -30,13 +36,16 @@ WXPUSHER_APP_TOKEN = os.environ.get('WXPUSHER_APP_TOKEN', '').strip()
 WXPUSHER_UID = os.environ.get('WXPUSHER_UID', '').strip()
 
 def _post_json(url: str, payload: dict):
-    req = urllib.request.Request(
-        url,
-        data=json.dumps(payload).encode('utf-8'),
-        headers={'Content-Type': 'application/json'},
-        method='POST'
-    )
-    urllib.request.urlopen(req, timeout=5).read()
+    try:
+        req = urllib.request.Request(
+            url,
+            data=json.dumps(payload).encode('utf-8'),
+            headers={'Content-Type': 'application/json'},
+            method='POST'
+        )
+        urllib.request.urlopen(req, timeout=5).read()
+    except Exception as e:
+        log.debug(f'POST failed: {e}')
 
 def notify_event(title: str, message: str, level: str = 'info'):
     if NOTIFY_TYPE in ('wecom', 'feishu', 'ding', 'generic') and not NOTIFY_WEBHOOK:
@@ -55,13 +64,13 @@ def notify_event(title: str, message: str, level: str = 'info'):
         elif NOTIFY_TYPE == 'feishu':
             payload = {
                 'msg_type': 'text',
-                'content': { 'text': f"【{title}】\n{message}" }
+                'content': {'text': f"【{title}】\n{message}"}
             }
             _post_json(NOTIFY_WEBHOOK, payload)
         elif NOTIFY_TYPE == 'ding':
             payload = {
                 'msgtype': 'text',
-                'text': { 'content': f"【{title}】\n{message}" }
+                'text': {'content': f"【{title}】\n{message}"}
             }
             _post_json(NOTIFY_WEBHOOK, payload)
         elif NOTIFY_TYPE == 'pushplus':
@@ -94,71 +103,51 @@ def notify_event(title: str, message: str, level: str = 'info'):
     except Exception as e:
         log.warning(f'notify_event failed: {e}')
 
+# ==================== OKX配置 ====================
 API_KEY = os.environ.get('OKX_API_KEY', '').strip()
 API_SECRET = os.environ.get('OKX_SECRET_KEY', '').strip()
 API_PASS = os.environ.get('OKX_PASSPHRASE', '').strip()
 DRY_RUN = os.environ.get('DRY_RUN', 'false').strip().lower() in ('1', 'true', 'yes')
+
 if not API_KEY or not API_SECRET or not API_PASS:
     if not DRY_RUN:
-        raise SystemExit('Missing OKX credentials: set OKX_API_KEY, OKX_SECRET_KEY, OKX_PASSPHRASE')
+        raise SystemExit('Missing OKX credentials')
     else:
-        log.warning('Running in DRY_RUN mode without OKX credentials; no orders will be placed.')
+        log.warning('Running in DRY_RUN mode')
 
-BUDGET_USDT = float(os.environ.get('BUDGET_USDT', '5').strip() or 5)
-DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '20').strip() or 20))
-# 动态止损使用ATR倍数，固定止盈作为兜底
-TP_PCT = float(os.environ.get('TP_PCT', '0.035').strip() or 0.035)  # 3.5% 兜底止盈
-SL_ATR_MULTIPLIER = float(os.environ.get('SL_ATR_MULTIPLIER', '2.0').strip() or 2.0)  # ATR止损倍数
-SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '10').strip() or 10))
+# ==================== 交易配置 ====================
+BUDGET_USDT = float(os.environ.get('BUDGET_USDT', '10').strip() or 10)
+DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '5').strip() or 5))
+TIMEFRAME = os.environ.get('TIMEFRAME', '4h').strip()
+SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '300').strip() or 300))
 USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
 MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.95').strip() or 0.95)
-# 峰值追踪止盈配置
-TRAIL_ENABLE = os.environ.get('TRAIL_ENABLE', 'true').strip().lower() in ('1', 'true', 'yes')
-TRAIL_DD_PCT = float(os.environ.get('TRAIL_DD_PCT', '0.05').strip() or 0.05)  # 从峰值回撤阈值（5%）
-TRAIL_REQUIRE_PROFIT = os.environ.get('TRAIL_REQUIRE_PROFIT', 'true').strip().lower() in ('1', 'true', 'yes')  # 仅在持仓为正收益时触发
 
-# 布林带参数
-BB_PERIOD = int(os.environ.get('BB_PERIOD', '18').strip() or 18)
-BB_STD = float(os.environ.get('BB_STD', '2.0').strip() or 2.0)
-BB_SLOPE_PERIOD = int(os.environ.get('BB_SLOPE_PERIOD', '5').strip() or 5)
-# ADX 过滤参数
-ADX_PERIOD = int(os.environ.get('ADX_PERIOD', '14').strip() or 14)
-ADX_MIN_TREND = float(os.environ.get('ADX_MIN_TREND', '20').strip() or 20)
-# ATR 参数
-ATR_PERIOD = int(os.environ.get('ATR_PERIOD', '14').strip() or 14)
+# ==================== 风险管理 ====================
+RISK_PER_TRADE = float(os.environ.get('RISK_PER_TRADE', '0.02').strip() or 0.02)
+RISK_REWARD_RATIO = float(os.environ.get('RISK_REWARD_RATIO', '2.0').strip() or 2.0)
+MAX_POSITION_SIZE = float(os.environ.get('MAX_POSITION_SIZE', '0.1').strip() or 0.1)
 
-# 趋势判断阈值
-SLOPE_UP_THRESH = float(os.environ.get('SLOPE_UP_THRESH', '0.0015').strip() or 0.0015)
-SLOPE_DOWN_THRESH = float(os.environ.get('SLOPE_DOWN_THRESH', '-0.0015').strip() or -0.0015)
-SLOPE_FLAT_RANGE = float(os.environ.get('SLOPE_FLAT_RANGE', '0.0008').strip() or 0.0008)
+# ==================== 指标参数 ====================
+# SuperTrend
+SUPERTREND_PERIOD = int(os.environ.get('SUPERTREND_PERIOD', '10').strip() or 10)
+SUPERTREND_MULTIPLIER = float(os.environ.get('SUPERTREND_MULTIPLIER', '3.0').strip() or 3.0)
 
-# 带宽变化阈值
-BANDWIDTH_EXPAND_THRESH = float(os.environ.get('BANDWIDTH_EXPAND_THRESH', '0.12').strip() or 0.12)
-BANDWIDTH_SQUEEZE_THRESH = float(os.environ.get('BANDWIDTH_SQUEEZE_THRESH', '-0.12').strip() or -0.12)
+# QQE MOD
+QQE_RSI_PERIOD = int(os.environ.get('QQE_RSI_PERIOD', '14').strip() or 14)
+QQE_SF = int(os.environ.get('QQE_SF', '5').strip() or 5)
 
-# 价格位置容差
-PRICE_TOLERANCE = float(os.environ.get('PRICE_TOLERANCE', '0.002').strip() or 0.002)
+# A-V2
+AV2_PERIOD = int(os.environ.get('AV2_PERIOD', '10').strip() or 10)
+AV2_ATR_MULTIPLIER = float(os.environ.get('AV2_ATR_MULTIPLIER', '2.0').strip() or 2.0)
 
-# 震荡市增强确认参数
-MIN_RISK_REWARD = float(os.environ.get('MIN_RISK_REWARD', '2.0').strip() or 2.0)  # 最小盈亏比
-HAMMER_SHADOW_RATIO = float(os.environ.get('HAMMER_SHADOW_RATIO', '2.0').strip() or 2.0)  # 锤子线影线/实体比
-
-# 下降趋势抢反弹开关
-ENABLE_DOWNTREND_BOUNCE = os.environ.get('ENABLE_DOWNTREND_BOUNCE', 'false').strip().lower() in ('1', 'true', 'yes')
-DOWNTREND_POSITION_RATIO = float(os.environ.get('DOWNTREND_POSITION_RATIO', '0.3').strip() or 0.3)
-
-TIMEFRAME = '15m'
+# ==================== 交易对配置 ====================
 SYMBOLS = [
-    'FIL/USDT:USDT', 'ZRO/USDT:USDT', 'WIF/USDT:USDT', 'WLD/USDT:USDT',
-    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 'XRP/USDT:USDT',
-    'ARB/USDT:USDT'
+    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 
+    'XRP/USDT:USDT', 'ARB/USDT:USDT'
 ]
 
 SYMBOL_LEVERAGE: Dict[str, int] = {
-    'FIL/USDT:USDT': 50,
-    'ZRO/USDT:USDT': 20,
-    'WIF/USDT:USDT': 50,
-    'WLD/USDT:USDT': 50,
     'BTC/USDT:USDT': 100,
     'ETH/USDT:USDT': 100,
     'SOL/USDT:USDT': 50,
@@ -166,6 +155,7 @@ SYMBOL_LEVERAGE: Dict[str, int] = {
     'ARB/USDT:USDT': 50,
 }
 
+# ==================== 交易所初始化 ====================
 exchange = ccxt.okx({
     'apiKey': API_KEY,
     'secret': API_SECRET,
@@ -183,7 +173,7 @@ def ensure_position_mode():
     try:
         mode = 'long_short_mode' if POS_MODE == 'hedge' else 'net_mode'
         exchange.privatePostAccountSetPositionMode({'posMode': mode})
-        log.info(f'已设置持仓模式 -> {"双向对冲" if POS_MODE == "hedge" else "单向净持仓"}')
+        log.info(f'持仓模式设置 -> {"双向对冲" if POS_MODE == "hedge" else "单向净持仓"}')
     except Exception as e:
         log.warning(f'设置持仓模式失败: {e}')
 
@@ -206,7 +196,6 @@ def load_market_info(symbol: str) -> Dict[str, Any]:
         'lotSz': float(data.get('lotSz', 0) or 0),
         'minSz': float(data.get('minSz', 0) or 0),
         'tickSz': float(data.get('tickSz', 0) or 0),
-        'pxTick': float(data.get('tickSz', 0) or 0),
     }
     markets_info[symbol] = info
     return info
@@ -216,26 +205,12 @@ def ensure_leverage(symbol: str):
     inst_id = symbol_to_inst_id(symbol)
     try:
         exchange.privatePostAccountSetLeverage({'instId': inst_id, 'mgnMode': 'cross', 'lever': str(lev)})
-        log.info(f'已设置杠杆 {symbol} -> {lev}倍')
+        log.info(f'杠杆设置 {symbol} -> {lev}x')
     except Exception as e:
         log.warning(f'设置杠杆失败 {symbol}: {e}')
 
-def get_position(symbol: str) -> Dict[str, Any]:
-    inst_id = symbol_to_inst_id(symbol)
-    try:
-        resp = exchange.privateGetAccountPositions({'instType': 'SWAP', 'instId': inst_id})
-        for p in resp.get('data', []):
-            if p.get('instId') == inst_id and float(p.get('pos', 0) or 0) != 0:
-                size = abs(float(p.get('pos', 0) or 0))
-                side = 'long' if p.get('posSide', 'net') in ('long', 'net') and float(p.get('pos', 0)) > 0 else 'short'
-                entry = float(p.get('avgPx') or p.get('lastAvgPrice') or p.get('avgPrice') or 0)
-                return {'size': size, 'side': side, 'entry': entry}
-    except Exception as e:
-        log.warning(f'get_position failed: {e}')
-    return {'size': 0.0, 'side': None, 'entry': 0.0}
-
+# ==================== 持仓管理 ====================
 def get_positions_both(symbol: str) -> Dict[str, Dict[str, float]]:
-    """返回该合约的多空独立持仓信息"""
     res = {'long': {'size': 0.0, 'entry': 0.0}, 'short': {'size': 0.0, 'entry': 0.0}}
     inst_id = symbol_to_inst_id(symbol)
     try:
@@ -256,19 +231,33 @@ def get_positions_both(symbol: str) -> Dict[str, Dict[str, float]]:
         log.debug(f'get_positions_both failed {symbol}: {e}')
     return res
 
+def get_balance():
+    try:
+        balance = exchange.fetch_balance()
+        usdt = balance.get('USDT', {})
+        free = float(usdt.get('free') or usdt.get('available') or 0)
+        used = float(usdt.get('used') or 0)
+        total = float(usdt.get('total') or (free + used))
+        return {'free': free, 'used': used, 'total': total}
+    except Exception as e:
+        log.warning(f'获取余额失败: {e}')
+        return {'free': 0.0, 'used': 0.0, 'total': 0.0}
+
+# ==================== 下单逻辑 ====================
 def place_market_order(symbol: str, side: str, budget_usdt: float, position_ratio: float = 1.0) -> bool:
-    """市价下单"""
     if DRY_RUN:
         log.info(f'[DRY_RUN] 模拟开仓 {symbol} {side} 仓位比例={position_ratio*100:.0f}%')
         return True
+    
     try:
-        balance = exchange.fetch_balance()
-        avail = float(balance.get('USDT', {}).get('free') or balance.get('USDT', {}).get('available') or 0)
+        bal = get_balance()
+        avail = bal['free']
     except Exception:
         avail = 0.0
+    
     equity_usdt = max(0.0, avail) * position_ratio
     if equity_usdt <= 0:
-        log.warning('No available USDT balance to open position')
+        log.warning('余额不足')
         return False
 
     info = load_market_info(symbol)
@@ -277,9 +266,8 @@ def place_market_order(symbol: str, side: str, budget_usdt: float, position_rati
     price = float(ticker.get('last') or ticker.get('close') or 0)
     if price <= 0:
         raise Exception('invalid price')
-    ct_val = float(info.get('ctVal') or 0)
-    if ct_val <= 0:
-        ct_val = 0.01
+    
+    ct_val = float(info.get('ctVal') or 0.01)
 
     if USE_BALANCE_AS_MARGIN:
         leverage = SYMBOL_LEVERAGE.get(symbol, DEFAULT_LEVERAGE)
@@ -293,7 +281,7 @@ def place_market_order(symbol: str, side: str, budget_usdt: float, position_rati
     if lot > 0:
         contracts = math.floor(contracts / lot) * lot
     if contracts <= 0 or (minsz > 0 and contracts < minsz):
-        log.warning(f'计算得到的合约张数过小: {contracts}, 最小下单={minsz}, 步长={lot}')
+        log.warning(f'合约张数过小: {contracts}')
         return False
     
     side_okx = 'buy' if side == 'buy' else 'sell'
@@ -309,15 +297,14 @@ def place_market_order(symbol: str, side: str, budget_usdt: float, position_rati
     
     try:
         exchange.privatePostTradeOrder(params)
-        log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}, 预算={equity_usdt:.2f}USDT (仓位比例={position_ratio*100:.0f}%)')
-        notify_event('开仓成功', f'{symbol} {side} 数量={contracts} 预算={equity_usdt:.2f}U 比例={position_ratio*100:.0f}%')
+        log.info(f'下单成功 {symbol}: 方向={side} 数量={contracts}')
+        notify_event('开仓成功', f'{symbol} {side} 数量={contracts}')
         return True
     except Exception as e:
         log.warning(f'下单失败 {symbol}: {e}')
         return False
 
 def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
-    """市价平仓"""
     info = load_market_info(symbol)
     inst_id = info['instId']
     side_okx = 'sell' if side_to_close == 'long' else 'buy'
@@ -345,666 +332,863 @@ def close_position_market(symbol: str, side_to_close: str, qty: float) -> bool:
     if DRY_RUN:
         log.info(f'[DRY_RUN] 模拟平仓 {symbol} 方向={side_to_close} 数量={sz}')
         return True
+    
     try:
         exchange.privatePostTradeOrder(params)
-        log.info(f'已市价平仓 {symbol} 方向={side_to_close} 数量={sz}')
-        notify_event('已市价平仓', f'{symbol} 方向={side_to_close} 数量={sz}')
+        log.info(f'平仓成功 {symbol} 方向={side_to_close} 数量={sz}')
+        notify_event('平仓成功', f'{symbol} {side_to_close} 数量={sz}')
         return True
     except Exception as e:
         log.warning(f'平仓失败 {symbol}: {e}')
         return False
 
-# ========== 技术指标计算 ==========
-
-def calculate_bollinger_bands(closes: pd.Series, period: int = 20, std_multiplier: float = 2.0):
-    """计算布林带"""
-    middle = closes.rolling(window=period).mean()
-    std = closes.rolling(window=period).std()
-    upper = middle + std_multiplier * std
-    lower = middle - std_multiplier * std
-    bandwidth = (upper - lower) / middle
-    return upper, middle, lower, bandwidth
-
-def calc_atr(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
-    """计算ATR（平均真实波幅）"""
-    tr_components = pd.concat([
-        (highs - lows).abs(),
-        (highs - closes.shift()).abs(),
-        (lows - closes.shift()).abs()
-    ], axis=1)
-    tr = tr_components.max(axis=1)
-    atr = tr.rolling(period).mean()
-    return atr
-
-def calc_adx(highs: pd.Series, lows: pd.Series, closes: pd.Series, period: int = 14) -> pd.Series:
-    """计算ADX（平均趋向指标）"""
-    up_move = highs.diff()
-    down_move = lows.diff().abs()
-    plus_dm = ((up_move > down_move) & (up_move > 0)) * up_move.fillna(0)
-    minus_dm = ((down_move > up_move) & (down_move > 0)) * down_move.fillna(0)
-    tr_components = pd.concat([
-        (highs - lows).abs(),
-        (highs - closes.shift()).abs(),
-        (lows - closes.shift()).abs()
-    ], axis=1)
-    tr = tr_components.max(axis=1)
-    atr = tr.rolling(period).mean()
-    atr_safe = atr.replace(0, pd.NA)
-    plus_di = 100 * (plus_dm.rolling(period).mean() / atr_safe)
-    minus_di = 100 * (minus_dm.rolling(period).mean() / atr_safe)
-    denom = (plus_di + minus_di).replace(0, pd.NA)
-    dx = (abs(plus_di - minus_di) / denom) * 100
-    adx = dx.rolling(period).mean().fillna(0)
-    return adx
-
-def detect_bb_trend(middle: pd.Series, lookback: int = 5):
-    """判断中线方向：up/down/flat"""
-    if len(middle) < lookback + 1:
-        return 'flat'
-    slope = (middle.iloc[-1] - middle.iloc[-lookback-1]) / middle.iloc[-lookback-1]
-    if slope > SLOPE_UP_THRESH:
-        return 'up'
-    elif slope < SLOPE_DOWN_THRESH:
-        return 'down'
-    elif abs(slope) <= SLOPE_FLAT_RANGE:
-        return 'flat'
-    else:
-        return 'flat'
-
-def detect_bandwidth_change(bandwidth: pd.Series, lookback: int = 5):
-    """判断开口/收口：expanding/squeezing/stable"""
-    if len(bandwidth) < lookback + 1:
-        return 'stable'
-    change = (bandwidth.iloc[-1] - bandwidth.iloc[-lookback-1]) / bandwidth.iloc[-lookback-1]
-    if change > BANDWIDTH_EXPAND_THRESH:
-        return 'expanding'
-    elif change < BANDWIDTH_SQUEEZE_THRESH:
-        return 'squeezing'
-    else:
-        return 'stable'
-
-def check_hammer_pattern(ohlcv_data, index: int = -1) -> bool:
-    """检查是否有锤子线形态（看涨反转）"""
-    if len(ohlcv_data) < abs(index) + 1:
-        return False
-    bar = ohlcv_data[index]
-    open_price = bar[1]
-    high = bar[2]
-    low = bar[3]
-    close = bar[4]
+# ==================== 技术指标计算 ====================
+class Indicators:
+    @staticmethod
+    def calculate_supertrend(df: pd.DataFrame, period: int = 10, multiplier: float = 3.0):
+        """计算SuperTrend指标"""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        
+        hl_avg = (high + low) / 2
+        upper_band = hl_avg + (multiplier * atr)
+        lower_band = hl_avg - (multiplier * atr)
+        
+        supertrend = pd.Series(index=df.index, dtype=float)
+        direction = pd.Series(index=df.index, dtype=int)
+        
+        for i in range(period, len(df)):
+            if i == period:
+                supertrend.iloc[i] = lower_band.iloc[i]
+                direction.iloc[i] = 1
+            else:
+                if close.iloc[i] > supertrend.iloc[i-1]:
+                    supertrend.iloc[i] = lower_band.iloc[i]
+                    direction.iloc[i] = 1
+                elif close.iloc[i] < supertrend.iloc[i-1]:
+                    supertrend.iloc[i] = upper_band.iloc[i]
+                    direction.iloc[i] = -1
+                else:
+                    supertrend.iloc[i] = supertrend.iloc[i-1]
+                    direction.iloc[i] = direction.iloc[i-1]
+                    
+                    if direction.iloc[i] == 1 and lower_band.iloc[i] > supertrend.iloc[i-1]:
+                        supertrend.iloc[i] = lower_band.iloc[i]
+                    elif direction.iloc[i] == -1 and upper_band.iloc[i] < supertrend.iloc[i-1]:
+                        supertrend.iloc[i] = upper_band.iloc[i]
+        
+        return supertrend, direction
     
-    # 实体大小
-    body = abs(close - open_price)
-    if body == 0:
-        return False
+    @staticmethod
+    def calculate_qqe_mod(df: pd.DataFrame, rsi_period: int = 14, sf: int = 5):
+        """计算QQE MOD指标"""
+        close = df['close']
+        
+        delta = close.diff()
+        gain = (delta.where(delta > 0, 0)).rolling(window=rsi_period).mean()
+        loss = (-delta.where(delta < 0, 0)).rolling(window=rsi_period).mean()
+        rs = gain / loss
+        rsi = 100 - (100 / (1 + rs))
+        
+        rsi_ma = rsi.ewm(span=sf, adjust=False).mean()
+        atr_rsi = abs(rsi - rsi.shift()).rolling(window=rsi_period).mean()
+        dar = atr_rsi.ewm(span=sf, adjust=False).mean() * 4.236
+        
+        long_band = rsi_ma - dar
+        short_band = rsi_ma + dar
+        
+        trend = pd.Series(index=df.index, dtype=float)
+        for i in range(rsi_period, len(df)):
+            if rsi.iloc[i] > short_band.iloc[i]:
+                trend.iloc[i] = 1
+            elif rsi.iloc[i] < long_band.iloc[i]:
+                trend.iloc[i] = -1
+            else:
+                trend.iloc[i] = 0
+        
+        return rsi, trend
     
-    # 下影线
-    lower_shadow = min(open_price, close) - low
-    # 上影线
-    upper_shadow = high - max(open_price, close)
+    @staticmethod
+    def calculate_a_v2(df: pd.DataFrame, period: int = 10, atr_multiplier: float = 2.0):
+        """计算A-V2指标"""
+        high = df['high']
+        low = df['low']
+        close = df['close']
+        
+        ema = close.ewm(span=period, adjust=False).mean()
+        
+        tr1 = high - low
+        tr2 = abs(high - close.shift())
+        tr3 = abs(low - close.shift())
+        tr = pd.concat([tr1, tr2, tr3], axis=1).max(axis=1)
+        atr = tr.rolling(window=period).mean()
+        
+        stop_loss_long = ema - (atr_multiplier * atr)
+        stop_loss_short = ema + (atr_multiplier * atr)
+        
+        trend = pd.Series(index=df.index, dtype=int)
+        trend[close > ema] = 1
+        trend[close < ema] = -1
+        
+        return ema, stop_loss_long, stop_loss_short, trend, atr
+
+# ==================== 策略逻辑 ====================
+class TradingStrategy:
+    def __init__(self):
+        self.symbol_state: Dict[str, Dict[str, Any]] = {}
+        self.last_bar_ts: Dict[str, int] = {}
+        self.stats = {
+            'trades': 0,
+            'wins': 0,
+            'losses': 0,
+            'realized_pnl': 0.0,
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        }
+        
+        for sym in SYMBOLS:
+            self.symbol_state[sym] = {
+                'st_direction': 0,
+                'qqe_trend': 0,
+                'av2_trend': 0,
+                'price': 0.0,
+                'stop_loss_long': 0.0,
+                'stop_loss_short': 0.0,
+                'atr': 0.0,
+                'signal': 'HOLD',
+                'last_update': ''
+            }
     
-    # 锤子线特征：下影线 >= 实体的N倍，且上影线很小
-    is_hammer = (lower_shadow >= body * HAMMER_SHADOW_RATIO and upper_shadow < body * 0.5)
-    return is_hammer
-
-def check_shooting_star_pattern(ohlcv_data, index: int = -1) -> bool:
-    """检查是否有流星线形态（看跌反转）"""
-    if len(ohlcv_data) < abs(index) + 1:
-        return False
-    bar = ohlcv_data[index]
-    open_price = bar[1]
-    high = bar[2]
-    low = bar[3]
-    close = bar[4]
+    def get_historical_data(self, symbol: str, limit: int = 100) -> Optional[pd.DataFrame]:
+        try:
+            ohlcv = exchange.fetch_ohlcv(symbol, TIMEFRAME, limit=limit)
+            if not ohlcv or len(ohlcv) < 50:
+                return None
+            
+            df = pd.DataFrame(
+                ohlcv,
+                columns=['timestamp', 'open', 'high', 'low', 'close', 'volume']
+            )
+            df['timestamp'] = pd.to_datetime(df['timestamp'], unit='ms')
+            return df
+        except Exception as e:
+            log.warning(f'获取数据失败 {symbol}: {e}')
+            return None
     
-    body = abs(close - open_price)
-    if body == 0:
-        return False
+    def calculate_all_indicators(self, df: pd.DataFrame) -> Optional[pd.DataFrame]:
+        try:
+            st, st_direction = Indicators.calculate_supertrend(
+                df, SUPERTREND_PERIOD, SUPERTREND_MULTIPLIER
+            )
+            df['supertrend'] = st
+            df['st_direction'] = st_direction
+            
+            rsi, qqe_trend = Indicators.calculate_qqe_mod(
+                df, QQE_RSI_PERIOD, QQE_SF
+            )
+            df['rsi'] = rsi
+            df['qqe_trend'] = qqe_trend
+            
+            ema, sl_long, sl_short, av2_trend, atr = Indicators.calculate_a_v2(
+                df, AV2_PERIOD, AV2_ATR_MULTIPLIER
+            )
+            df['ema'] = ema
+            df['stop_loss_long'] = sl_long
+            df['stop_loss_short'] = sl_short
+            df['av2_trend'] = av2_trend
+            df['atr'] = atr
+            
+            return df
+        except Exception as e:
+            log.warning(f'指标计算失败: {e}')
+            return None
     
-    lower_shadow = min(open_price, close) - low
-    upper_shadow = high - max(open_price, close)
-    
-    # 流星线特征：上影线 >= 实体的N倍，且下影线很小
-    is_star = (upper_shadow >= body * HAMMER_SHADOW_RATIO and lower_shadow < body * 0.5)
-    return is_star
-
-def calculate_risk_reward(entry_price: float, target_price: float, stop_price: float) -> float:
-    """计算盈亏比"""
-    if entry_price == 0 or stop_price == 0:
-        return 0.0
-    potential_profit = abs(target_price - entry_price)
-    potential_loss = abs(entry_price - stop_price)
-    if potential_loss == 0:
-        return 0.0
-    return potential_profit / potential_loss
-
-# ========== 主策略逻辑 ==========
-
-last_bar_ts: Dict[str, int] = {}
-symbol_state: Dict[str, Dict[str, Any]] = {}
-
-log.info('=' * 70)
-log.info(f'Start Enhanced Bollinger Bands Strategy - {TIMEFRAME} timeframe')
-log.info(f'布林带参数: 周期={BB_PERIOD}, 标准差={BB_STD}倍')
-log.info(f'动态止损: ATR倍数={SL_ATR_MULTIPLIER}')
-log.info(f'震荡市确认: 盈亏比>={MIN_RISK_REWARD}, K线形态验证')
-log.info('=' * 70)
-
-if not DRY_RUN:
-    ensure_position_mode()
-    for sym in SYMBOLS:
-        ensure_leverage(sym)
-else:
-    log.warning('DRY_RUN 开启：跳过设置持仓模式与杠杆')
-
-for sym in SYMBOLS:
-    symbol_state[sym] = {'trend': 'unknown', 'bandwidth_status': 'unknown', 'peak_long': None, 'peak_short': None}
-
-stats = {'trades': 0, 'wins': 0, 'losses': 0, 'realized_pnl': 0.0}
-cycle_count = 0
-
-def get_last_closed_bar_ts(ohlcv_row):
-    return int(ohlcv_row[0])
-
-while True:
-    try:
-        cycle_count += 1
-        if DRY_RUN:
-            free, total = 0.0, 0.0
+    def generate_signal(self, df: pd.DataFrame, symbol: str) -> str:
+        if df is None or len(df) < 2:
+            return 'HOLD'
+        
+        current = df.iloc[-1]
+        previous = df.iloc[-2]
+        
+        # 做多条件：三指标共振
+        long_conditions = [
+            current['st_direction'] == 1,
+            current['qqe_trend'] == 1,
+            current['av2_trend'] == 1,
+            previous['st_direction'] != 1
+        ]
+        
+        # 做空条件：三指标共振
+        short_conditions = [
+            current['st_direction'] == -1,
+            current['qqe_trend'] == -1,
+            current['av2_trend'] == -1,
+            previous['st_direction'] != -1
+        ]
+        
+        # 更新状态
+        self.symbol_state[symbol].update({
+            'st_direction': int(current['st_direction']),
+            'qqe_trend': int(current['qqe_trend']),
+            'av2_trend': int(current['av2_trend']),
+            'price': float(current['close']),
+            'stop_loss_long': float(current['stop_loss_long']),
+            'stop_loss_short': float(current['stop_loss_short']),
+            'atr': float(current['atr']),
+            'last_update': datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+        })
+        
+        if all(long_conditions):
+            self.symbol_state[symbol]['signal'] = 'BUY'
+            return 'BUY'
+        elif all(short_conditions):
+            self.symbol_state[symbol]['signal'] = 'SELL'
+            return 'SELL'
         else:
-            try:
-                balance = exchange.fetch_balance()
-                usdt = balance.get('USDT', {})
-                free = float(usdt.get('free') or usdt.get('available') or 0)
-                used = float(usdt.get('used') or 0)
-                total = float(usdt.get('total') or (free + used))
-            except Exception:
-                free, total = 0.0, 0.0
+            self.symbol_state[symbol]['signal'] = 'HOLD'
+            return 'HOLD'
+    
+    def check_exit_conditions(self, symbol: str, df: pd.DataFrame) -> bool:
+        both = get_positions_both(symbol)
+        long_size = both['long']['size']
+        long_entry = both['long']['entry']
+        short_size = both['short']['size']
+        short_entry = both['short']['entry']
         
-        winrate = (stats['wins'] / stats['trades'] * 100) if stats['trades'] > 0 else 0.0
-        log.info(f'周期 {cycle_count}: 扫描 {len(SYMBOLS)} 个交易对, 间隔={SCAN_INTERVAL}s | USDT 可用={free:.2f} 总额={total:.2f} | 累计已实现盈亏={stats["realized_pnl"]:.2f} | 胜率={winrate:.1f}% ({stats["wins"]}/{stats["trades"]})')
+        if long_size <= 0 and short_size <= 0:
+            return False
         
-        for symbol in SYMBOLS:
+        current = df.iloc[-1]
+        price = float(current['close'])
+        
+        try:
+            ct_val = float(load_market_info(symbol).get('ctVal') or 0.01)
+        except:
+            ct_val = 0.01
+        
+        # 多头出场
+        if long_size > 0 and long_entry > 0:
+            stop_loss = float(current['stop_loss_long'])
+            pnl_pct = (price - long_entry) / long_entry
+            
+            # 止损
+            if price <= stop_loss or current['st_direction'] == -1:
+                realized = long_size * ct_val * (price - long_entry)
+                ok = close_position_market(symbol, 'long', long_size)
+                if ok:
+                    self.stats['trades'] += 1
+                    if realized > 0:
+                        self.stats['wins'] += 1
+                    else:
+                        self.stats['losses'] += 1
+                    self.stats['realized_pnl'] += realized
+                    self.stats['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log.info(f'{symbol} 多头止损/反转: 已实现={realized:.2f}')
+                    notify_event('多头平仓', f'{symbol} 已实现={realized:.2f}')
+                    return True
+            
+            # 止盈
+            target_profit = RISK_REWARD_RATIO * abs(long_entry - stop_loss) / long_entry
+            if pnl_pct >= target_profit:
+                realized = long_size * ct_val * (price - long_entry)
+                ok = close_position_market(symbol, 'long', long_size)
+                if ok:
+                    self.stats['trades'] += 1
+                    if realized > 0:
+                        self.stats['wins'] += 1
+                    else:
+                        self.stats['losses'] += 1
+                    self.stats['realized_pnl'] += realized
+                    self.stats['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log.info(f'{symbol} 多头止盈: 已实现={realized:.2f}')
+                    notify_event('多头止盈', f'{symbol} 已实现={realized:.2f}')
+                    return True
+        
+        # 空头出场
+        if short_size > 0 and short_entry > 0:
+            stop_loss = float(current['stop_loss_short'])
+            pnl_pct = (short_entry - price) / short_entry
+            
+            # 止损
+            if price >= stop_loss or current['st_direction'] == 1:
+                realized = short_size * ct_val * (short_entry - price)
+                ok = close_position_market(symbol, 'short', short_size)
+                if ok:
+                    self.stats['trades'] += 1
+                    if realized > 0:
+                        self.stats['wins'] += 1
+                    else:
+                        self.stats['losses'] += 1
+                    self.stats['realized_pnl'] += realized
+                    self.stats['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log.info(f'{symbol} 空头止损/反转: 已实现={realized:.2f}')
+                    notify_event('空头平仓', f'{symbol} 已实现={realized:.2f}')
+                    return True
+            
+            # 止盈
+            target_profit = RISK_REWARD_RATIO * abs(stop_loss - short_entry) / short_entry
+            if pnl_pct >= target_profit:
+                realized = short_size * ct_val * (short_entry - price)
+                ok = close_position_market(symbol, 'short', short_size)
+                if ok:
+                    self.stats['trades'] += 1
+                    if realized > 0:
+                        self.stats['wins'] += 1
+                    else:
+                        self.stats['losses'] += 1
+                    self.stats['realized_pnl'] += realized
+                    self.stats['last_update'] = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
+                    log.info(f'{symbol} 空头止盈: 已实现={realized:.2f}')
+                    notify_event('空头止盈', f'{symbol} 已实现={realized:.2f}')
+                    return True
+        
+        return False
+    
+    def process_symbol(self, symbol: str):
+        try:
+            df = self.get_historical_data(symbol)
+            if df is None:
+                return
+            
+            df = self.calculate_all_indicators(df)
+            if df is None:
+                return
+            
+            # 检查出场条件
+            exited = self.check_exit_conditions(symbol, df)
+            if exited:
+                cur_bar_ts = int(df.iloc[-1]['timestamp'].timestamp())
+                self.last_bar_ts[symbol] = cur_bar_ts
+                return
+            
+            # 检查入场信号
+            both = get_positions_both(symbol)
+            long_size = both['long']['size']
+            short_size = both['short']['size']
+            
+            if long_size > 0 or short_size > 0:
+                return
+            
+            # 防止重复操作
+            cur_bar_ts = int(df.iloc[-1]['timestamp'].timestamp())
+            if self.last_bar_ts.get(symbol) == cur_bar_ts:
+                return
+            
+            signal = self.generate_signal(df, symbol)
+            
+            if signal == 'BUY':
+                ok = place_market_order(symbol, 'buy', BUDGET_USDT)
+                if ok:
+                    log.info(f'{symbol} 三指标共振做多信号')
+                    notify_event('开多仓', f'{symbol} SuperTrend+QQE+AV2共振')
+                    self.last_bar_ts[symbol] = cur_bar_ts
+            
+            elif signal == 'SELL':
+                ok = place_market_order(symbol, 'sell', BUDGET_USDT)
+                if ok:
+                    log.info(f'{symbol} 三指标共振做空信号')
+                    notify_event('开空仓', f'{symbol} SuperTrend+QQE+AV2共振')
+                    self.last_bar_ts[symbol] = cur_bar_ts
+        
+        except Exception as e:
+            log.warning(f'{symbol} 处理异常: {e}')
+    
+    def run(self):
+        log.info('=' * 70)
+        log.info(f'三指标策略启动 - {TIMEFRAME}')
+        log.info(f'SuperTrend: 周期={SUPERTREND_PERIOD}, 乘数={SUPERTREND_MULTIPLIER}')
+        log.info(f'QQE MOD: RSI周期={QQE_RSI_PERIOD}, SF={QQE_SF}')
+        log.info(f'A-V2: 周期={AV2_PERIOD}, ATR乘数={AV2_ATR_MULTIPLIER}')
+        log.info('=' * 70)
+        
+        if not DRY_RUN:
+            ensure_position_mode()
+            for sym in SYMBOLS:
+                ensure_leverage(sym)
+        
+        cycle = 0
+        while True:
             try:
-                ohlcv = exchange.fetch_ohlcv(symbol, timeframe=TIMEFRAME, limit=60)
-                if not ohlcv or len(ohlcv) < BB_PERIOD + 10:
-                    log.debug(f'{symbol} insufficient OHLCV: {0 if not ohlcv else len(ohlcv)}')
-                    continue
+                cycle += 1
+                bal = get_balance()
+                winrate = (self.stats['wins'] / self.stats['trades'] * 100) if self.stats['trades'] > 0 else 0.0
                 
-                closes = pd.Series([c[4] for c in ohlcv])
-                highs = pd.Series([c[2] for c in ohlcv])
-                lows = pd.Series([c[3] for c in ohlcv])
+                log.info(f'周期 {cycle}: 余额={bal["free"]:.2f}/{bal["total"]:.2f} USDT | '
+                        f'累计盈亏={self.stats["realized_pnl"]:.2f} | '
+                        f'胜率={winrate:.1f}% ({self.stats["wins"]}/{self.stats["trades"]})')
                 
-                # 计算技术指标
-                upper, middle, lower, bandwidth = calculate_bollinger_bands(closes, BB_PERIOD, BB_STD)
-                atr = calc_atr(highs, lows, closes, ATR_PERIOD)
-                adx = calc_adx(highs, lows, closes, ADX_PERIOD)
+                for symbol in SYMBOLS:
+                    self.process_symbol(symbol)
                 
-                # 判断趋势和带宽状态
-                trend = detect_bb_trend(middle, BB_SLOPE_PERIOD)
-                bandwidth_status = detect_bandwidth_change(bandwidth, BB_SLOPE_PERIOD)
+                time.sleep(SCAN_INTERVAL)
                 
-                # 获取当前价格和指标值
-                price = float(closes.iloc[-1])
-                curr_upper = float(upper.iloc[-1])
-                curr_middle = float(middle.iloc[-1])
-                curr_lower = float(lower.iloc[-1])
-                curr_bandwidth = float(bandwidth.iloc[-1])
-                curr_atr = float(atr.iloc[-1])
-                prev_close = float(closes.iloc[-2]) if len(closes) >= 2 else price
-                adx_last = float(adx.iloc[-1])
-                
-                # 更新状态
-                prev_state = symbol_state[symbol]
-                upper_run = (prev_state.get('upper_run', 0) + 1) if price >= curr_upper * (1 - PRICE_TOLERANCE) else 0
-                symbol_state[symbol] = {
-                    'trend': trend,
-                    'bandwidth_status': bandwidth_status,
-                    'upper': curr_upper,
-                    'middle': curr_middle,
-                    'lower': curr_lower,
-                    'bandwidth': curr_bandwidth,
-                    'atr': curr_atr,
-                    'upper_run': upper_run,
-                    'lower_run': (prev_state.get('lower_run', 0) + 1) if price <= curr_lower * (1 + PRICE_TOLERANCE) else 0,
-                    'adx': adx_last
-                }
-                
-                # 状态变化通知
-                if prev_state.get('trend') != trend or prev_state.get('bandwidth_status') != bandwidth_status:
-                    log.info(f'{symbol} 状态变化: 趋势={trend}, 带宽={bandwidth_status}, 价格={price:.6f}, ATR={curr_atr:.6f}')
-                
-                # 获取当前持仓
-                both = get_positions_both(symbol)
-                long_size = float(both['long']['size'])
-                long_entry = float(both['long']['entry'])
-                short_size = float(both['short']['size'])
-                short_entry = float(both['short']['entry'])
-                
-                # 峰值追踪：若无持仓则重置峰值/谷值
-                if TRAIL_ENABLE:
-                    if long_size <= 0:
-                        symbol_state[symbol]['peak_long'] = None
-                    if short_size <= 0:
-                        symbol_state[symbol]['peak_short'] = None
-                
-                # 确保只在K线收盘后操作一次
-                cur_bar_ts = get_last_closed_bar_ts(ohlcv[-1])
-                acted_key = last_bar_ts.get(symbol)
-                
-                # ========== 动态止盈止损监控（多头） ==========
-                if long_size > 0 and long_entry > 0 and price > 0:
-                    pnl_pct = (price - long_entry) / long_entry
-                    try:
-                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                    except Exception:
-                        ct_val = 0.0
-                    unreal = long_size * ct_val * (price - long_entry)
-                    
-                    # 动态止损价 = 开仓价 - ATR倍数
-                    dynamic_sl_price = long_entry - (SL_ATR_MULTIPLIER * curr_atr)
-                    
-                    # 峰值追踪：更新峰值并计算从峰值的回撤
-                    if TRAIL_ENABLE:
-                        prev_peak = symbol_state.get(symbol, {}).get('peak_long')
-                        new_peak = max(prev_peak or price, price)
-                        symbol_state[symbol]['peak_long'] = new_peak
-                        drawdown_from_peak = (new_peak - price) / new_peak if new_peak > 0 else 0.0
-                    else:
-                        drawdown_from_peak = 0.0
-                    
-                    log.debug(f'持仓 {symbol} 多头: 数量={long_size} 开仓={long_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct*100:.2f}%) 动态止损={dynamic_sl_price:.6f} 峰值={symbol_state.get(symbol, {}).get("peak_long")} 回撤={drawdown_from_peak*100:.2f}%')
-                    
-                    # 1. 峰值追踪止盈（优先级最高，先于 ATR 动态止损）
-                    if TRAIL_ENABLE and pnl_pct > 0 and drawdown_from_peak >= TRAIL_DD_PCT if TRAIL_REQUIRE_PROFIT else TRAIL_ENABLE and drawdown_from_peak >= TRAIL_DD_PCT:
-                        close_price = price
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 多头峰值回撤止盈: 回撤={drawdown_from_peak*100:.2f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('多头峰值回撤止盈', f'{symbol} 回撤={drawdown_from_peak*100:.2f}% 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 2. 动态止损检查
-                    if price <= dynamic_sl_price:
-                        close_price = price
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 多头动态止损: ATR={curr_atr:.6f} 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('多头动态止损', f'{symbol} ATR止损 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 2. 固定止盈检查（兜底）
-                    if pnl_pct >= TP_PCT:
-                        close_price = price
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 多头固定止盈: {pnl_pct*100:.1f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('多头固定止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 3. 动态止盈：布林带追踪
-                    upper_run = symbol_state.get(symbol, {}).get('upper_run', 0)
-                    if upper_run >= 3:
-                        # 价格连续在上轨运行>=3根K，跌破中轨止盈
-                        if price <= curr_middle * (1 - PRICE_TOLERANCE):
-                            close_price = price
-                            realized = long_size * ct_val * (close_price - long_entry)
-                            ok = close_position_market(symbol, 'long', long_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 中轨追踪止盈: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('中轨追踪止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                                continue
-                    else:
-                        # 常规情况：触及上轨平仓
-                        if price >= curr_upper * (1 - PRICE_TOLERANCE):
-                            close_price = price
-                            realized = long_size * ct_val * (close_price - long_entry)
-                            ok = close_position_market(symbol, 'long', long_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 触及上轨平仓: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('触及上轨平仓', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                                continue
-                
-                # ========== 动态止盈止损监控（空头） ==========
-                if short_size > 0 and short_entry > 0 and price > 0:
-                    pnl_pct_s = (short_entry - price) / short_entry
-                    try:
-                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                    except Exception:
-                        ct_val = 0.0
-                    unreal = short_size * ct_val * (short_entry - price)
-                    
-                    # 动态止损价 = 开仓价 + ATR倍数
-                    dynamic_sl_price = short_entry + (SL_ATR_MULTIPLIER * curr_atr)
-                    
-                    # 峰值追踪（空头用“谷值”）：更新空头的最佳价（最低价）并计算从谷值的回撤（反向上涨幅）
-                    if TRAIL_ENABLE:
-                        prev_peak_s = symbol_state.get(symbol, {}).get('peak_short')
-                        new_peak_s = min(prev_peak_s or price, price)
-                        symbol_state[symbol]['peak_short'] = new_peak_s
-                        drawup_from_valley = (price - new_peak_s) / new_peak_s if new_peak_s > 0 else 0.0
-                    else:
-                        drawup_from_valley = 0.0
-                    
-                    log.debug(f'持仓 {symbol} 空头: 数量={short_size} 开仓={short_entry:.6f} 现价={price:.6f} 浮动={unreal:.2f} ({pnl_pct_s*100:.2f}%) 动态止损={dynamic_sl_price:.6f} 谷值={symbol_state.get(symbol, {}).get("peak_short")} 回升={drawup_from_valley*100:.2f}%')
-                    
-                    # 1. 峰值追踪止盈（优先级最高，先于 ATR 动态止损；空头为谷值反弹）
-                    if TRAIL_ENABLE and pnl_pct_s > 0 and drawup_from_valley >= TRAIL_DD_PCT if TRAIL_REQUIRE_PROFIT else TRAIL_ENABLE and drawup_from_valley >= TRAIL_DD_PCT:
-                        close_price = price
-                        realized = short_size * ct_val * (short_entry - close_price)
-                        ok = close_position_market(symbol, 'short', short_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 空头谷值回升止盈: 回升={drawup_from_valley*100:.2f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('空头谷值回升止盈', f'{symbol} 回升={drawup_from_valley*100:.2f}% 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 2. 动态止损
-                    if price >= dynamic_sl_price:
-                        close_price = price
-                        realized = short_size * ct_val * (short_entry - close_price)
-                        ok = close_position_market(symbol, 'short', short_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 空头动态止损: ATR={curr_atr:.6f} 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('空头动态止损', f'{symbol} ATR止损 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 2. 固定止盈
-                    if pnl_pct_s >= TP_PCT:
-                        close_price = price
-                        realized = short_size * ct_val * (short_entry - close_price)
-                        ok = close_position_market(symbol, 'short', short_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 空头固定止盈: {pnl_pct_s*100:.1f}% 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('空头固定止盈', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                            continue
-                    
-                    # 3. 动态止盈：布林带追踪
-                    lower_run = symbol_state.get(symbol, {}).get('lower_run', 0)
-                    if lower_run >= 3:
-                        if price >= curr_middle * (1 + PRICE_TOLERANCE):
-                            close_price = price
-                            realized = short_size * ct_val * (short_entry - close_price)
-                            ok = close_position_market(symbol, 'short', short_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 中轨追踪止盈(空): 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('中轨追踪止盈(空)', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                                continue
-                    else:
-                        if price <= curr_lower * (1 + PRICE_TOLERANCE):
-                            close_price = price
-                            realized = short_size * ct_val * (short_entry - close_price)
-                            ok = close_position_market(symbol, 'short', short_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 触及下轨平空: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('触及下轨平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                                continue
-                
-                # ========== 收口观望 ==========
-                if bandwidth_status == 'squeezing':
-                    log.debug(f'{symbol} 收口阶段，观望等方向')
-                    continue
-                
-                # ========== 开口向下 + 持多仓 -> 紧急平仓 ==========
-                if bandwidth_status == 'expanding' and trend == 'down' and long_size > 0:
-                    try:
-                        close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                    except Exception:
-                        close_price, ct_val = 0.0, 0.0
-                    realized = long_size * ct_val * (close_price - long_entry)
-                    ok = close_position_market(symbol, 'long', long_size)
-                    if ok:
-                        stats['trades'] += 1
-                        if realized > 0:
-                            stats['wins'] += 1
-                        else:
-                            stats['losses'] += 1
-                        stats['realized_pnl'] += realized
-                        log.info(f'{symbol} 开口向下紧急平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                        notify_event('开口向下紧急平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                        last_bar_ts[symbol] = cur_bar_ts
-                        continue
-                
-                # 避免同一K线重复操作
-                if acted_key == cur_bar_ts:
-                    log.debug(f'{symbol} 该K线已处理过，跳过')
-                    continue
-                
-                # ADX 震荡过滤
-                if trend == 'flat' and adx_last < ADX_MIN_TREND:
-                    log.debug(f"{symbol} ADX过低({adx_last:.1f})，震荡期需额外确认")
-                
-                # ========== 中线向上策略 ==========
-                if trend == 'up':
-                    # 回踩中轨开多
-                    if price <= curr_middle * (1 + PRICE_TOLERANCE) and not (long_size > 0):
-                        ok = place_market_order(symbol, 'buy', BUDGET_USDT)
-                        if ok:
-                            log.info(f'{symbol} 上升趋势回踩中轨开多')
-                            last_bar_ts[symbol] = cur_bar_ts
-                    
-                    # 开口向上 + 已有多头 -> 加仓
-                    if bandwidth_status == 'expanding' and long_size > 0:
-                        ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=0.3)
-                        if ok:
-                            log.info(f'{symbol} 开口向上加仓多头30%')
-                            notify_event('开口向上加仓', f'{symbol} 追加30%')
-                            last_bar_ts[symbol] = cur_bar_ts
-                    
-                    # 开口向上 + 持空仓 -> 紧急平空
-                    if bandwidth_status == 'expanding' and short_size > 0:
-                        close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                        ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                        realized = short_size * ct_val * (short_entry - close_price)
-                        ok = close_position_market(symbol, 'short', short_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 开口向上紧急平空: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('开口向上紧急平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                
-                # ========== 中线向下策略 ==========
-                elif trend == 'down':
-                    # 有多头，中轨反弹即平
-                    if long_size > 0 and price >= curr_middle * (1 - PRICE_TOLERANCE):
-                        try:
-                            close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                            ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                        except Exception:
-                            close_price, ct_val = 0.0, 0.0
-                        realized = long_size * ct_val * (close_price - long_entry)
-                        ok = close_position_market(symbol, 'long', long_size)
-                        if ok:
-                            stats['trades'] += 1
-                            if realized > 0:
-                                stats['wins'] += 1
-                            else:
-                                stats['losses'] += 1
-                            stats['realized_pnl'] += realized
-                            log.info(f'{symbol} 下降趋势反弹中轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                            notify_event('下降趋势平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                            last_bar_ts[symbol] = cur_bar_ts
-                    
-                    # 抢反弹（高风险，默认禁用）
-                    if ENABLE_DOWNTREND_BOUNCE and price <= curr_lower * (1 + PRICE_TOLERANCE) and not (long_size > 0):
-                        ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=DOWNTREND_POSITION_RATIO)
-                        if ok:
-                            log.info(f'{symbol} 下降趋势下轨抢反弹（{DOWNTREND_POSITION_RATIO*100:.0f}%）')
-                            notify_event('抢反弹开仓', f'{symbol} 下轨 {DOWNTREND_POSITION_RATIO*100:.0f}%仓')
-                            last_bar_ts[symbol] = cur_bar_ts
-                
-                # ========== 震荡市策略（多重确认） ==========
-                elif trend == 'flat':
-                    is_flat_env = (adx_last < ADX_MIN_TREND and bandwidth_status in ('stable', 'squeezing'))
-                    
-                    if is_flat_env:
-                        # === 下轨开多：3重确认 ===
-                        lower_touch_prev = (prev_close <= curr_lower * (1 + PRICE_TOLERANCE))
-                        lower_reject_now = (price > curr_lower * (1 + PRICE_TOLERANCE))
-                        
-                        # K线形态确认：锤子线
-                        has_hammer = check_hammer_pattern(ohlcv, -1) or check_hammer_pattern(ohlcv, -2)
-                        
-                        # 盈亏比确认
-                        entry_est = price
-                        target_est = curr_upper
-                        stop_est = curr_lower - (SL_ATR_MULTIPLIER * curr_atr)
-                        risk_reward = calculate_risk_reward(entry_est, target_est, stop_est)
-                        
-                        if lower_touch_prev and lower_reject_now and has_hammer and risk_reward >= MIN_RISK_REWARD and not (long_size > 0):
-                            ok = place_market_order(symbol, 'buy', BUDGET_USDT, position_ratio=0.5)
-                            if ok:
-                                log.info(f'{symbol} 震荡市下轨多重确认开多(50%) RR={risk_reward:.2f}:1')
-                                notify_event('震荡市确认开多', f'{symbol} 盈亏比={risk_reward:.2f}:1')
-                                last_bar_ts[symbol] = cur_bar_ts
-                        elif lower_touch_prev and lower_reject_now and not (long_size > 0):
-                            log.debug(f'{symbol} 下轨信号但未通过确认: hammer={has_hammer} RR={risk_reward:.2f}')
-                        
-                        # === 上轨平多 ===
-                        if long_size > 0 and price >= curr_upper * (1 - PRICE_TOLERANCE):
-                            try:
-                                close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                                ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                            except Exception:
-                                close_price, ct_val = 0.0, 0.0
-                            realized = long_size * ct_val * (close_price - long_entry)
-                            ok = close_position_market(symbol, 'long', long_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 震荡市上轨平多: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('震荡市平多', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                        
-                        # === 上轨开空：3重确认 ===
-                        upper_touch_prev = (prev_close >= curr_upper * (1 - PRICE_TOLERANCE))
-                        upper_reject_now = (price < curr_upper * (1 - PRICE_TOLERANCE))
-                        
-                        # K线形态：流星线
-                        has_star = check_shooting_star_pattern(ohlcv, -1) or check_shooting_star_pattern(ohlcv, -2)
-                        
-                        # 盈亏比确认（空头）
-                        entry_est_s = price
-                        target_est_s = curr_lower
-                        stop_est_s = curr_upper + (SL_ATR_MULTIPLIER * curr_atr)
-                        risk_reward_s = calculate_risk_reward(entry_est_s, target_est_s, stop_est_s)
-                        
-                        if upper_touch_prev and upper_reject_now and has_star and risk_reward_s >= MIN_RISK_REWARD and not (short_size > 0):
-                            ok = place_market_order(symbol, 'sell', BUDGET_USDT, position_ratio=0.5)
-                            if ok:
-                                log.info(f'{symbol} 震荡市上轨多重确认开空(50%) RR={risk_reward_s:.2f}:1')
-                                notify_event('震荡市确认开空', f'{symbol} 盈亏比={risk_reward_s:.2f}:1')
-                                last_bar_ts[symbol] = cur_bar_ts
-                        elif upper_touch_prev and upper_reject_now and not (short_size > 0):
-                            log.debug(f'{symbol} 上轨信号但未通过确认: star={has_star} RR={risk_reward_s:.2f}')
-                        
-                        # === 下轨平空 ===
-                        if short_size > 0 and price <= curr_lower * (1 + PRICE_TOLERANCE):
-                            try:
-                                close_price = float(exchange.fetch_ticker(symbol)['last'] or 0)
-                                ct_val = float(load_market_info(symbol).get('ctVal') or 0)
-                            except Exception:
-                                close_price, ct_val = 0.0, 0.0
-                            realized = short_size * ct_val * (short_entry - close_price)
-                            ok = close_position_market(symbol, 'short', short_size)
-                            if ok:
-                                stats['trades'] += 1
-                                if realized > 0:
-                                    stats['wins'] += 1
-                                else:
-                                    stats['losses'] += 1
-                                stats['realized_pnl'] += realized
-                                log.info(f'{symbol} 震荡市下轨平空: 已实现={realized:.2f} | 累计={stats["realized_pnl"]:.2f}')
-                                notify_event('震荡市平空', f'{symbol} 已实现={realized:.2f} 累计={stats["realized_pnl"]:.2f}')
-                                last_bar_ts[symbol] = cur_bar_ts
-                
+            except KeyboardInterrupt:
+                log.info('收到退出信号')
+                break
             except Exception as e:
-                log.warning(f'{symbol} 处理异常: {e}')
-                continue
+                log.warning(f'主循环异常: {e}')
+                time.sleep(SCAN_INTERVAL)
+
+# ==================== Web界面 ====================
+app = Flask(__name__)
+strategy = TradingStrategy()
+
+HTML_TEMPLATE = """
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>OKX三指标策略监控</title>
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        body { 
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: #333;
+            padding: 20px;
+            min-height: 100vh;
+        }
+        .container { max-width: 1400px; margin: 0 auto; }
+        .header {
+            background: white;
+            border-radius: 16px;
+            padding: 30px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        .header h1 { 
+            font-size: 28px; 
+            color: #667eea;
+            margin-bottom: 10px;
+            display: flex;
+            align-items: center;
+        }
+        .status-badge {
+            display: inline-block;
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+            margin-left: 15px;
+        }
+        .status-live { background: #10b981; color: white; }
+        .status-dry { background: #f59e0b; color: white; }
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 15px;
+            margin-top: 20px;
+        }
+        .stat-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.1);
+        }
+        .stat-label { font-size: 12px; opacity: 0.9; margin-bottom: 5px; }
+        .stat-value { font-size: 28px; font-weight: 700; }
+        .stat-small { font-size: 14px; margin-top: 5px; opacity: 0.8; }
         
-        time.sleep(SCAN_INTERVAL)
+        .positions-section {
+            background: white;
+            border-radius: 16px;
+            padding: 25px;
+            margin-bottom: 20px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.1);
+        }
+        .section-title {
+            font-size: 20px;
+            font-weight: 700;
+            color: #333;
+            margin-bottom: 20px;
+            display: flex;
+            align-items: center;
+        }
+        .section-title::before {
+            content: '';
+            width: 4px;
+            height: 24px;
+            background: #667eea;
+            margin-right: 10px;
+            border-radius: 2px;
+        }
+        
+        .position-grid {
+            display: grid;
+            gap: 15px;
+        }
+        .position-card {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 20px;
+            border-left: 4px solid #667eea;
+        }
+        .position-card.long { border-left-color: #10b981; }
+        .position-card.short { border-left-color: #ef4444; }
+        .position-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .symbol { font-size: 18px; font-weight: 700; color: #111; }
+        .position-badge {
+            padding: 4px 12px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 600;
+        }
+        .badge-long { background: #d1fae5; color: #065f46; }
+        .badge-short { background: #fee2e2; color: #991b1b; }
+        .position-details {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(150px, 1fr));
+            gap: 15px;
+        }
+        .detail-item {
+            background: white;
+            padding: 12px;
+            border-radius: 8px;
+        }
+        .detail-label { font-size: 11px; color: #6b7280; margin-bottom: 4px; }
+        .detail-value { font-size: 16px; font-weight: 600; color: #111; }
+        .pnl-positive { color: #10b981; }
+        .pnl-negative { color: #ef4444; }
+        
+        .symbols-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(300px, 1fr));
+            gap: 15px;
+        }
+        .symbol-card {
+            background: #f9fafb;
+            border-radius: 12px;
+            padding: 20px;
+            border: 2px solid #e5e7eb;
+            transition: all 0.3s;
+        }
+        .symbol-card:hover {
+            border-color: #667eea;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 12px rgba(102, 126, 234, 0.2);
+        }
+        .symbol-card.signal-buy { border-color: #10b981; background: #f0fdf4; }
+        .symbol-card.signal-sell { border-color: #ef4444; background: #fef2f2; }
+        
+        .symbol-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 15px;
+        }
+        .signal-badge {
+            padding: 6px 14px;
+            border-radius: 20px;
+            font-size: 12px;
+            font-weight: 700;
+        }
+        .signal-buy-badge { background: #10b981; color: white; }
+        .signal-sell-badge { background: #ef4444; color: white; }
+        .signal-hold-badge { background: #6b7280; color: white; }
+        
+        .indicators {
+            display: flex;
+            gap: 10px;
+            margin-bottom: 10px;
+        }
+        .indicator {
+            flex: 1;
+            background: white;
+            padding: 10px;
+            border-radius: 8px;
+            text-align: center;
+        }
+        .indicator-label { font-size: 10px; color: #6b7280; margin-bottom: 4px; }
+        .indicator-value {
+            font-size: 14px;
+            font-weight: 700;
+        }
+        .indicator-up { color: #10b981; }
+        .indicator-down { color: #ef4444; }
+        .indicator-flat { color: #6b7280; }
+        
+        .price-info { font-size: 24px; font-weight: 700; color: #111; margin: 10px 0; }
+        .last-update { font-size: 11px; color: #9ca3af; }
+        
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.6; }
+        }
+        .loading { animation: pulse 2s infinite; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="header">
+            <h1>
+                🚀 OKX三指标策略监控
+                <span class="status-badge status-{{ 'dry' if dry_run else 'live' }}">
+                    {{ 'DRY RUN' if dry_run else 'LIVE' }}
+                </span>
+            </h1>
+            <div class="stats-grid">
+                <div class="stat-card">
+                    <div class="stat-label">账户余额</div>
+                    <div class="stat-value" id="balance">-</div>
+                    <div class="stat-small" id="balance-used">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">累计盈亏</div>
+                    <div class="stat-value" id="pnl">-</div>
+                    <div class="stat-small">已实现</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">交易次数</div>
+                    <div class="stat-value" id="trades">-</div>
+                    <div class="stat-small" id="winrate">-</div>
+                </div>
+                <div class="stat-card">
+                    <div class="stat-label">最后更新</div>
+                    <div class="stat-value" style="font-size: 16px;" id="last-update">-</div>
+                    <div class="stat-small">自动刷新中...</div>
+                </div>
+            </div>
+        </div>
+        
+        <div class="positions-section">
+            <div class="section-title">💼 当前持仓</div>
+            <div class="position-grid" id="positions">
+                <div style="text-align: center; padding: 40px; color: #9ca3af;">
+                    暂无持仓
+                </div>
+            </div>
+        </div>
+        
+        <div class="positions-section">
+            <div class="section-title">📊 交易对状态</div>
+            <div class="symbols-grid" id="symbols"></div>
+        </div>
+    </div>
+    
+    <script>
+        function updateDashboard() {
+            fetch('/api/status')
+                .then(r => r.json())
+                .then(data => {
+                    // 更新统计
+                    document.getElementById('balance').textContent = 
+                        data.balance.free.toFixed(2) + ' USDT';
+                    document.getElementById('balance-used').textContent = 
+                        '已用: ' + data.balance.used.toFixed(2) + ' USDT';
+                    
+                    const pnl = data.stats.realized_pnl;
+                    document.getElementById('pnl').textContent = 
+                        (pnl >= 0 ? '+' : '') + pnl.toFixed(2) + ' USDT';
+                    document.getElementById('pnl').className = 
+                        'stat-value ' + (pnl >= 0 ? 'pnl-positive' : 'pnl-negative');
+                    
+                    document.getElementById('trades').textContent = data.stats.trades;
+                    const winrate = data.stats.trades > 0 ? 
+                        (data.stats.wins / data.stats.trades * 100).toFixed(1) : 0;
+                    document.getElementById('winrate').textContent = 
+                        '胜率: ' + winrate + '% (' + data.stats.wins + '/' + data.stats.trades + ')';
+                    
+                    document.getElementById('last-update').textContent = 
+                        data.stats.last_update;
+                    
+                    // 更新持仓
+                    const positionsHtml = data.positions.map(p => `
+                        <div class="position-card ${p.side}">
+                            <div class="position-header">
+                                <span class="symbol">${p.symbol}</span>
+                                <span class="position-badge badge-${p.side}">
+                                    ${p.side.toUpperCase()}
+                                </span>
+                            </div>
+                            <div class="position-details">
+                                <div class="detail-item">
+                                    <div class="detail-label">开仓价格</div>
+                                    <div class="detail-value">${p.entry.toFixed(6)}</div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">当前价格</div>
+                                    <div class="detail-value">${p.current_price.toFixed(6)}</div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">仓位大小</div>
+                                    <div class="detail-value">${p.size}</div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">浮动盈亏</div>
+                                    <div class="detail-value ${p.pnl >= 0 ? 'pnl-positive' : 'pnl-negative'}">
+                                        ${(p.pnl >= 0 ? '+' : '')}${p.pnl.toFixed(2)} USDT
+                                    </div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">盈亏比例</div>
+                                    <div class="detail-value ${p.pnl_pct >= 0 ? 'pnl-positive' : 'pnl-negative'}">
+                                        ${(p.pnl_pct >= 0 ? '+' : '')}${p.pnl_pct.toFixed(2)}%
+                                    </div>
+                                </div>
+                                <div class="detail-item">
+                                    <div class="detail-label">止损价格</div>
+                                    <div class="detail-value">${p.stop_loss.toFixed(6)}</div>
+                                </div>
+                            </div>
+                        </div>
+                    `).join('');
+                    
+                    document.getElementById('positions').innerHTML = 
+                        positionsHtml || '<div style="text-align: center; padding: 40px; color: #9ca3af;">暂无持仓</div>';
+                    
+                    // 更新交易对状态
+                    const symbolsHtml = data.symbols.map(s => `
+                        <div class="symbol-card signal-${s.signal.toLowerCase()}">
+                            <div class="symbol-header">
+                                <span class="symbol">${s.symbol.split('/')[0]}</span>
+                                <span class="signal-badge signal-${s.signal.toLowerCase()}-badge">
+                                    ${s.signal}
+                                </span>
+                            </div>
+                            <div class="price-info">${s.price.toFixed(6)}</div>
+                            <div class="indicators">
+                                <div class="indicator">
+                                    <div class="indicator-label">SuperTrend</div>
+                                    <div class="indicator-value ${s.st_direction > 0 ? 'indicator-up' : s.st_direction < 0 ? 'indicator-down' : 'indicator-flat'}">
+                                        ${s.st_direction > 0 ? '↑ 看涨' : s.st_direction < 0 ? '↓ 看跌' : '→ 中性'}
+                                    </div>
+                                </div>
+                                <div class="indicator">
+                                    <div class="indicator-label">QQE MOD</div>
+                                    <div class="indicator-value ${s.qqe_trend > 0 ? 'indicator-up' : s.qqe_trend < 0 ? 'indicator-down' : 'indicator-flat'}">
+                                        ${s.qqe_trend > 0 ? '↑ 趋势' : s.qqe_trend < 0 ? '↓ 趋势' : '→ 震荡'}
+                                    </div>
+                                </div>
+                                <div class="indicator">
+                                    <div class="indicator-label">A-V2</div>
+                                    <div class="indicator-value ${s.av2_trend > 0 ? 'indicator-up' : s.av2_trend < 0 ? 'indicator-down' : 'indicator-flat'}">
+                                        ${s.av2_trend > 0 ? '↑ 多头' : s.av2_trend < 0 ? '↓ 空头' : '→ 中性'}
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="last-update">更新: ${s.last_update}</div>
+                        </div>
+                    `).join('');
+                    
+                    document.getElementById('symbols').innerHTML = symbolsHtml;
+                })
+                .catch(err => console.error('Error:', err));
+        }
+        
+        updateDashboard();
+        setInterval(updateDashboard, 5000);
+    </script>
+</body>
+</html>
+"""
+
+@app.route('/')
+def index():
+    return render_template_string(HTML_TEMPLATE, dry_run=DRY_RUN)
+
+@app.route('/api/status')
+def api_status():
+    try:
+        bal = get_balance()
+        
+        positions = []
+        for symbol in SYMBOLS:
+            both = get_positions_both(symbol)
+            
+            if both['long']['size'] > 0:
+                state = strategy.symbol_state.get(symbol, {})
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = float(ticker['last'])
+                    ct_val = float(load_market_info(symbol).get('ctVal') or 0.01)
+                    pnl = both['long']['size'] * ct_val * (current_price - both['long']['entry'])
+                    pnl_pct = (current_price - both['long']['entry']) / both['long']['entry'] * 100
+                except:
+                    current_price = 0
+                    pnl = 0
+                    pnl_pct = 0
+                
+                positions.append({
+                    'symbol': symbol,
+                    'side': 'long',
+                    'size': both['long']['size'],
+                    'entry': both['long']['entry'],
+                    'current_price': current_price,
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'stop_loss': state.get('stop_loss_long', 0)
+                })
+            
+            if both['short']['size'] > 0:
+                state = strategy.symbol_state.get(symbol, {})
+                try:
+                    ticker = exchange.fetch_ticker(symbol)
+                    current_price = float(ticker['last'])
+                    ct_val = float(load_market_info(symbol).get('ctVal') or 0.01)
+                    pnl = both['short']['size'] * ct_val * (both['short']['entry'] - current_price)
+                    pnl_pct = (both['short']['entry'] - current_price) / both['short']['entry'] * 100
+                except:
+                    current_price = 0
+                    pnl = 0
+                    pnl_pct = 0
+                
+                positions.append({
+                    'symbol': symbol,
+                    'side': 'short',
+                    'size': both['short']['size'],
+                    'entry': both['short']['entry'],
+                    'current_price': current_price,
+                    'pnl': pnl,
+                    'pnl_pct': pnl_pct,
+                    'stop_loss': state.get('stop_loss_short', 0)
+                })
+        
+        symbols_status = []
+        for symbol in SYMBOLS:
+            state = strategy.symbol_state.get(symbol, {})
+            symbols_status.append({
+                'symbol': symbol,
+                'price': state.get('price', 0),
+                'signal': state.get('signal', 'HOLD'),
+                'st_direction': state.get('st_direction', 0),
+                'qqe_trend': state.get('qqe_trend', 0),
+                'av2_trend': state.get('av2_trend', 0),
+                'last_update': state.get('last_update', '')
+            })
+        
+        return jsonify({
+            'balance': bal,
+            'stats': strategy.stats,
+            'positions': positions,
+            'symbols': symbols_status
+        })
     except Exception as e:
-        log.warning(f'主循环异常: {e}')
-        time.sleep(SCAN_INTERVAL)
+        log.error(f'API error: {e}')
+        return jsonify({'error': str(e)}), 500
+
+def run_web_server():
+    port = int(os.environ.get('PORT', 8080))
+    app.run(host='0.0.0.0', port=port, debug=False, use_reloader=False)
+
+# ==================== 主程序 ====================
+if __name__ == "__main__":
+    # 启动Web服务器（后台线程）
+    web_thread = Thread(target=run_web_server, daemon=True)
+    web_thread.start()
+    log.info(f'Web界面已启动: http://0.0.0.0:{os.environ.get("PORT", 8080)}')
+    
+    # 启动策略主循环
+    strategy.run()

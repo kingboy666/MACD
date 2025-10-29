@@ -1,0 +1,10 @@
+# Railway 项目配置
+# 使用 Nixpacks 自动识别 Python 并安装 requirements.txt
+[build]
+builder = "nixpacks"
+
+# 部署与服务配置
+[[services]]
+name = "okx-three-indicators-bot"
+start = "python -u main.py"
+restartPolicy = "always"
