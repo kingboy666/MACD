@@ -148,6 +148,10 @@ SYMBOLS = [
 ]
 
 SYMBOL_LEVERAGE: Dict[str, int] = {
+    'FIL/USDT:USDT': 50,
+    'ZRO/USDT:USDT': 20,
+    'WIF/USDT:USDT': 50,
+    'WLD/USDT:USDT': 50,
     'BTC/USDT:USDT': 100,
     'ETH/USDT:USDT': 100,
     'SOL/USDT:USDT': 50,
@@ -168,6 +172,7 @@ exchange = ccxt.okx({
 })
 
 POS_MODE = os.environ.get('POS_MODE', 'net').strip().lower()
+log.info(f'POS_MODE={POS_MODE}')
 
 def ensure_position_mode():
     try:
