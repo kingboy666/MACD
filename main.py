@@ -121,7 +121,7 @@ DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '5').strip() or 
 TIMEFRAME = os.environ.get('TIMEFRAME', '30m').strip()
 SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '180').strip() or 180))
 USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
-MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '1.0').strip() or 1.0)
+MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.8').strip() or 0.8)
 
 # ==================== 风险管理 ====================
 RISK_PER_TRADE = float(os.environ.get('RISK_PER_TRADE', '0.02').strip() or 0.02)
@@ -131,7 +131,7 @@ MAX_POSITION_SIZE = float(os.environ.get('MAX_POSITION_SIZE', '0.1').strip() or 
 # ==================== 指标参数 ====================
 # SuperTrend
 SUPERTREND_PERIOD = int(os.environ.get('SUPERTREND_PERIOD', '10').strip() or 10)
-SUPERTREND_MULTIPLIER = float(os.environ.get('SUPERTREND_MULTIPLIER', '2.8').strip() or 2.8)
+SUPERTREND_MULTIPLIER = float(os.environ.get('SUPERTREND_MULTIPLIER', '3.5').strip() or 3.5)
 
 # QQE MOD
 QQE_RSI_PERIOD = int(os.environ.get('QQE_RSI_PERIOD', '14').strip() or 14)
@@ -139,7 +139,7 @@ QQE_SF = int(os.environ.get('QQE_SF', '5').strip() or 5)
 
 # A-V2
 AV2_PERIOD = int(os.environ.get('AV2_PERIOD', '10').strip() or 10)
-AV2_ATR_MULTIPLIER = float(os.environ.get('AV2_ATR_MULTIPLIER', '2.2').strip() or 2.2)
+AV2_ATR_MULTIPLIER = float(os.environ.get('AV2_ATR_MULTIPLIER', '3.0').strip() or 3.0)
 
 # ==================== 交易对配置 ====================
 SYMBOLS = [
@@ -172,7 +172,7 @@ exchange = ccxt.okx({
     }
 })
 
-POS_MODE = os.environ.get('POS_MODE', 'hedge').strip().lower()
+POS_MODE = os.environ.get('POS_MODE', 'net').strip().lower()
 log.info(f'POS_MODE={POS_MODE}')
 
 def ensure_position_mode():
