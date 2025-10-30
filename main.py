@@ -118,8 +118,8 @@ if not API_KEY or not API_SECRET or not API_PASS:
 # ==================== 交易配置 ====================
 BUDGET_USDT = float(os.environ.get('BUDGET_USDT', '10').strip() or 10)
 DEFAULT_LEVERAGE = int(float(os.environ.get('DEFAULT_LEVERAGE', '5').strip() or 5))
-TIMEFRAME = os.environ.get('TIMEFRAME', '4h').strip()
-SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '300').strip() or 300))
+TIMEFRAME = os.environ.get('TIMEFRAME', '30m').strip()
+SCAN_INTERVAL = int(float(os.environ.get('SCAN_INTERVAL', '120').strip() or 120))
 USE_BALANCE_AS_MARGIN = os.environ.get('USE_BALANCE_AS_MARGIN', 'true').strip().lower() in ('1', 'true', 'yes')
 MARGIN_UTILIZATION = float(os.environ.get('MARGIN_UTILIZATION', '0.95').strip() or 0.95)
 
@@ -143,8 +143,9 @@ AV2_ATR_MULTIPLIER = float(os.environ.get('AV2_ATR_MULTIPLIER', '2.0').strip() o
 
 # ==================== 交易对配置 ====================
 SYMBOLS = [
-    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT', 
-    'XRP/USDT:USDT', 'ARB/USDT:USDT'
+    'BTC/USDT:USDT', 'ETH/USDT:USDT', 'SOL/USDT:USDT',
+    'XRP/USDT:USDT', 'ARB/USDT:USDT', 'FIL/USDT:USDT',
+    'ZRO/USDT:USDT', 'WIF/USDT:USDT', 'WLD/USDT:USDT'
 ]
 
 SYMBOL_LEVERAGE: Dict[str, int] = {
@@ -171,7 +172,7 @@ exchange = ccxt.okx({
     }
 })
 
-POS_MODE = os.environ.get('POS_MODE', 'net').strip().lower()
+POS_MODE = os.environ.get('POS_MODE', 'hedge').strip().lower()
 log.info(f'POS_MODE={POS_MODE}')
 
 def ensure_position_mode():
